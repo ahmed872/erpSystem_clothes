@@ -4,6 +4,7 @@ import { emailSchema, nameSchema, slugSchema, currencyCodeSchema, passwordSchema
 export * from './primitives';
 export * from './catalog';
 export * from './inventory';
+export * from './purchasing';
 
 export const registerBusinessSchema = z.object({
   businessName: nameSchema,

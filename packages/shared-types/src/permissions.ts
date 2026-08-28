@@ -79,6 +79,20 @@ export const PERMISSION_CODES = [
   'inventory.transfer_receive',
   'inventory.stock_count_create',
   'inventory.stock_count_approve',
+  // Purchasing (Phase 4): Suppliers
+  'suppliers.view',
+  'suppliers.create',
+  'suppliers.edit',
+  'suppliers.delete',
+  // Purchasing (Phase 4): Purchases
+  'purchases.view',
+  'purchases.create',
+  'purchases.edit',
+  'purchases.approve',
+  'purchases.cancel',
+  'purchases.receive',
+  'purchases.return',
+  'purchases.pay',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -124,6 +138,10 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'pricelists.view',
     'inventory.view',
     'inventory.stock_count_approve',
+    'suppliers.view',
+    'purchases.view',
+    'purchases.approve',
+    'purchases.cancel',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -134,6 +152,9 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'products.view_cost',
     'pricelists.view',
     'inventory.view',
+    'suppliers.view',
+    'purchases.view',
+    'purchases.pay',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',
@@ -177,6 +198,17 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // override even for the Inventory Manager template - the tenant
     // Setting must ALSO be turned on (see resolveAllowNegative), and an
     // owner grants this permission explicitly when they actually want it.
+    'suppliers.view',
+    'suppliers.create',
+    'suppliers.edit',
+    'purchases.view',
+    'purchases.create',
+    'purchases.edit',
+    'purchases.receive',
+    'purchases.return',
+    // Not purchases.approve/cancel/pay/suppliers.delete by default: those
+    // are financial-commitment/oversight actions reserved for
+    // Branch Manager, Accountant, or Business Owner in this template set.
   ],
   CASHIER: ['branches.view', 'products.view', 'inventory.view'],
   SALES_EMPLOYEE: ['branches.view', 'products.view', 'inventory.view'],

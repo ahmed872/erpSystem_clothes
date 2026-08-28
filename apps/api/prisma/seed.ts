@@ -63,6 +63,18 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'inventory.transfer_receive': 'Receive a stock transfer (increments destination warehouse)',
   'inventory.stock_count_create': 'Create and submit a stock count',
   'inventory.stock_count_approve': 'Approve a stock count and apply resulting adjustments',
+  'suppliers.view': 'View suppliers and their transaction ledger/balance',
+  'suppliers.create': 'Create a supplier',
+  'suppliers.edit': 'Edit a supplier',
+  'suppliers.delete': 'Deactivate a supplier',
+  'purchases.view': 'View purchases, purchase items, receipts, and returns',
+  'purchases.create': 'Create a purchase (draft)',
+  'purchases.edit': 'Edit a draft purchase',
+  'purchases.approve': 'Approve a purchase, committing it for receiving',
+  'purchases.cancel': 'Cancel a purchase',
+  'purchases.receive': 'Receive goods against an approved purchase, applying inventory and supplier ledger updates',
+  'purchases.return': 'Return previously received goods to a supplier, reversing inventory and posting a supplier credit',
+  'purchases.pay': 'Record a payment made to a supplier against a purchase',
 };
 
 /**

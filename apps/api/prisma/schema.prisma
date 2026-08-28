@@ -77,6 +77,16 @@ model Business {
   stockCounts    StockCount[]
   stockTransfers StockTransfer[]
 
+  suppliers            Supplier[]
+  supplierTransactions SupplierTransaction[]
+  purchases            Purchase[]
+  purchaseItems        PurchaseItem[]
+  purchaseReceipts     PurchaseReceipt[]
+  purchaseReceiptItems PurchaseReceiptItem[]
+  purchaseReturns      PurchaseReturn[]
+  purchaseReturnItems  PurchaseReturnItem[]
+  purchasePayments     PurchasePayment[]
+
   @@map("businesses")
 }
 
@@ -96,6 +106,7 @@ model Branch {
   warehouses     Warehouse[]
   userBranches   UserBranch[]
   stockMovements StockMovement[]
+  purchases      Purchase[]
 
   @@unique([businessId, name])
   @@index([businessId])
@@ -123,6 +134,10 @@ model Warehouse {
   transfersOut   StockTransfer[] @relation("TransferSource")
   transfersIn    StockTransfer[] @relation("TransferDestination")
   serialNumbers  SerialNumber[]
+
+  purchases        Purchase[]
+  purchaseReceipts PurchaseReceipt[]
+  purchaseReturns  PurchaseReturn[]
 
   @@unique([branchId, name])
   @@index([businessId])
@@ -510,6 +525,10 @@ model ProductVariant {
   serialNumbers      SerialNumber[]
   stockCountItems    StockCountItem[]
   stockTransferItems StockTransferItem[]
+
+  purchaseItems        PurchaseItem[]
+  purchaseReceiptItems PurchaseReceiptItem[]
+  purchaseReturnItems  PurchaseReturnItem[]
 
   @@unique([businessId, sku])
   @@index([businessId])
@@ -955,4 +974,358 @@ model StockTransferItem {
 
   @@unique([stockTransferId, variantId])
   @@map("stock_transfer_items")
+}
+
+// ============================================================================
+// PHASE 4: PURCHASING
+//
+// Purchasing is a CONSUMER of the Inventory Engine, never a parallel
+// inventory system. Every inventory-affecting operation here (receiving,
+// purchase return) calls InventoryEngineService.applyMovement directly and
+// produces a real StockMovement (movementType PURCHASE / PURCHASE_RETURN,
+// both already defined on StockMovementType in Phase 3) inside the SAME
+// DB transaction as the SupplierTransaction ledger write and the
+// PurchaseItem/Purchase status updates. No quantity counter here is ever
+// read as inventory truth - StockMovement remains the only source of that.
+//
+// RESPONSIBILITY SEPARATION (deliberately NOT one "God Service"):
+//   - Purchase           : the document (header + approval/cancel lifecycle)
+//   - PurchaseItem        : ordered lines + the document-level received/
+//                           returned quantity invariant (locked via
+//                           SELECT ... FOR UPDATE during receiving/return -
+//                           a lock target distinct from, and in addition
+//                           to, the Inventory Engine's own StockBalance
+//                           lock, because the Engine's lock protects stock
+//                           correctness, not the "did this PO line
+//                           over-receive" document-level invariant)
+//   - PurchaseReceipt(s)  : one row per receiving event; a Purchase can
+//                           have many (partial / multiple receiving)
+//   - PurchaseReturn(s)   : one row per return event (single-step atomic
+//                           action, not a draft/confirm workflow)
+//   - PurchasePayment     : records money paid to a supplier against a
+//                           Purchase - deliberately NOT wired to any
+//                           FinancialAccount/JournalEntry (that belongs to
+//                           the Phase 6 Accounting Engine); this is the
+//                           clean, additive integration boundary Phase 6
+//                           will read from, not a fake accounting system.
+//   - Supplier balance is NEVER a stored/directly-editable number - it is
+//     SUM(SupplierTransaction.amount) for that supplier, computed on read
+//     (SupplierBalanceService), exactly mirroring how StockBalance is a
+//     derived cache of StockMovement in Phase 3. SupplierTransaction rows
+//     are append-only (SELECT+INSERT only grant for erp_app, no
+//     UPDATE/DELETE - see the app-role-grants migration).
+//
+// APPROVAL vs RECEIVING are deliberately separate steps (a documented
+// refinement beyond Phase 0's one-line description), required by this
+// phase's explicit partial/multiple-receiving and over-receiving-
+// prevention rules: a Purchase is APPROVED first (commits the business to
+// the order), then receives happen against it 1..N times until fully
+// received. SupplierTransaction(PURCHASE) rows are created at RECEIVING
+// time, not at Approval, so the payable increase and the inventory
+// increase for the same goods always land in the same transaction.
+// ============================================================================
+
+enum PurchaseStatus {
+  DRAFT
+  APPROVED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum SupplierTransactionType {
+  PURCHASE
+  PURCHASE_RETURN
+  PAYMENT
+  OPENING_BALANCE
+  ADJUSTMENT
+}
+
+enum PurchasePaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CHEQUE
+  CARD
+  OTHER
+}
+
+model Supplier {
+  id               String   @id @default(uuid())
+  businessId       String   @map("business_id")
+  name             String
+  contactPerson    String?  @map("contact_person")
+  phone            String?
+  email            String?
+  address          String?
+  taxNumber        String?  @map("tax_number")
+  paymentTermsDays Int?     @map("payment_terms_days")
+  isActive         Boolean  @default(true) @map("is_active")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  createdBy        String?  @map("created_by")
+  updatedBy        String?  @map("updated_by")
+
+  business     Business              @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "suppliers_business_fk")
+  purchases    Purchase[]
+  transactions SupplierTransaction[]
+  payments     PurchasePayment[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+  @@map("suppliers")
+}
+
+/// Append-only ledger - the ONLY source of truth for a supplier's
+/// balance. Balance = SUM(amount) for that supplier, always computed on
+/// read, never a stored/mutable column - the same single-source-of-truth
+/// principle as StockMovement -> StockBalance (Phase 3).
+/// Sign convention: positive = increases what the business owes the
+/// supplier (a PURCHASE receipt, or a positive OPENING_BALANCE); negative
+/// = decreases it (a PAYMENT or a PURCHASE_RETURN credit).
+model SupplierTransaction {
+  id            String                  @id @default(uuid())
+  businessId    String                  @map("business_id")
+  supplierId    String                  @map("supplier_id")
+  type          SupplierTransactionType
+  amount        Decimal                 @db.Decimal(18, 4)
+  referenceType String?                 @map("reference_type")
+  referenceId   String?                 @map("reference_id")
+  description   String?
+  createdBy     String?                 @map("created_by")
+  createdAt     DateTime                @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "supplier_transactions_business_fk")
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+  @@index([supplierId])
+  @@index([referenceType, referenceId])
+  @@map("supplier_transactions")
+}
+
+model Purchase {
+  id             String         @id @default(uuid())
+  businessId     String         @map("business_id")
+  branchId       String         @map("branch_id")
+  warehouseId    String         @map("warehouse_id")
+  supplierId     String         @map("supplier_id")
+  /// Human-readable document number, derived deterministically from `id`
+  /// right after insert (PO-<first 8 hex chars of id>) so it never needs
+  /// a shared counter/sequence that would serialize concurrent purchase
+  /// creation - no two purchases can ever collide since `id` itself is
+  /// guaranteed unique.
+  purchaseNumber String         @map("purchase_number")
+  status         PurchaseStatus @default(DRAFT)
+  orderDate      DateTime       @default(now()) @map("order_date")
+  expectedDate   DateTime?      @map("expected_date")
+  notes          String?
+  subtotal       Decimal        @default(0) @db.Decimal(18, 4)
+  taxAmount      Decimal        @default(0) @map("tax_amount") @db.Decimal(18, 4)
+  discountAmount Decimal        @default(0) @map("discount_amount") @db.Decimal(18, 4)
+  totalAmount    Decimal        @default(0) @map("total_amount") @db.Decimal(18, 4)
+  createdBy      String?        @map("created_by")
+  approvedBy     String?        @map("approved_by")
+  approvedAt     DateTime?      @map("approved_at")
+  cancelledBy    String?        @map("cancelled_by")
+  cancelledAt    DateTime?      @map("cancelled_at")
+  cancelReason   String?        @map("cancel_reason")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  business  Business          @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchases_business_fk")
+  branch    Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  warehouse Warehouse         @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  supplier  Supplier          @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  items     PurchaseItem[]
+  receipts  PurchaseReceipt[]
+  returns   PurchaseReturn[]
+  payments  PurchasePayment[]
+
+  @@unique([businessId, purchaseNumber])
+  @@index([businessId])
+  @@index([branchId])
+  @@index([warehouseId])
+  @@index([supplierId])
+  @@index([status])
+  @@map("purchases")
+}
+
+model PurchaseItem {
+  id         String @id @default(uuid())
+  businessId String @map("business_id")
+  purchaseId String @map("purchase_id")
+  variantId  String @map("variant_id")
+
+  quantityOrdered  Decimal @map("quantity_ordered") @db.Decimal(18, 4)
+  /// Cumulative quantity received across ALL receipts for this line.
+  /// Maintained transactionally alongside each PurchaseReceiptItem
+  /// insert. This is the source of truth for the DOCUMENT-level "how much
+  /// of this PO line is still outstanding" invariant (guarded by a
+  /// `quantity_received <= quantity_ordered` DB CHECK plus a
+  /// SELECT ... FOR UPDATE row lock taken on this row during receiving to
+  /// prevent concurrent over-receipt) - it is NOT, and must never become,
+  /// a source of inventory truth; that remains StockMovement exclusively.
+  quantityReceived Decimal @default(0) @map("quantity_received") @db.Decimal(18, 4)
+  /// Cumulative quantity returned across ALL purchase returns for this
+  /// line, guarded the same way (CHECK quantity_returned <=
+  /// quantity_received, same row lock).
+  quantityReturned Decimal @default(0) @map("quantity_returned") @db.Decimal(18, 4)
+  unitCost         Decimal @map("unit_cost") @db.Decimal(18, 4)
+  taxAmount        Decimal @default(0) @map("tax_amount") @db.Decimal(18, 4)
+  discountAmount   Decimal @default(0) @map("discount_amount") @db.Decimal(18, 4)
+  lineTotal        Decimal @default(0) @map("line_total") @db.Decimal(18, 4)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  business     Business              @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_items_business_fk")
+  purchase     Purchase              @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  variant      ProductVariant        @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  receiptItems PurchaseReceiptItem[]
+  returnItems  PurchaseReturnItem[]
+
+  @@unique([purchaseId, variantId])
+  @@index([businessId])
+  @@index([purchaseId])
+  @@index([variantId])
+  @@map("purchase_items")
+}
+
+model PurchaseReceipt {
+  id             String   @id @default(uuid())
+  businessId     String   @map("business_id")
+  purchaseId     String   @map("purchase_id")
+  warehouseId    String   @map("warehouse_id")
+  receiptNumber  String   @map("receipt_number")
+  /// Optional client-supplied idempotency key so a retried/duplicated
+  /// receiving request (e.g. a flaky network resubmit) cannot double-
+  /// apply inventory. NULL never conflicts with another NULL (Postgres
+  /// treats multiple NULLs as non-conflicting under a unique index), so
+  /// dedup is opt-in per request - same pattern as RefreshToken (Phase 1).
+  idempotencyKey String?  @map("idempotency_key")
+  notes          String?
+  receivedBy     String?  @map("received_by")
+  receivedAt     DateTime @default(now()) @map("received_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  business  Business              @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_receipts_business_fk")
+  purchase  Purchase              @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  warehouse Warehouse             @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  items     PurchaseReceiptItem[]
+
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId])
+  @@index([purchaseId])
+  @@map("purchase_receipts")
+}
+
+model PurchaseReceiptItem {
+  id                String   @id @default(uuid())
+  businessId        String   @map("business_id")
+  purchaseReceiptId String   @map("purchase_receipt_id")
+  purchaseItemId    String   @map("purchase_item_id")
+  variantId         String   @map("variant_id")
+  quantityReceived  Decimal  @map("quantity_received") @db.Decimal(18, 4)
+  /// Cost this specific batch was received at, copied from
+  /// PurchaseItem.unitCost at the moment of receiving and never
+  /// retroactively changed. This exact value is what's passed to
+  /// InventoryEngineService.applyMovement as the increase's unit cost,
+  /// permanently preserved on the resulting StockMovement's
+  /// unitCostAtMovement (Phase 3 costing rule).
+  unitCost          Decimal  @map("unit_cost") @db.Decimal(18, 4)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  purchaseReceipt PurchaseReceipt @relation(fields: [purchaseReceiptId], references: [id], onDelete: Cascade)
+  purchaseItem    PurchaseItem    @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
+  variant         ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  Business        Business        @relation(fields: [businessId], references: [id])
+
+  @@unique([purchaseReceiptId, purchaseItemId])
+  @@index([purchaseReceiptId])
+  @@index([purchaseItemId])
+  @@index([businessId])
+  @@map("purchase_receipt_items")
+}
+
+/// A purchase return is a single-step atomic action (not a draft/confirm
+/// workflow, unlike Purchase itself): creating one immediately reverses
+/// the inventory impact via InventoryEngineService (movementType
+/// PURCHASE_RETURN) and posts the supplier credit, in the same
+/// transaction. It never modifies or deletes the original receiving
+/// StockMovement rows - it only ever adds new, opposite ones.
+model PurchaseReturn {
+  id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
+  purchaseId   String   @map("purchase_id")
+  warehouseId  String   @map("warehouse_id")
+  returnNumber String   @map("return_number")
+  reason       String?
+  createdBy    String?  @map("created_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  business  Business             @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_returns_business_fk")
+  purchase  Purchase             @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  warehouse Warehouse            @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  items     PurchaseReturnItem[]
+
+  @@index([businessId])
+  @@index([purchaseId])
+  @@map("purchase_returns")
+}
+
+model PurchaseReturnItem {
+  id               String   @id @default(uuid())
+  businessId       String   @map("business_id")
+  purchaseReturnId String   @map("purchase_return_id")
+  purchaseItemId   String   @map("purchase_item_id")
+  variantId        String   @map("variant_id")
+  quantity         Decimal  @db.Decimal(18, 4)
+  /// The cost basis used for the SUPPLIER credit (copied from the
+  /// original PurchaseItem.unitCost) - deliberately independent from
+  /// whatever cost the Inventory Engine uses for the stock-side decrease.
+  /// A decrease ALWAYS uses the current average cost as COGS (Phase 3
+  /// costing rule, zero special-casing for returns), which may differ
+  /// from the original purchase cost if other movements happened since;
+  /// the supplier owes back what we originally paid them, which is a
+  /// separate concern from what the stock is valued at today.
+  unitCost         Decimal  @map("unit_cost") @db.Decimal(18, 4)
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  purchaseReturn PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  purchaseItem   PurchaseItem   @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
+  variant        ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  Business       Business       @relation(fields: [businessId], references: [id])
+
+  @@index([purchaseReturnId])
+  @@index([purchaseItemId])
+  @@index([businessId])
+  @@map("purchase_return_items")
+}
+
+/// Records money paid to a supplier against a Purchase. Deliberately NOT
+/// wired to any FinancialAccount/JournalEntry - Phase 6 (Accounting
+/// Engine) is out of this phase's scope entirely (per explicit
+/// instruction), so this is designed as the clean, additive boundary
+/// Phase 6 will read from later, not a parallel/fake accounting system.
+model PurchasePayment {
+  id         String                @id @default(uuid())
+  businessId String                @map("business_id")
+  purchaseId String                @map("purchase_id")
+  supplierId String                @map("supplier_id")
+  amount     Decimal               @db.Decimal(18, 4)
+  method     PurchasePaymentMethod @default(CASH)
+  reference  String?
+  notes      String?
+  paidBy     String?               @map("paid_by")
+  paidAt     DateTime              @default(now()) @map("paid_at")
+  createdAt  DateTime              @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_payments_business_fk")
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+  @@index([purchaseId])
+  @@index([supplierId])
+  @@map("purchase_payments")
 }
