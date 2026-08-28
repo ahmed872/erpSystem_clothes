@@ -34,6 +34,39 @@ export const PERMISSION_CODES = [
   'warehouses.delete',
   // Audit
   'audit.view',
+  // Catalog: Products & Variants
+  'products.view',
+  'products.view_cost',
+  'products.create',
+  'products.edit',
+  'products.change_price',
+  'products.change_cost',
+  'products.delete',
+  // Catalog: Categories
+  'categories.view',
+  'categories.create',
+  'categories.edit',
+  'categories.delete',
+  // Catalog: Brands
+  'brands.view',
+  'brands.create',
+  'brands.edit',
+  'brands.delete',
+  // Catalog: Units of Measure
+  'uoms.view',
+  'uoms.create',
+  'uoms.edit',
+  'uoms.delete',
+  // Catalog: Attributes
+  'attributes.view',
+  'attributes.create',
+  'attributes.edit',
+  'attributes.delete',
+  // Catalog: Price Lists
+  'pricelists.view',
+  'pricelists.create',
+  'pricelists.edit',
+  'pricelists.manage_prices',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -55,6 +88,11 @@ export type RoleTemplate = (typeof ROLE_TEMPLATES)[number];
  * starting defaults created at business onboarding.
  */
 export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> = {
+  // Business Owner always gets every permission that exists, including
+  // ones added by later phases — see prisma/seed.ts, which additionally
+  // backfills this onto the BUSINESS_OWNER role of businesses that were
+  // onboarded before those permissions existed, since a Role's grants are
+  // a stored snapshot (RolePermission rows), not computed dynamically.
   BUSINESS_OWNER: [...PERMISSION_CODES],
   BRANCH_MANAGER: [
     'users.view',
@@ -66,9 +104,51 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'business.view',
     'settings.view',
     'audit.view',
+    'products.view',
+    'categories.view',
+    'brands.view',
+    'uoms.view',
+    'attributes.view',
+    'pricelists.view',
   ],
-  ACCOUNTANT: ['business.view', 'branches.view', 'warehouses.view', 'audit.view'],
-  INVENTORY_MANAGER: ['warehouses.view', 'warehouses.create', 'warehouses.edit', 'branches.view'],
-  CASHIER: ['branches.view'],
-  SALES_EMPLOYEE: ['branches.view'],
+  ACCOUNTANT: [
+    'business.view',
+    'branches.view',
+    'warehouses.view',
+    'audit.view',
+    'products.view',
+    'products.view_cost',
+    'pricelists.view',
+  ],
+  INVENTORY_MANAGER: [
+    'warehouses.view',
+    'warehouses.create',
+    'warehouses.edit',
+    'branches.view',
+    'products.view',
+    'products.view_cost',
+    'products.create',
+    'products.edit',
+    'products.change_cost',
+    'products.delete',
+    'categories.view',
+    'categories.create',
+    'categories.edit',
+    'categories.delete',
+    'brands.view',
+    'brands.create',
+    'brands.edit',
+    'brands.delete',
+    'uoms.view',
+    'uoms.create',
+    'uoms.edit',
+    'uoms.delete',
+    'attributes.view',
+    'attributes.create',
+    'attributes.edit',
+    'attributes.delete',
+    'pricelists.view',
+  ],
+  CASHIER: ['branches.view', 'products.view'],
+  SALES_EMPLOYEE: ['branches.view', 'products.view'],
 };

@@ -1,132 +1,152 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 1 — Foundation (**Complete, awaiting explicit approval to start Phase 2**)
+Phase 2 — Products & Catalog (**Complete, awaiting explicit approval to start Phase 3**)
 
 ## Completed Features
-- **Monorepo scaffold**: npm workspaces (`apps/api`, `packages/shared-types`, `packages/shared-validation`), shared TypeScript types/zod schemas consumed by both the API and (later) the offline POS client.
-- **Multi-tenant PostgreSQL schema + Row-Level Security**, enforced at the database layer via a restricted `erp_app` runtime role (see Architecture Decisions).
-- **Auth**: business login (`email + password + businessSlug`), argon2id password hashing, short-lived JWT access tokens, signed-JWT refresh tokens with rotation + individual revocation, logout, generic "Invalid email or password" (no tenant/user enumeration), LOGIN/LOGIN_FAILED/LOGOUT audit trail.
-- **Business onboarding**: single atomic transaction creating Business + default Branch + default Warehouse + all 6 built-in Role templates (with default permission grants) + Owner user, assigned the BUSINESS_OWNER role and default branch.
-- **Users**: create/list/update/suspend, role & branch assignment, "last active Business Owner" lockout protection (cannot suspend or de-own the only owner), passwordHash never serialized in any response.
-- **Roles & Permissions**: global permission catalog (23 codes) seeded at deploy time; per-tenant Roles CRUD with permission-code assignment; role deletion blocked for built-in templates and for roles still assigned to users.
-- **Business profile**: get/update.
-- **Branches**: create/list/update (soft `isActive` toggle, no hard delete).
-- **Warehouses**: create/list/update, scoped to a branch, single-default-per-branch invariant enforced on create/update.
-- **Settings**: generic per-business key/value store (get/upsert).
-- **Audit log**: append-only, written inside the same DB transaction as the change it documents, immutable at the database privilege level (no UPDATE/DELETE grant for the runtime role).
-- **Server-side authorization everywhere**: every protected route re-reads the caller's current permission grants from the database on each request (not cached in the JWT), so a revoked permission/role takes effect on the very next request.
+
+### Phase 1 (unchanged, carried forward)
+- Monorepo scaffold, multi-tenant PostgreSQL + RLS, Auth (login/refresh/logout), Business onboarding, Users, Roles & Permissions, Branches, Warehouses, Settings, append-only Audit log, server-side authorization re-checked per request.
+- See git history / the previous revision of this file for the full Phase 1 write-up; nothing about it changed in Phase 2 except where called out below.
+
+### Phase 2 (new)
+- **Categories**: tree via self-referential `parentId`, unique name per sibling level including the top level (partial unique index — a plain composite unique constraint cannot catch two NULL-parent rows), cycle-detection guard on re-parenting (a category can never become its own ancestor or descendant), 404 when `parentId` references another tenant's category.
+- **Brands**: create/list/update, unique name per tenant, soft `isActive` toggle.
+- **Units of Measure (UOM)**: create/list/update, unique name+code per tenant, `precision` (0-6 decimal places, DB `CHECK`-enforced) that later phases will use to reject fractional "pieces" while allowing fractional kilograms.
+- **Attributes & values**: dynamic, tenant-defined attribute types (e.g. "Color") and their values (e.g. "Black") — never hardcoded to clothing. Value deletion blocked while still referenced by any variant.
+- **Products**: full CRUD (create/list/get/update), SKU unique per tenant, `type` (`SIMPLE`/`BUNDLE`), `status` (`ACTIVE`/`INACTIVE`/`DISCONTINUED`), category/brand/base-UOM references validated against the caller's own tenant, `minimumStock`/`maximumStock` with a `maximumStock >= minimumStock` DB `CHECK`, non-negative-money `CHECK` constraints on cost/price fields.
+- **Product Variants**: every Product always has at least one Variant — a "simple" product with no explicit variants gets exactly one auto-generated default variant (same SKU as the product) at creation time, so Inventory (Phase 3) and Sales (Phase 5) only ever need to key off `variantId`, never branch on "is this a bare product or a variant". Variants added explicitly get their own SKU, optional per-variant cost/selling-price override (inherits the product's defaults otherwise), weight, and attribute-value combination.
+- **Cross-table SKU uniqueness**: SKU is a single flat lookup namespace shared by `Product` and `ProductVariant` even though they're different tables — enforced at the application layer (`assertSkuAvailable`) before every insert, since Postgres can't express a cross-table unique constraint without an artificial shared lookup table.
+- **Attribute-combination integrity**: a variant can never carry two values for the same attribute (DB-enforced via a composite FK from `VariantAttributeValue` to `ProductAttributeValue(id, attributeId)` — the database itself rejects a mismatched pair, not just application code), and two variants of the same product can never share the exact same combination of attribute values (checked both within one creation request and against already-persisted variants when adding one later).
+- **Barcodes**: multiple per variant, globally unique per tenant, at most one `isPrimary=true` per variant (DB partial unique index), optionally tied to a specific `ProductUom` (pack-level barcode, e.g. a carton's own barcode vs. the piece's).
+- **Multi-UOM / conversion factor**: a product's base UOM is implicit (factor 1, never duplicated); additional purchase/sales UOMs are recorded per product with a positive `conversionFactor` (DB `CHECK`-enforced) - e.g. "1 Carton = 12 Pieces" where Carton's factor is 12 relative to the product's own base UOM (Piece). Adding the base UOM itself as an "extra" UOM is rejected.
+- **Bundles**: a Bundle is a `Product` with `type=BUNDLE` — it still gets its own sellable default variant, but carries no inventory of its own. `BundleItem` rows list the component variants + quantities. A bundle cannot contain another bundle (no nested bundles), cannot contain itself, and must have at least one item; a `SIMPLE` product cannot carry bundle items. Composition is replaceable via a dedicated endpoint after creation.
+- **Price change history**: every variant cost change, selling-price change, and price-list entry change writes an immutable `ProductPriceHistory` row (old value, new value, who, when) - append-only at the database privilege level, same treatment as `AuditLog`.
+- **Price Lists**: named pricing tiers (e.g. Wholesale, VIP), at most one `isDefault=true` per tenant (DB partial unique index, same pattern as the default-warehouse invariant from Phase 1), per-variant price entries via upsert.
+- **Field-level authorization**: `products.view_cost` gates whether `cost`/`defaultCost` fields are present at all in a response (stripped server-side via a shared `EffectivePermissionsService`, not just hidden by a not-yet-built frontend) — covers product list, product detail, variant detail, barcode/SKU lookup, and the catalog sync endpoint uniformly.
+- **POS-shaped read APIs, built now rather than deferred**: `GET /catalog/variants/lookup?barcode=|sku=` (the exact operation a cashier performs on every scan) and `GET /catalog/sync?updatedSince=&includeInactive=` (a bulk/delta catalog read shaped for POS caching and, later, offline-first priming in Phase 5) — per your instruction to design APIs now that later phases won't need to redesign.
 
 ## Pending Features
-Everything from Phase 2 onward per `docs/architecture/PHASE-0-ARCHITECTURE.md` §15 (Catalog, Inventory Engine, Purchasing, POS, Finance/Accounting, Reports, Advanced, Security & Reliability hardening, Production).
+Everything from Phase 3 onward per `docs/architecture/PHASE-0-ARCHITECTURE.md` §15 (Inventory Engine, Purchasing, POS, Finance/Accounting, Reports, Advanced, Security & Reliability hardening, Production).
 
-Explicitly NOT built in Phase 1 (by design, out of scope per the Phase 0 plan):
-- No frontend (`apps/erp-web`, `apps/pos-web`) yet — Phase 1 was scoped as the backend foundation; the acceptance criteria for this phase are business-logic/API-driven, not UI-driven. **Flagging this explicitly for your review before Phase 2** in case you want a minimal ERP shell started sooner.
-- No email/SMS invite flow for new users (they're created with a password directly by an admin) — invite-by-email needs the Notifications module (Phase 8).
-- No password-reset flow, no 2FA.
+Still explicitly NOT built (carried over from Phase 1, unchanged):
+- No frontend (`apps/erp-web`, `apps/pos-web`).
+- No email/SMS invite flow, password reset, or 2FA.
+
+New Phase-2-specific deferrals (deliberate, not scope cuts — see "Known Issues" for the reasoning on each):
+- No hard-delete endpoints for Category/Brand/UOM/PriceList (soft `isActive` only) or for Product/ProductVariant (status only) — consistent with the Phase 1 "no hard delete once something matters" posture, extended proactively here because these will be heavily referenced by Inventory/Purchasing/Sales starting next phase.
+- `Product.defaultCost`/`defaultSellingPrice` are creation-time defaults only, not independently editable afterward (see Architecture Decisions) — this is a considered design choice, not an oversight.
+- Bundle stock consumption / COGS calculation is NOT implemented — that requires `StockMovement`, which is Phase 3. Phase 2 only defines the bundle *composition* (`BundleItem`).
+- Attachments/real image upload infra does not exist yet, so `images` on Product/Variant is a JSON array of `{url, altText, sortOrder}` the caller supplies (validated as real URLs) rather than an upload endpoint.
 
 ## Architecture Decisions
-Carried over unchanged from Phase 0 (Modular Monolith; NestJS + TypeScript + PostgreSQL 16 + Prisma; Redis+BullMQ reserved for later phases — not yet wired into any Phase 1 code path). One decision was **added** (not a change to a prior one):
+Carried over unchanged from Phase 0 and Phase 1 (Modular Monolith; NestJS + TypeScript + PostgreSQL 16 + Prisma; RLS + restricted `erp_app` runtime role for tenant isolation; server-side-only authorization re-checked per request; append-only ledgers immutable at the DB privilege level). New decisions made in Phase 2, each explained:
 
-- **Multi-tenancy mechanism, concretely implemented**: shared schema, `business_id` column, PostgreSQL Row-Level Security with `FORCE ROW LEVEL SECURITY`. The API's Prisma client connects as a dedicated `erp_app` database role (`NOSUPERUSER NOBYPASSRLS`) — never as the migration/superuser role — and every tenant-scoped query runs inside `PrismaService.withTenant(tenantId, ...)`, which opens a transaction and issues `SET LOCAL app.current_tenant_id = '<uuid>'` before the caller's queries run. Default posture is **deny**: if the session variable is ever left unset (a bug forgetting to call `withTenant`), every tenant-scoped table returns zero rows / rejects every write, rather than leaking cross-tenant data. `businesses` itself is the one deliberate exception — SELECT is public (`USING (true)`) so login can resolve a tenant by its public slug before any tenant context exists; INSERT/UPDATE still require the row's own `id` to equal the tenant context, so business onboarding generates the business id application-side and opens the tenant context to that id *before* inserting the business row — no special-cased bypass needed anywhere.
-- **Refresh tokens are signed JWTs, not opaque random strings** (a Phase 1 concretization of the Phase 0 auth design), carrying `tenantId` as a claim so the API can recover which tenant to open RLS context for *before* querying the database — solving the chicken-and-egg problem of "look up a token row" under default-deny RLS. Each refresh token still has a DB-side row (hash + revocation state) so it remains individually revocable, and is rotated (old row revoked, new one issued) on every use.
-- **Authorization is re-checked from the database on every request**, not cached in the access token, trading one extra indexed join per request for immediate effect of permission/role changes and immediate lockout of suspended users — verified by test (`rbac.e2e-spec.ts`).
-- **Audit immutability enforced at two independent layers**: application code never calls update/delete on `AuditLog`, AND the `erp_app` database role has no UPDATE/DELETE grant on `audit_logs` at all (verified by test: attempting either via a raw query as `erp_app` fails with a Postgres permission-denied error, independent of application code).
-- **No hard delete for `businesses`**: the `erp_app` role has no DELETE grant on that table at all (verified by test). Branches/warehouses use soft `isActive` toggles at the application layer. Roles ARE hard-deletable (not a financial document) but only when unused by any user and not a built-in template.
+- **A Product always has ≥1 ProductVariant; "simple" products auto-get a default one.** Alternative considered: let Sales/Inventory special-case "products without variants". Rejected because it would duplicate branching logic into every future module that touches a sellable item. One uniform join key (`variantId`) everywhere is simpler and matches how the spec itself talks about variant-level cost/price/barcode.
+- **A Bundle is a Product with `type=BUNDLE`, not a separate entity.** It gets the same auto-created default variant as any simple product (that's what actually gets scanned/sold), and `BundleItem` only describes composition. This directly satisfies the spec's "a bundle must not be treated as an independent product with fake inventory" requirement: the bundle variant itself will never get a `StockBalance` row once Phase 3 exists — its availability will be derived from components.
+- **SKU is one flat namespace across `Product` and `ProductVariant`, enforced at the application layer.** Two different tables each have their own per-table unique constraint (so Prisma/Postgres alone would allow a Product SKU to collide with an unrelated Variant SKU), but a POS/ERP "search by SKU" must never be ambiguous about which table it hit. `assertSkuAvailable()` checks both tables before every insert. Documented as an explicit cross-table invariant that could not be expressed as a single DB constraint without introducing an artificial shared lookup table, which was judged not worth the complexity for Phase 2.
+- **A variant's attribute-value pairing is enforced by a composite foreign key**, not just application code: `VariantAttributeValue(variantId, attributeId, attributeValueId)` has a composite FK `(attributeValueId, attributeId) -> ProductAttributeValue(id, attributeId)`, so the database itself rejects recording a value against the wrong attribute. This is the same "defense in depth, not just app discipline" posture as Phase 1's audit-log immutability.
+- **`Product.defaultCost`/`defaultSellingPrice` are creation-time defaults, not independently mutable afterward.** Considered making them freely PATCH-able like any other product field, but that would create two competing "sources of truth" for a simple product's price (the Product's default vs. its one Variant's actual price). Instead, all operational cost/price changes happen at the Variant level through dedicated, permission-gated, history-logging endpoints (`PATCH /catalog/variants/:id/cost`, `.../price`) — for a simple product this is effectively "the" price change path; for a multi-variant product it's the only sensible granularity anyway.
+- **Reference/config catalog tables (Category, Brand, UOM, PriceList) support hard delete at the database-privilege level but Phase 2 does not expose a delete endpoint for them** — only soft `isActive` toggles. Product/ProductVariant go further: the `erp_app` role has no DELETE grant on `products`/`product_variants` at all (extending the Phase 1 "no hard delete once something matters" posture proactively, since Inventory/Purchasing/Sales will reference these starting Phase 3).
+- **Cost visibility is enforced server-side per response, not per-route.** `products.view_cost` is checked inside the same tenant transaction as the data query (via the new shared `EffectivePermissionsService`, extracted from `PermissionsGuard` so the exact same "what can this user do right now" logic isn't duplicated) and cost fields are stripped from the returned object before it ever leaves the use-case — never a client-side filter.
+- **`shared-validation`'s primitives (`nameSchema`, `emailSchema`, ...) were extracted into their own `primitives.ts` module.** The new `catalog.ts` schema file needed `nameSchema`, and importing it back from `index.ts` (which also re-exports `catalog.ts`) would have created a circular module dependency that is fragile in CommonJS (a schema could evaluate to `undefined` depending on require order). This is a structural refactor with no behavior change — every schema previously exported from `index.ts` still is.
 
 ## Database Changes
-New Prisma models (see `apps/api/prisma/schema.prisma`): `Business`, `Branch`, `Warehouse`, `User`, `UserBranch`, `Role`, `Permission`, `UserRole`, `RolePermission`, `RefreshToken`, `Setting`, `AuditLog`. Enums: `BusinessStatus`, `UserStatus`, `AuditAction`.
+14 new Prisma models: `Category`, `Brand`, `Uom`, `ProductAttribute`, `ProductAttributeValue`, `Product`, `ProductVariant`, `VariantAttributeValue`, `ProductUom`, `Barcode`, `PriceList`, `ProductPrice`, `ProductPriceHistory`, `BundleItem`. New enums: `ProductType`, `ProductStatus`, `ProductVariantStatus`, `PriceChangeType`.
 
-All money/inventory-relevant models from later phases (Product, StockMovement, JournalEntry, etc.) are intentionally NOT modeled yet.
+27 new global permission codes (50 total now; see `packages/shared-types/src/permissions.ts`): `products.{view,view_cost,create,edit,change_price,change_cost,delete}`, `categories.*`, `brands.*`, `uoms.*`, `attributes.*`, `pricelists.{view,create,edit,manage_prices}`.
 
 ## Migrations
-1. `20260828121159_init` — base tables from the Prisma schema above.
-2. `20260828121500_enable_row_level_security` — enables + forces RLS and creates the isolation policies on `businesses`, `branches`, `warehouses`, `users`, `roles`, `settings`, `audit_logs`, and the join tables `user_roles`, `user_branches`, `role_permissions`, `refresh_tokens` (scoped transitively via their parent row's tenant).
-3. `20260828121600_lockdown_app_role` — creates the restricted `erp_app` role (`NOSUPERUSER NOBYPASSRLS`) and grants exactly the privileges each table needs (no DELETE on `businesses`; SELECT+INSERT only, no UPDATE/DELETE, on `audit_logs`; read-only on the global `permissions` catalog).
+1. `20260828124217_catalog_schema` — the 14 tables/4 enums above, plus hand-written additions Prisma's schema DSL cannot express: three partial unique indexes (top-level category name uniqueness, one-primary-barcode-per-variant, one-default-price-list-per-tenant) and a set of `CHECK` constraints (non-negative cost/price/stock-threshold, `maximumStock >= minimumStock`, positive UOM conversion factor and bundle-item quantity, UOM precision in `[0,6]`).
+2. `20260828124500_catalog_rls` — enables + forces RLS on all 14 tables, same default-deny pattern as Phase 1's migration 2: 12 tables scoped directly by their own `business_id`; `variant_attribute_values` and `bundle_items` (pure join tables with no `business_id` column of their own) scoped transitively via their parent row's tenant, exactly like Phase 1's `user_roles`/`role_permissions`.
+3. `20260828124600_catalog_app_role_grants` — extends `erp_app`'s privileges: full CRUD on reference/config tables (categories, brands, uoms, attributes, product_uoms, barcodes, price_lists, product_prices, and the two join tables); SELECT/INSERT/UPDATE-only (no DELETE) on `products`/`product_variants`; SELECT/INSERT-only (no UPDATE/DELETE) on `product_price_history`.
 
-Applied and verified against both `erp_dev` and `erp_test` databases. `prisma/seed.ts` seeds the 23-entry global permission catalog (run with the migration/owner `DATABASE_URL`, never the runtime role).
+Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate status` reports both "up to date", 6 migrations total across Phase 1+2).
 
-**Deployment note carried into this phase**: `erp_app`'s password is a documented development default baked into migration 3 (plain SQL has no secret templating) — production deployments MUST rotate it via `ALTER ROLE` through the secrets pipeline immediately after first deploy. Documented in the migration file and `.env.example`.
+`prisma/seed.ts` was extended: seeding now also **backfills every existing `BUSINESS_OWNER` role with any permission codes it doesn't yet have.** This matters because a Role's grants are a stored snapshot (`RolePermission` rows), not computed dynamically from "is this the owner role" — without the backfill, a business onboarded before Phase 2 would have permanently lost access to every new Phase 2 permission. Verified live: re-running the seed against `erp_dev` (which already had a business from earlier manual testing) reported `Backfilled 27 permission grant(s) across 1 BUSINESS_OWNER role(s)`. Other role templates' new default grants only apply to businesses onboarded from now on; existing tenants can grant them manually via the Phase 1 Roles API if desired — deliberately not auto-modifying a tenant's customized roles for anything less than the hard "owner always has everything" invariant.
 
 ## API Endpoints
-All under `/api/v1`, JSON envelope `{ data }` on success / `{ error: { code, message, details, requestId } }` on failure.
+All new endpoints under `/api/v1/catalog`, same `{ data }` / `{ error }` envelope as Phase 1 (list endpoints additionally return `pagination`).
 
-| Method | Path | Auth | Permission |
-|---|---|---|---|
-| POST | `/businesses/register` | Public | — |
-| POST | `/auth/login` | Public | — |
-| POST | `/auth/refresh` | Public | — |
-| POST | `/auth/logout` | Bearer | — |
-| GET | `/business` | Bearer | `business.view` |
-| PATCH | `/business` | Bearer | `business.edit` |
-| GET | `/branches` | Bearer | `branches.view` |
-| POST | `/branches` | Bearer | `branches.create` |
-| PATCH | `/branches/:id` | Bearer | `branches.edit` |
-| GET | `/warehouses?branchId=` | Bearer | `warehouses.view` |
-| POST | `/warehouses` | Bearer | `warehouses.create` |
-| PATCH | `/warehouses/:id` | Bearer | `warehouses.edit` |
-| GET | `/settings` | Bearer | `settings.view` |
-| PUT | `/settings` | Bearer | `settings.edit` |
-| GET | `/users` | Bearer | `users.view` |
-| POST | `/users` | Bearer | `users.create` |
-| PATCH | `/users/:id` | Bearer | `users.edit` |
-| DELETE | `/users/:id` (soft-suspends) | Bearer | `users.delete` |
-| GET | `/roles` | Bearer | `roles.view` |
-| POST | `/roles` | Bearer | `roles.create` |
-| PATCH | `/roles/:id` | Bearer | `roles.edit` |
-| DELETE | `/roles/:id` | Bearer | `roles.delete` |
-| GET | `/permissions` | Bearer | `permissions.view` |
+| Method | Path | Permission |
+|---|---|---|
+| GET/POST | `/catalog/categories` | `categories.view` / `.create` |
+| PATCH | `/catalog/categories/:id` | `categories.edit` |
+| GET/POST | `/catalog/brands` | `brands.view` / `.create` |
+| PATCH | `/catalog/brands/:id` | `brands.edit` |
+| GET/POST | `/catalog/uoms` | `uoms.view` / `.create` |
+| PATCH | `/catalog/uoms/:id` | `uoms.edit` |
+| GET/POST | `/catalog/attributes` | `attributes.view` / `.create` |
+| PATCH | `/catalog/attributes/:id` | `attributes.edit` |
+| POST | `/catalog/attributes/:id/values` | `attributes.create` |
+| PATCH/DELETE | `/catalog/attribute-values/:id` | `attributes.edit` / `.delete` |
+| GET/POST | `/catalog/products` | `products.view` / `.create` |
+| GET/PATCH | `/catalog/products/:id` | `products.view` / `.edit` |
+| PUT | `/catalog/products/:id/bundle-items` | `products.edit` |
+| POST | `/catalog/products/:id/variants` | `products.create` |
+| POST | `/catalog/products/:id/uoms` | `products.edit` |
+| DELETE | `/catalog/product-uoms/:id` | `products.edit` |
+| GET | `/catalog/variants/lookup?barcode=\|sku=` | `products.view` |
+| GET/PATCH | `/catalog/variants/:id` | `products.view` / `.edit` |
+| PATCH | `/catalog/variants/:id/cost` | `products.change_cost` |
+| PATCH | `/catalog/variants/:id/price` | `products.change_price` |
+| POST | `/catalog/variants/:id/barcodes` | `products.edit` |
+| DELETE | `/catalog/barcodes/:id` | `products.edit` |
+| GET/POST | `/catalog/price-lists` | `pricelists.view` / `.create` |
+| PATCH | `/catalog/price-lists/:id` | `pricelists.edit` |
+| GET/PUT | `/catalog/price-lists/:id/prices` | `pricelists.view` / `.manage_prices` |
+| GET | `/catalog/sync?updatedSince=&includeInactive=` | `products.view` |
 
-All request bodies validated against the shared zod schemas in `packages/shared-validation` (same schemas will be reused by the POS offline client from Phase 5 onward).
+All request bodies/queries validated against shared zod schemas in `packages/shared-validation/src/catalog.ts` — the same schemas the offline POS client will import directly from Phase 5 onward.
 
 ## Screens
-None. Phase 1 delivered the backend foundation only — see "Pending Features" above for the explicit flag on frontend scope.
+None (still backend-only — see Pending Features).
 
 ## Tests and Results
-- **Unit** (`apps/api/src/**/*.spec.ts`, no DB): `AuthTokenService` (6 tests — issue/verify roundtrip, correct expiry-seconds conversion, wrong secret rejected, refresh token rejected where an access token is expected, fresh jti per issuance, tenant id recoverable from a refresh token's signature alone) and `PasswordHasherService` (5 tests — hash/verify roundtrip, wrong password rejected, hash never contains plaintext, salted so repeated hashes differ, malformed hash fails closed rather than throwing). **11/11 pass.**
+- **Unit** (no DB): 6 new tests for the pure domain helpers `omitFields` (cost-stripping primitive) and `attributeSignature` (order-independent variant-combination fingerprint) — the rest of Phase 2's logic is inherently DB-bound (uniqueness, cross-table checks, transactions) and is covered by the e2e suite instead, same judgment call as Phase 1. Combined with Phase 1's unit tests: **17/17 pass.**
 
-- **E2E** (`apps/api/test/*.e2e-spec.ts`, real NestJS app + real PostgreSQL `erp_test`, no mocks): **28/28 pass**, across 5 files:
-  - `onboarding.e2e-spec.ts` — atomic creation of business+branch+warehouse+6 roles+owner in one transaction; duplicate-slug rejected with 409 and zero side effects; weak password / invalid slug rejected with 422 before touching the DB.
-  - `auth.e2e-spec.ts` — wrong password / unknown business both return the same generic message; LOGIN_FAILED audit rows recorded; successful login works end-to-end against a protected route; refresh-token rotation and rejection of a replayed/consumed token; logout revokes the refresh token; a user suspended mid-session is rejected on the very next request despite an unexpired access token.
-  - `rbac.e2e-spec.ts` — no token → 401; a Cashier is blocked (403) from an action outside their permissions even though the button would be hidden client-side; revoking a permission from a role takes effect on the next request without waiting for token expiry; the last active Business Owner cannot be suspended/de-owned; a role with assigned users cannot be deleted; a built-in role template cannot be deleted even when unused.
-  - `tenancy.e2e-spec.ts` — branch/warehouse CRUD, duplicate-name conflicts, invalid branch reference on warehouse creation, single-default-warehouse-per-branch invariant, settings upsert idempotency, branch deactivation is a soft update.
-  - `tenant-isolation.e2e-spec.ts` — the most important suite: proves isolation at **both** the API layer (tenant B never sees tenant A's branches; cannot patch tenant A's branch by id, gets 404 not 200) **and independently at the PostgreSQL layer**, by connecting directly as the same restricted `erp_app` role the API uses and issuing completely raw, unfiltered SQL: a query with no `WHERE` clause at all returns zero rows with no tenant context set; setting context to tenant A returns only tenant A's rows; attempting to INSERT a row for tenant A while context is set to tenant B is rejected by the RLS `WITH CHECK` policy; `UPDATE`/`DELETE` on `audit_logs` and `DELETE` on `businesses` fail with a Postgres permission-denied error regardless of RLS, because the role was never granted those privileges at all.
+- **E2E** (real NestJS app + real PostgreSQL `erp_test`, no mocks): **46 new tests, 4 new files**, combined with Phase 1's 28: **74/74 pass.**
+  - `catalog-reference-data.e2e-spec.ts` (12) — categories (tree creation, top-level duplicate name rejected via the partial unique index, same name allowed under different parents, self-parent and ancestor/descendant cycle rejected, 404 on a cross-tenant parentId), brands/UOMs (duplicate name/code rejected, precision range validated, code normalization), attributes/values (duplicate value rejected, deleting an unused value succeeds, deleting a value still attached to a variant is blocked).
+  - `catalog-products.e2e-spec.ts` (21) — simple-product auto-default-variant, duplicate SKU/bad references/bad stock-range rejected; multi-variant products with distinct attribute combinations and per-variant barcodes/prices; duplicate attribute combination rejected both within one request and against a variant added afterward; a variant carrying two values for one attribute rejected; cross-table SKU collision (a new variant's SKU colliding with an existing Product's SKU) rejected; full bundle lifecycle (create, reject empty/non-bundle-with-items, reject nested bundles, replace composition, reject replacing on a non-bundle); add-variant/update-variant/change-cost/change-price (each price change verified to write a `ProductPriceHistory` row with the correct old/new values); barcode lookup by barcode and by SKU, 404 on unknown barcode, 422 when neither query param given, duplicate barcode rejected, primary-barcode swap; product-UOM add/reject-base-UOM/reject-duplicate/reject-non-positive-factor; search + pagination.
+  - `catalog-price-lists.e2e-spec.ts` (4) — duplicate name rejected; only one default price list per tenant (creating a second default un-defaults the first, matching the Phase 1 default-warehouse pattern); upsert is a true update-in-place (not a duplicate row) and both changes land in price history; 404 when pricing a variant from another tenant.
+  - `catalog-permissions-and-isolation.e2e-spec.ts` (9) — the highest-value suite: a Cashier (no `products.view_cost`) gets `cost`/`defaultCost` fields stripped from product list, product detail, and barcode/SKU lookup responses alike, while the Owner sees them; the same Cashier is blocked (403) from creating a product or changing cost/price even though they can view products; an Inventory Manager's default template grants confirmed to include `products.change_cost`; **tenant isolation proven at both layers again**, this time for the new tables — API layer (tenant B can't see/fetch/modify tenant A's products or variants, gets 404 not silent success), and independently at the PostgreSQL layer via raw SQL as the same restricted `erp_app` role with no application-level filter at all (unfiltered `SELECT * FROM products` returns zero rows with no tenant context set; setting context to A returns only A's rows; inserting a product for A while context is B is rejected by RLS `WITH CHECK`; `UPDATE`/`DELETE` on `product_price_history` and `DELETE` on `products`/`product_variants` fail with a Postgres permission-denied error regardless of RLS, because the grant was never given at all).
 
-- A real bug was caught and fixed by this test suite during development: the login use case originally wrote the `LOGIN_FAILED` audit row and then `throw`n the auth error from inside the same Prisma transaction — since a thrown error inside `$transaction()` rolls back everything written in it, the audit row was being silently discarded on every failed login. Fixed by returning a discriminated result from the transaction and throwing only after it commits (`login.use-case.ts`). This is exactly the class of "quiet transactional bug" the required end-to-end tests are supposed to surface.
+- No new "quiet transactional bug" class of issue surfaced this phase (Phase 1's login/audit rollback bug was the one that did); Phase 2's transactions were written with that lesson already applied (every use case returns from inside `withTenant` rather than throwing after a side effect it wants kept).
 
 ## Security Review
-- Passwords: argon2id, never logged, never serialized in any API response (`USER_SAFE_SELECT` used everywhere `User` is returned; verified by test).
-- AuthN: stateless short-lived (15m) JWT access tokens; signed, rotating, individually-revocable refresh tokens (30d).
-- AuthZ: 100% server-side, re-checked from the DB per request; the frontend (not yet built) will never be the source of authorization truth by construction.
-- Tenant isolation: enforced at the database layer via RLS + a non-superuser, non-bypass runtime role — not merely an application-level `WHERE` clause — verified with raw-SQL tests that deliberately skip the application layer.
-- Injection: all data access goes through Prisma's parameterized query builder; the one raw-SQL statement (`SET LOCAL app.current_tenant_id = '<value>'`, which Postgres's wire protocol cannot parameterize) is guarded by a strict UUID-format check before interpolation, and the value only ever originates from a server-generated UUID or a claim out of a token this server itself signed.
-- Standard security headers via `helmet`; CORS locked to an explicit allow-list from `CORS_ORIGIN`, closed by default if unset.
-- Rate limiting: a global `ThrottlerModule` guard (120 req/min) is active. **Known gap**: no tighter, auth-specific throttle on `/auth/login` yet for brute-force resistance — flagged below.
-- Every sensitive mutation (business/branch/warehouse/user/role create & update, role delete, login/login-failed/logout) writes an audit row in the same DB transaction as the change; the row is immutable both by convention and by database grant.
-- No secrets committed: `.env`/`.env.test` are gitignored; `.env.example` documents every variable with a placeholder and explains the two-role (`DATABASE_URL` vs `RUNTIME_DATABASE_URL`) connection split and why mixing them up would silently disable RLS.
+Everything from Phase 1 stands unchanged (argon2id, JWT access+refresh, RLS + restricted role, helmet/CORS, global rate limiting, audit trail, no secrets committed). Phase 2 additions:
+- **New field-level authorization primitive** (`EffectivePermissionsService`, shared by `PermissionsGuard` and any use-case needing an in-request check) removes the duplicated permission-resolution query that existed only inside the guard before — one place computes "what can this user do right now," reused rather than reimplemented for the cost-visibility check.
+- Verified (by test) that a caller without `products.view_cost` genuinely never receives `cost`/`defaultCost` in the HTTP response body at all — not merely a value the frontend is expected to hide.
+- Same rate-limiting gap noted in Phase 1 (`/auth/login` shares the global throttle) still applies; Phase 2 introduced no new auth-adjacent surface.
 
 ## Business Logic Review
-- Uniqueness enforced where the domain requires it: business slug (global), user email (per business), branch name (per business), warehouse name (per branch), role name (per business) — all via DB unique constraints, with a friendly pre-check plus the constraint itself as the ultimate guard (`P2002` mapped to `409 CONFLICT`).
-- Every write that matters is wrapped in `PrismaService.withTenant(...)`, i.e. a single DB transaction: onboarding either creates business+branch+warehouse+6 roles+owner entirely, or none of it persists.
-- Two explicit lockout-prevention invariants, both tested: (1) the last active Business Owner of a tenant can never be suspended or stripped of that role; (2) a role cannot be deleted while still assigned to any user, and built-in role templates can never be deleted.
-- Setting a warehouse as default automatically un-defaults the previous default within the same branch (never two defaults at once).
-- No feature reads `Product.quantity`-style denormalized truth (not applicable yet — no Product model exists until Phase 2 — but the audit/ledger discipline this pattern requires is already established here for `AuditLog` and will carry into `StockMovement`/`JournalEntry`).
+- SKU cross-table uniqueness, attribute-combination integrity (both the "two values for one attribute" and "two identical variants" cases), category cycle prevention, bundle composition rules (no empty bundles, no bundles-in-bundles, no self-reference, `SIMPLE` products can't carry bundle items), and the single-default invariants (price list, and the base-UOM-can't-also-be-a-ProductUom rule) are all real, DB-transaction-backed checks — not client-side hints — and each has a failing-case test.
+- Every price/cost change writes an immutable history row in the same transaction as the change itself (matches the Phase 1 "audit alongside the mutation, same transaction, both commit or both roll back" pattern).
+- No feature computes a derived value (a total, an available quantity, a valuation) from a denormalized "current price" field without going through the actual variant/history record — there is no such derived computation in Phase 2 yet; this stays a forward-looking invariant for Phase 3's costing engine.
 
 ## Known Issues / Technical Debt
-1. **No frontend yet.** Flagged for your explicit decision before Phase 2 (see "Pending Features").
-2. **`/auth/login` shares the global 120 req/min throttle** rather than a tighter dedicated brute-force limit. Recommend a per-route override (e.g. 10/min per IP+email) in a near-term follow-up, not deferred to a specific later phase in the original plan.
-3. **Refresh-token reuse is rejected but doesn't trigger a defensive cascade** (e.g., revoking all of that user's other active sessions as a theft response) — it just fails that one request with 401. Worth adding once Phase 6+ makes session hijacking a higher-value target.
-4. **`erp_app`'s database password is a checked-in development default** (by necessity — plain SQL migrations can't read secrets); production deployment MUST rotate it immediately post-deploy. Documented in the migration file and `.env.example`, repeating it here so it isn't missed.
-5. **No email/SMS invite, password-reset, or 2FA flow** — deferred; the Notifications module (Phase 8) and a dedicated auth-hardening pass are the natural homes for these.
-6. Redis/BullMQ are provisioned in `docker-compose.yml` but not yet used by any Phase 1 code path (no jobs exist yet to queue).
+Phase 1's list stands unchanged (no frontend yet — flagged again below since it's now two phases overdue for a decision; no dedicated login rate limit; no refresh-token-reuse defensive cascade; `erp_app` dev-default password; no invite/reset/2FA; Redis/BullMQ unused). New from Phase 2:
 
-## Important Business Rules (running reference, unchanged + Phase 1 additions)
-1. StockMovement = future source of inventory truth; JournalEntryLine = future source of financial truth (still Phase 3/6, not built).
-2. Every critical write = one atomic DB transaction (established pattern via `PrismaService.withTenant`, exercised so far by onboarding, user/role/branch/warehouse mutations, and login).
-3. No hard delete of financial/sensitive documents. Phase 1 concretization: `businesses` and `audit_logs` cannot be hard-deleted even at the database-privilege level, independent of application code.
-4. Authorization is always re-verified server-side and always fresh (never trust a cached/JWT-embedded permission snapshot).
-5. Tenant isolation is enforced by the database (RLS), not only by application code.
+7. **No hard-delete endpoint for Category/Brand/UOM/PriceList.** Soft `isActive` covers the practical need for Phase 2; a genuine "permanently remove a never-used category" admin action can be added later without a schema change (the DB grants already allow it).
+8. **`Product.defaultCost`/`defaultSellingPrice` cannot be edited after creation via the API** (by design — see Architecture Decisions). If a future phase decides simple products need a "just change the one price" shortcut distinct from `PATCH /catalog/variants/:id/price`, that's an additive UX convenience, not a data-model change.
+9. **Bundle components are validated to be non-bundle products, but there's no limit on bundle depth beyond that one level** (a bundle can't contain a bundle, full stop, rather than a depth check) — simpler and sufficient for Phase 2; revisit only if a real multi-level bundle need appears.
+10. **No image upload endpoint** — `images` is a caller-supplied JSON array of URLs (validated as real URLs), not a file upload. Real asset storage is unscoped infrastructure work, not part of any phase's plan yet.
+11. **`ProductAttribute`/`ProductAttributeValue` don't carry `createdBy`/`updatedBy`** the way every other Phase 1/2 entity does (a minor inconsistency, not a functional gap — audit trail for these still exists via `AuditLog`).
+
+## Files Created
+Prisma migrations: `apps/api/prisma/migrations/20260828124217_catalog_schema/`, `.../20260828124500_catalog_rls/`, `.../20260828124600_catalog_app_role_grants/`.
+
+Shared packages: `packages/shared-validation/src/primitives.ts`, `packages/shared-validation/src/catalog.ts`.
+
+API — authorization: `apps/api/src/common/authorization/effective-permissions.service.ts`, `.../authorization.module.ts`.
+
+API — catalog module (`apps/api/src/modules/catalog/`): `catalog.module.ts`; `domain/{includes,omit-fields,sku-guard,attribute-values}.ts` + `domain/__tests__/{omit-fields,attribute-values}.spec.ts`; `application/{categories,brands,uoms,attributes,products,variants,product-uoms,barcodes,price-lists,catalog-sync}.service.ts`; `presentation/{categories,brands,uoms,attributes,products,variants,price-lists,catalog-sync,catalog-admin}.controller.ts`.
+
+Tests: `apps/api/test/catalog-{reference-data,products,price-lists,permissions-and-isolation}.e2e-spec.ts`, `apps/api/test/utils/register-and-login.ts`.
+
+## Files Modified
+`apps/api/prisma/schema.prisma` (14 new models/4 enums + Business relations), `apps/api/prisma/seed.ts` (permission descriptions + owner-role backfill), `apps/api/src/app.module.ts` (wire `AuthorizationModule`/`CatalogModule`), `apps/api/src/common/guards/permissions.guard.ts` (refactored to use `EffectivePermissionsService`), `apps/api/test/db-reset.ts` (truncate the 14 new tables too), `packages/shared-types/src/permissions.ts` (27 new codes + role-template grants), `packages/shared-validation/src/index.ts` (re-exports `primitives.ts`/`catalog.ts`).
 
 ## Next Phase
-**Phase 2 — Products & Catalog**: Products, Variants, Attributes, UOM, Barcodes, Prices, Bundles.
-**Will not start until you explicitly approve this Phase 1 report.**
+**Phase 3 — Inventory Engine**: Stock Ledger, Stock Balance, Opening Stock, Adjustments, Stock Count, Transfers, Lots, Expiry, Serial numbers.
+**Will not start until you explicitly approve this Phase 2 report.**

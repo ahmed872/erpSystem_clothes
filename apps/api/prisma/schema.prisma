@@ -1,9 +1,11 @@
-// Phase 1 (Foundation) schema.
+// Phase 1 (Foundation) + Phase 2 (Products & Catalog) schema.
 // Inventory/Accounting/Sales/Purchasing entities are intentionally NOT
 // modeled yet — they arrive in later phases per docs/architecture.
 // Multi-tenancy: shared schema + tenant_id + PostgreSQL Row-Level Security.
 // RLS policies are added via raw SQL in migration
 // 20260828120000_enable_row_level_security (Prisma cannot express RLS).
+// Phase 2 adds its own RLS migration (20260828140500_catalog_rls) following
+// the exact same pattern.
 
 generator client {
   provider = "prisma-client-js"
@@ -48,30 +50,43 @@ model Business {
   createdAt DateTime       @default(now()) @map("created_at")
   updatedAt DateTime       @updatedAt @map("updated_at")
 
-  branches    Branch[]
-  warehouses  Warehouse[]
-  users       User[]
-  roles       Role[]
-  settings    Setting[]
-  auditLogs   AuditLog[]
+  branches   Branch[]
+  warehouses Warehouse[]
+  users      User[]
+  roles      Role[]
+  settings   Setting[]
+  auditLogs  AuditLog[]
+
+  categories      Category[]
+  brands          Brand[]
+  uoms            Uom[]
+  attributes      ProductAttribute[]
+  attributeValues ProductAttributeValue[]
+  products        Product[]
+  variants        ProductVariant[]
+  productUoms     ProductUom[]
+  barcodes        Barcode[]
+  priceLists      PriceList[]
+  productPrices   ProductPrice[]
+  priceHistory    ProductPriceHistory[]
 
   @@map("businesses")
 }
 
 model Branch {
-  id        String   @id @default(uuid())
-  businessId String  @map("business_id")
-  name      String
-  address   String?
-  phone     String?
-  isActive  Boolean  @default(true) @map("is_active")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-  createdBy String?  @map("created_by")
-  updatedBy String?  @map("updated_by")
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  name       String
+  address    String?
+  phone      String?
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  createdBy  String?  @map("created_by")
+  updatedBy  String?  @map("updated_by")
 
-  business    Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  warehouses  Warehouse[]
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  warehouses   Warehouse[]
   userBranches UserBranch[]
 
   @@unique([businessId, name])
@@ -193,12 +208,12 @@ model RolePermission {
 /// (logout / rotation), unlike short-lived access tokens which are
 /// stateless JWTs validated by signature + expiry only.
 model RefreshToken {
-  id         String    @id @default(uuid())
-  userId     String    @map("user_id")
-  tokenHash  String    @unique @map("token_hash")
-  expiresAt  DateTime  @map("expires_at")
-  revokedAt  DateTime? @map("revoked_at")
-  createdAt  DateTime  @default(now()) @map("created_at")
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -247,4 +262,381 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+// ============================================================================
+// Phase 2: Products & Catalog
+//
+// Design notes (see docs/architecture/PHASE-0-ARCHITECTURE.md §5-8 and
+// docs/state/PROJECT_STATE.md for the full rationale):
+//
+// - Every sellable/stockable unit is a ProductVariant, never a Product
+//   directly. A "simple" product with no configurable attributes still
+//   gets exactly one auto-created default ProductVariant at creation time
+//   (same SKU as the product), so Inventory (Phase 3) and Sales (Phase 5)
+//   only ever need to reference variantId — one uniform join key, no
+//   "is this a variant or a plain product" branching anywhere downstream.
+// - A Bundle is a Product with type=BUNDLE. It still gets its own default
+//   variant (that's what gets sold/scanned), but carries NO inventory of
+//   its own — BundleItem lists the component variants consumed when the
+//   bundle sells (Phase 3 wires the actual stock consumption once
+//   StockMovement exists; the catalog composition is defined now).
+// - Money/quantity fields are NUMERIC(18,4) (Decimal in Prisma), matching
+//   the Phase 0 rule against FLOAT for anything financial or stock-related.
+// ============================================================================
+
+enum ProductType {
+  SIMPLE
+  BUNDLE
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  DISCONTINUED
+}
+
+enum ProductVariantStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum PriceChangeType {
+  COST
+  SELLING_PRICE
+  LIST_PRICE
+}
+
+model Category {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  parentId    String?  @map("parent_id")
+  name        String
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdBy   String?  @map("created_by")
+  updatedBy   String?  @map("updated_by")
+
+  business Business   @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "categories_business_fk")
+  parent   Category?  @relation("CategoryParent", fields: [parentId], references: [id], onDelete: Restrict)
+  children Category[] @relation("CategoryParent")
+  products Product[]
+
+  // Top-level (parentId IS NULL) uniqueness is enforced separately by a
+  // partial unique index in migration 20260828140000_catalog_schema,
+  // because Postgres treats NULL as distinct in a normal unique
+  // constraint (two NULL parentId rows would NOT collide here).
+  @@unique([businessId, parentId, name])
+  @@index([businessId])
+  @@index([parentId])
+  @@map("categories")
+}
+
+model Brand {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  name        String
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdBy   String?  @map("created_by")
+  updatedBy   String?  @map("updated_by")
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "brands_business_fk")
+  products Product[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+  @@map("brands")
+}
+
+/// Tenant-level catalog of measurement units (Piece, Carton, Kg, ...).
+/// `precision` is the number of decimal places a quantity in this unit
+/// may carry (0 for "Piece", up to a few for weight-based units) -
+/// Inventory (Phase 3) will use this to reject fractional pieces while
+/// allowing fractional kilograms.
+model Uom {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  name       String
+  code       String
+  precision  Int      @default(0)
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  createdBy  String?  @map("created_by")
+  updatedBy  String?  @map("updated_by")
+
+  business        Business     @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "uoms_business_fk")
+  baseForProducts Product[]    @relation("ProductBaseUom")
+  productUoms     ProductUom[]
+
+  @@unique([businessId, name])
+  @@unique([businessId, code])
+  @@index([businessId])
+  @@map("uoms")
+}
+
+/// Dynamic/configurable attribute TYPE (e.g. "Color", "Size") - the actual
+/// choices live in ProductAttributeValue. Both are tenant-scoped so every
+/// business defines its own attribute vocabulary rather than the system
+/// hardcoding clothing-specific concepts (Phase 0 §2/§58).
+model ProductAttribute {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  name       String
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  business Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "attributes_business_fk")
+  values   ProductAttributeValue[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+  @@map("product_attributes")
+}
+
+model ProductAttributeValue {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  attributeId String   @map("attribute_id")
+  value       String
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  business  Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "attribute_values_business_fk")
+  attribute ProductAttribute        @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  variants  VariantAttributeValue[]
+
+  @@unique([attributeId, value])
+  // Composite-FK target for VariantAttributeValue: lets the database
+  // itself guarantee that a variant's chosen value actually belongs to
+  // the attribute it's recorded against (see VariantAttributeValue).
+  @@unique([id, attributeId])
+  @@index([businessId])
+  @@map("product_attribute_values")
+}
+
+model Product {
+  id                  String        @id @default(uuid())
+  businessId          String        @map("business_id")
+  sku                 String
+  name                String
+  alternativeName     String?       @map("alternative_name")
+  categoryId          String?       @map("category_id")
+  brandId             String?       @map("brand_id")
+  description         String?
+  type                ProductType   @default(SIMPLE)
+  status              ProductStatus @default(ACTIVE)
+  defaultCost         Decimal       @default(0) @map("default_cost") @db.Decimal(18, 4)
+  defaultSellingPrice Decimal       @default(0) @map("default_selling_price") @db.Decimal(18, 4)
+  minimumStock        Decimal?      @map("minimum_stock") @db.Decimal(18, 4)
+  maximumStock        Decimal?      @map("maximum_stock") @db.Decimal(18, 4)
+  baseUomId           String        @map("base_uom_id")
+  images              Json?
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
+  createdBy           String?       @map("created_by")
+  updatedBy           String?       @map("updated_by")
+
+  business    Business         @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "products_business_fk")
+  category    Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brand       Brand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  baseUom     Uom              @relation("ProductBaseUom", fields: [baseUomId], references: [id], onDelete: Restrict)
+  variants    ProductVariant[]
+  productUoms ProductUom[]
+  bundleItems BundleItem[]     @relation("BundleProduct")
+
+  @@unique([businessId, sku])
+  @@index([businessId])
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([status])
+  @@map("products")
+}
+
+model ProductVariant {
+  id           String               @id @default(uuid())
+  businessId   String               @map("business_id")
+  productId    String               @map("product_id")
+  sku          String
+  status       ProductVariantStatus @default(ACTIVE)
+  cost         Decimal              @default(0) @db.Decimal(18, 4)
+  sellingPrice Decimal              @default(0) @map("selling_price") @db.Decimal(18, 4)
+  weight       Decimal?             @db.Decimal(18, 4)
+  dimensions   Json?
+  images       Json?
+  createdAt    DateTime             @default(now()) @map("created_at")
+  updatedAt    DateTime             @updatedAt @map("updated_at")
+  createdBy    String?              @map("created_by")
+  updatedBy    String?              @map("updated_by")
+
+  business          Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "variants_business_fk")
+  product           Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attributeValues   VariantAttributeValue[]
+  barcodes          Barcode[]
+  productPrices     ProductPrice[]
+  priceHistory      ProductPriceHistory[]
+  bundleComponentOf BundleItem[]            @relation("BundleComponent")
+
+  @@unique([businessId, sku])
+  @@index([businessId])
+  @@index([productId])
+  @@index([status])
+  @@map("product_variants")
+}
+
+/// Join row recording one attribute=value choice for a variant (e.g.
+/// Color=Black). `attributeId` is denormalized from attributeValueId
+/// purely so the composite FK below can force the database to reject a
+/// value that doesn't actually belong to the given attribute, and so
+/// @@id([variantId, attributeId]) can guarantee a variant never carries
+/// two different values for the same attribute (can't be both
+/// Color=Black and Color=White).
+model VariantAttributeValue {
+  variantId        String @map("variant_id")
+  attributeId      String @map("attribute_id")
+  attributeValueId String @map("attribute_value_id")
+
+  variant        ProductVariant        @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  attributeValue ProductAttributeValue @relation(fields: [attributeValueId, attributeId], references: [id, attributeId], onDelete: Restrict)
+
+  @@id([variantId, attributeId])
+  @@index([attributeValueId])
+  @@map("variant_attribute_values")
+}
+
+/// A non-base unit a product can be purchased and/or sold in, with its
+/// conversion factor back to the product's base UOM (Phase 0 §7 - e.g.
+/// "1 Carton = 12 Pieces" where Piece is the base). The base UOM itself
+/// is never duplicated here (factor 1 is implicit) - see Product.baseUomId.
+model ProductUom {
+  id               String   @id @default(uuid())
+  businessId       String   @map("business_id")
+  productId        String   @map("product_id")
+  uomId            String   @map("uom_id")
+  conversionFactor Decimal  @map("conversion_factor") @db.Decimal(18, 6)
+  isPurchaseUom    Boolean  @default(false) @map("is_purchase_uom")
+  isSalesUom       Boolean  @default(false) @map("is_sales_uom")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "product_uoms_business_fk")
+  product  Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  uom      Uom       @relation(fields: [uomId], references: [id], onDelete: Restrict)
+  barcodes Barcode[]
+
+  @@unique([productId, uomId])
+  @@index([businessId])
+  @@map("product_uoms")
+}
+
+/// A variant may have several barcodes (different pack levels via
+/// productUomId, regional codes, legacy codes...). `productUomId` null
+/// means the barcode identifies the variant at its base UOM.
+model Barcode {
+  id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
+  variantId    String   @map("variant_id")
+  productUomId String?  @map("product_uom_id")
+  code         String
+  isPrimary    Boolean  @default(false) @map("is_primary")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  business   Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "barcodes_business_fk")
+  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  productUom ProductUom?    @relation(fields: [productUomId], references: [id], onDelete: SetNull)
+
+  // At most one isPrimary=true per variant is enforced by a partial
+  // unique index in migration 20260828140000_catalog_schema (Prisma has
+  // no way to express a partial index in the schema DSL).
+  @@unique([businessId, code])
+  @@index([variantId])
+  @@map("barcodes")
+}
+
+/// A named pricing tier (Retail, Wholesale, VIP...). Exactly one
+/// isDefault=true list per tenant, enforced by a partial unique index
+/// (see migration 20260828140000_catalog_schema).
+model PriceList {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  name       String
+  isDefault  Boolean  @default(false) @map("is_default")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  createdBy  String?  @map("created_by")
+  updatedBy  String?  @map("updated_by")
+
+  business Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "price_lists_business_fk")
+  prices   ProductPrice[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+  @@map("price_lists")
+}
+
+model ProductPrice {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  priceListId String   @map("price_list_id")
+  variantId   String   @map("variant_id")
+  price       Decimal  @db.Decimal(18, 4)
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  updatedBy   String?  @map("updated_by")
+
+  business  Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "product_prices_business_fk")
+  priceList PriceList      @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([priceListId, variantId])
+  @@index([businessId])
+  @@index([variantId])
+  @@map("product_prices")
+}
+
+/// Append-only ledger of cost/price changes - immutable at the DB
+/// privilege level too (SELECT+INSERT only for erp_app), same pattern as
+/// AuditLog. This is what Phase 7's "Price History" report reads from,
+/// and it's what keeps a promise distinct from AuditLog's generic
+/// before/after snapshots: a dedicated, queryable domain ledger.
+model ProductPriceHistory {
+  id          String          @id @default(uuid())
+  businessId  String          @map("business_id")
+  variantId   String          @map("variant_id")
+  priceListId String?         @map("price_list_id")
+  changeType  PriceChangeType @map("change_type")
+  oldValue    Decimal?        @map("old_value") @db.Decimal(18, 4)
+  newValue    Decimal         @map("new_value") @db.Decimal(18, 4)
+  changedBy   String?         @map("changed_by")
+  createdAt   DateTime        @default(now()) @map("created_at")
+
+  business Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "price_history_business_fk")
+  variant  ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+  @@index([variantId])
+  @@map("product_price_history")
+}
+
+/// Composition of a Bundle-type Product. componentVariantId must belong
+/// to a SIMPLE product (enforced in application logic, not DB - no
+/// nested bundles in Phase 2, see PROJECT_STATE.md Known Issues).
+model BundleItem {
+  id                 String   @id @default(uuid())
+  bundleProductId    String   @map("bundle_product_id")
+  componentVariantId String   @map("component_variant_id")
+  quantity           Decimal  @db.Decimal(18, 4)
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  bundleProduct    Product        @relation("BundleProduct", fields: [bundleProductId], references: [id], onDelete: Cascade)
+  componentVariant ProductVariant @relation("BundleComponent", fields: [componentVariantId], references: [id], onDelete: Restrict)
+
+  @@unique([bundleProductId, componentVariantId])
+  @@index([componentVariantId])
+  @@map("bundle_items")
 }

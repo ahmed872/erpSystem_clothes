@@ -25,6 +25,33 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'warehouses.edit': 'Edit warehouses',
   'warehouses.delete': 'Deactivate warehouses',
   'audit.view': 'View audit logs',
+  'products.view': 'View products and variants (excluding cost)',
+  'products.view_cost': 'View product/variant cost fields',
+  'products.create': 'Create products and variants',
+  'products.edit': 'Edit product/variant general fields',
+  'products.change_price': 'Change product/variant selling price',
+  'products.change_cost': 'Change product/variant cost',
+  'products.delete': 'Deactivate/discontinue products or variants',
+  'categories.view': 'View categories',
+  'categories.create': 'Create categories',
+  'categories.edit': 'Edit categories',
+  'categories.delete': 'Delete categories',
+  'brands.view': 'View brands',
+  'brands.create': 'Create brands',
+  'brands.edit': 'Edit brands',
+  'brands.delete': 'Delete brands',
+  'uoms.view': 'View units of measure',
+  'uoms.create': 'Create units of measure',
+  'uoms.edit': 'Edit units of measure',
+  'uoms.delete': 'Delete units of measure',
+  'attributes.view': 'View product attributes and their values',
+  'attributes.create': 'Create product attributes and values',
+  'attributes.edit': 'Edit product attributes and values',
+  'attributes.delete': 'Delete product attributes and values',
+  'pricelists.view': 'View price lists and their entries',
+  'pricelists.create': 'Create price lists',
+  'pricelists.edit': 'Edit price lists',
+  'pricelists.manage_prices': 'Set variant prices within a price list',
 };
 
 /**
@@ -44,6 +71,34 @@ async function main() {
     }
     // eslint-disable-next-line no-console
     console.log(`Seeded ${PERMISSION_CODES.length} permissions.`);
+
+    // A Role's grants are a stored snapshot (RolePermission rows), not
+    // computed dynamically from "is this the owner role" - so a business
+    // onboarded before a new permission code existed would otherwise lose
+    // access to it forever. BUSINESS_OWNER is the one role template with a
+    // hard invariant ("the owner always has everything"), so backfill it
+    // here on every seed run; other templates' new defaults only apply to
+    // businesses onboarded from now on (existing tenants can grant them
+    // manually via the Roles API - see docs/state/PROJECT_STATE.md).
+    const allPermissions = await prisma.permission.findMany({ select: { id: true } });
+    const ownerRoles = await prisma.role.findMany({ where: { name: 'BUSINESS_OWNER', isSystem: true } });
+    let backfilled = 0;
+    for (const role of ownerRoles) {
+      const existing = await prisma.rolePermission.findMany({ where: { roleId: role.id }, select: { permissionId: true } });
+      const existingIds = new Set(existing.map((rp) => rp.permissionId));
+      const missing = allPermissions.filter((p) => !existingIds.has(p.id));
+      if (missing.length > 0) {
+        await prisma.rolePermission.createMany({
+          data: missing.map((p) => ({ roleId: role.id, permissionId: p.id })),
+          skipDuplicates: true,
+        });
+        backfilled += missing.length;
+      }
+    }
+    if (backfilled > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`Backfilled ${backfilled} permission grant(s) across ${ownerRoles.length} BUSINESS_OWNER role(s).`);
+    }
   } finally {
     await prisma.$disconnect();
   }

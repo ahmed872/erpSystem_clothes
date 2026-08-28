@@ -11,7 +11,12 @@ export async function resetDatabase(): Promise<void> {
     await admin.$executeRawUnsafe(`
       TRUNCATE TABLE
         "audit_logs", "refresh_tokens", "user_roles", "user_branches", "role_permissions",
-        "settings", "warehouses", "branches", "roles", "users", "businesses"
+        "settings", "warehouses", "branches", "roles", "users",
+        "product_price_history", "product_prices", "price_lists",
+        "bundle_items", "barcodes", "product_uoms", "variant_attribute_values",
+        "product_variants", "products", "product_attribute_values", "product_attributes",
+        "uoms", "brands", "categories",
+        "businesses"
       RESTART IDENTITY CASCADE
     `);
   } finally {
