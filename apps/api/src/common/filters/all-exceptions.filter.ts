@@ -10,6 +10,7 @@ const DOMAIN_ERROR_HTTP_STATUS: Record<string, number> = {
   CONFLICT: HttpStatus.CONFLICT,
   UNAUTHORIZED: HttpStatus.UNAUTHORIZED,
   FORBIDDEN: HttpStatus.FORBIDDEN,
+  INSUFFICIENT_STOCK: HttpStatus.CONFLICT,
 };
 
 /**

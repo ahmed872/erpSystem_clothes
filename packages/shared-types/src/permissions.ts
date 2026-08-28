@@ -67,6 +67,18 @@ export const PERMISSION_CODES = [
   'pricelists.create',
   'pricelists.edit',
   'pricelists.manage_prices',
+  // Inventory (Phase 3)
+  'inventory.view',
+  'inventory.opening_stock',
+  'inventory.receive',
+  'inventory.consume',
+  'inventory.adjust',
+  'inventory.allow_negative',
+  'inventory.transfer_create',
+  'inventory.transfer_send',
+  'inventory.transfer_receive',
+  'inventory.stock_count_create',
+  'inventory.stock_count_approve',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -110,6 +122,8 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'uoms.view',
     'attributes.view',
     'pricelists.view',
+    'inventory.view',
+    'inventory.stock_count_approve',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -119,6 +133,7 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'products.view',
     'products.view_cost',
     'pricelists.view',
+    'inventory.view',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',
@@ -148,7 +163,21 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'attributes.edit',
     'attributes.delete',
     'pricelists.view',
+    'inventory.view',
+    'inventory.opening_stock',
+    'inventory.receive',
+    'inventory.consume',
+    'inventory.adjust',
+    'inventory.transfer_create',
+    'inventory.transfer_send',
+    'inventory.transfer_receive',
+    'inventory.stock_count_create',
+    'inventory.stock_count_approve',
+    // Not inventory.allow_negative by default: that's an elevated
+    // override even for the Inventory Manager template - the tenant
+    // Setting must ALSO be turned on (see resolveAllowNegative), and an
+    // owner grants this permission explicitly when they actually want it.
   ],
-  CASHIER: ['branches.view', 'products.view'],
-  SALES_EMPLOYEE: ['branches.view', 'products.view'],
+  CASHIER: ['branches.view', 'products.view', 'inventory.view'],
+  SALES_EMPLOYEE: ['branches.view', 'products.view', 'inventory.view'],
 };

@@ -52,6 +52,17 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'pricelists.create': 'Create price lists',
   'pricelists.edit': 'Edit price lists',
   'pricelists.manage_prices': 'Set variant prices within a price list',
+  'inventory.view': 'View stock balances, movements, transfers, and counts',
+  'inventory.opening_stock': 'Record opening stock for a variant/warehouse',
+  'inventory.receive': 'Receive stock (purchases, sales returns)',
+  'inventory.consume': 'Consume stock (sales, purchase returns)',
+  'inventory.adjust': 'Record stock adjustments, damage, loss, expiry, internal consumption',
+  'inventory.allow_negative': 'Allow a specific stock movement to push a balance negative when the tenant setting permits it',
+  'inventory.transfer_create': 'Create a stock transfer between warehouses',
+  'inventory.transfer_send': 'Send a stock transfer (decrements source warehouse)',
+  'inventory.transfer_receive': 'Receive a stock transfer (increments destination warehouse)',
+  'inventory.stock_count_create': 'Create and submit a stock count',
+  'inventory.stock_count_approve': 'Approve a stock count and apply resulting adjustments',
 };
 
 /**

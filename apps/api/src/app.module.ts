@@ -8,6 +8,8 @@ import { AuditModule } from './modules/audit/audit.module';
 import { IamModule } from './modules/iam/iam.module';
 import { TenancyModule } from './modules/tenancy/tenancy.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
+import { InventoryEngineModule } from './engines/inventory/inventory-engine.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
 
@@ -18,9 +20,11 @@ import { PermissionsGuard } from './common/guards/permissions.guard';
     PrismaModule,
     AuthorizationModule,
     AuditModule,
+    InventoryEngineModule,
     IamModule,
     TenancyModule,
     CatalogModule,
+    InventoryModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

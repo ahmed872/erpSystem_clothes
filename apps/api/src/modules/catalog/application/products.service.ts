@@ -96,6 +96,8 @@ export class ProductsService {
           maximumStock: input.maximumStock,
           baseUomId: input.baseUomId,
           images: input.images,
+          tracksLots: input.tracksLots,
+          tracksSerialNumbers: input.tracksSerialNumbers,
           createdBy: actor.id,
         },
       });
@@ -249,6 +251,8 @@ export class ProductsService {
           minimumStock: input.minimumStock === undefined ? undefined : input.minimumStock,
           maximumStock: input.maximumStock === undefined ? undefined : input.maximumStock,
           images: input.images === undefined ? undefined : input.images,
+          tracksLots: input.tracksLots ?? undefined,
+          tracksSerialNumbers: input.tracksSerialNumbers ?? undefined,
           updatedBy: actor.id,
         },
       });

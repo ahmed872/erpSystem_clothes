@@ -70,6 +70,13 @@ model Business {
   productPrices   ProductPrice[]
   priceHistory    ProductPriceHistory[]
 
+  stockMovements StockMovement[]
+  stockBalances  StockBalance[]
+  inventoryLots  InventoryLot[]
+  serialNumbers  SerialNumber[]
+  stockCounts    StockCount[]
+  stockTransfers StockTransfer[]
+
   @@map("businesses")
 }
 
@@ -85,9 +92,10 @@ model Branch {
   createdBy  String?  @map("created_by")
   updatedBy  String?  @map("updated_by")
 
-  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  warehouses   Warehouse[]
-  userBranches UserBranch[]
+  business       Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  warehouses     Warehouse[]
+  userBranches   UserBranch[]
+  stockMovements StockMovement[]
 
   @@unique([businessId, name])
   @@index([businessId])
@@ -108,6 +116,13 @@ model Warehouse {
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "warehouses_business_fk")
   branch   Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  stockMovements StockMovement[]
+  stockBalances  StockBalance[]
+  stockCounts    StockCount[]
+  transfersOut   StockTransfer[] @relation("TransferSource")
+  transfersIn    StockTransfer[] @relation("TransferDestination")
+  serialNumbers  SerialNumber[]
 
   @@unique([branchId, name])
   @@index([businessId])
@@ -370,9 +385,10 @@ model Uom {
   createdBy  String?  @map("created_by")
   updatedBy  String?  @map("updated_by")
 
-  business        Business     @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "uoms_business_fk")
-  baseForProducts Product[]    @relation("ProductBaseUom")
+  business        Business        @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "uoms_business_fk")
+  baseForProducts Product[]       @relation("ProductBaseUom")
   productUoms     ProductUom[]
+  stockMovements  StockMovement[]
 
   @@unique([businessId, name])
   @@unique([businessId, code])
@@ -438,6 +454,12 @@ model Product {
   maximumStock        Decimal?      @map("maximum_stock") @db.Decimal(18, 4)
   baseUomId           String        @map("base_uom_id")
   images              Json?
+  // Phase 3 additions (Inventory Engine): whether variants of this product
+  // require lot/expiry or serial-number tracking on every stock movement.
+  // Purely additive config the Inventory Engine reads - does not change
+  // any Phase 1/2 behavior.
+  tracksLots          Boolean       @default(false) @map("tracks_lots")
+  tracksSerialNumbers Boolean       @default(false) @map("tracks_serial_numbers")
   createdAt           DateTime      @default(now()) @map("created_at")
   updatedAt           DateTime      @updatedAt @map("updated_at")
   createdBy           String?       @map("created_by")
@@ -475,13 +497,19 @@ model ProductVariant {
   createdBy    String?              @map("created_by")
   updatedBy    String?              @map("updated_by")
 
-  business          Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "variants_business_fk")
-  product           Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
-  attributeValues   VariantAttributeValue[]
-  barcodes          Barcode[]
-  productPrices     ProductPrice[]
-  priceHistory      ProductPriceHistory[]
-  bundleComponentOf BundleItem[]            @relation("BundleComponent")
+  business           Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "variants_business_fk")
+  product            Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attributeValues    VariantAttributeValue[]
+  barcodes           Barcode[]
+  productPrices      ProductPrice[]
+  priceHistory       ProductPriceHistory[]
+  bundleComponentOf  BundleItem[]            @relation("BundleComponent")
+  stockMovements     StockMovement[]
+  stockBalances      StockBalance[]
+  inventoryLots      InventoryLot[]
+  serialNumbers      SerialNumber[]
+  stockCountItems    StockCountItem[]
+  stockTransferItems StockTransferItem[]
 
   @@unique([businessId, sku])
   @@index([businessId])
@@ -639,4 +667,292 @@ model BundleItem {
   @@unique([bundleProductId, componentVariantId])
   @@index([componentVariantId])
   @@map("bundle_items")
+}
+
+// ============================================================================
+// Phase 3: Inventory Engine
+//
+// SOURCE OF TRUTH: StockMovement (below) is the ONLY source of truth for
+// inventory quantities and cost. Nothing anywhere reads a denormalized
+// "Product.quantity" counter - none exists. StockBalance is a derived
+// cache of `SUM(quantityBase) GROUP BY (business, warehouse, variant)`,
+// updated transactionally alongside every StockMovement insert purely as
+// a read-performance cache, and independently recomputable/verifiable
+// from the ledger at any time (see InventoryReconciliationService in
+// application code, and GET /inventory/reconciliation).
+//
+// CONCURRENCY: every write to a (warehouse, variant) pair takes a
+// `SELECT ... FOR UPDATE` row lock on its StockBalance row inside the
+// same DB transaction as the StockMovement insert (see
+// engines/inventory/inventory-engine.service.ts). Two concurrent
+// requests touching the same (warehouse, variant) serialize on that
+// lock - the second one sees the first one's committed balance before
+// it decides whether there's enough stock, which is what makes
+// oversell-prevention actually work under real concurrency rather than
+// just in a single-threaded test.
+//
+// COSTING: Weighted Average Cost. Every StockMovement stores
+// unit_cost_at_movement - for an increase, the cost the stock arrived
+// at; for a decrease, the average cost in effect at that exact moment
+// (locked in as that movement's COGS forever). Changing today's average
+// cost never rewrites a past movement's unit_cost_at_movement, so
+// historical COGS never drifts (Phase 0 §10).
+// ============================================================================
+
+enum StockMovementType {
+  OPENING_BALANCE
+  PURCHASE
+  SALE
+  SALES_RETURN
+  PURCHASE_RETURN
+  TRANSFER_OUT
+  TRANSFER_IN
+  STOCK_COUNT
+  ADJUSTMENT
+  DAMAGE
+  LOSS
+  INTERNAL_CONSUMPTION
+  EXPIRY
+  BUNDLE_CONSUMPTION
+  AUTHORIZED_CORRECTION
+}
+
+enum StockCountStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  CANCELLED
+}
+
+enum StockTransferStatus {
+  DRAFT
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+enum SerialNumberStatus {
+  IN_STOCK
+  RESERVED
+  SOLD
+  DAMAGED
+  RETURNED
+}
+
+/// Append-only. Never UPDATEd or DELETEd by application code - enforced
+/// additionally at the DB grant level (erp_app has SELECT+INSERT only,
+/// same treatment as AuditLog / ProductPriceHistory). A correction to a
+/// past movement is always a NEW movement (movementType
+/// AUTHORIZED_CORRECTION) referencing the one it corrects via
+/// referenceType/referenceId, never an edit in place.
+model StockMovement {
+  id                 String            @id @default(uuid())
+  businessId         String            @map("business_id")
+  branchId           String            @map("branch_id")
+  warehouseId        String            @map("warehouse_id")
+  variantId          String            @map("variant_id")
+  movementType       StockMovementType @map("movement_type")
+  /// Signed, always in the variant's base UOM. Positive = stock in,
+  /// negative = stock out. StockBalance.quantityOnHand = SUM of this.
+  quantityBase       Decimal           @map("quantity_base") @db.Decimal(18, 4)
+  /// The UOM/quantity as originally entered (e.g. "2 Cartons"), kept for
+  /// traceability only - quantityBase is always what balances are
+  /// computed from (Phase 0 §7: inventory is tracked internally in base
+  /// UOM regardless of the transaction UOM).
+  uomId              String?           @map("uom_id")
+  quantityInUom      Decimal?          @map("quantity_in_uom") @db.Decimal(18, 4)
+  /// Per-base-unit cost basis for this specific movement (see costing
+  /// note above) - never recomputed retroactively.
+  unitCostAtMovement Decimal           @map("unit_cost_at_movement") @db.Decimal(18, 4)
+  referenceType      String?           @map("reference_type")
+  referenceId        String?           @map("reference_id")
+  lotId              String?           @map("lot_id")
+  isNegativeStock    Boolean           @default(false) @map("is_negative_stock")
+  reason             String?
+  createdBy          String?           @map("created_by")
+  createdAt          DateTime          @default(now()) @map("created_at")
+
+  business  Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "stock_movements_business_fk")
+  branch    Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  warehouse Warehouse      @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  uom       Uom?           @relation(fields: [uomId], references: [id], onDelete: SetNull)
+  // Restrict, not SetNull: a lot referenced by a historical movement must
+  // never lose that reference just because someone deleted the lot
+  // record - the ledger's traceability would silently degrade. In
+  // practice this is moot too: erp_app has no DELETE grant on
+  // inventory_lots at all (see migration
+  // 20260828131700_inventory_app_role_grants), so this is defense in
+  // depth, not the only guard.
+  lot       InventoryLot?  @relation(fields: [lotId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+  @@index([warehouseId, variantId])
+  @@index([variantId])
+  @@index([referenceType, referenceId])
+  @@index([movementType])
+  @@index([createdAt])
+  @@map("stock_movements")
+}
+
+/// Derived cache ONLY - see the module comment above. Never written to
+/// directly except by InventoryEngine inside the same transaction as the
+/// StockMovement it summarizes, and always re-derivable via
+/// `SUM(quantity_base)` from stock_movements.
+model StockBalance {
+  id               String   @id @default(uuid())
+  businessId       String   @map("business_id")
+  warehouseId      String   @map("warehouse_id")
+  variantId        String   @map("variant_id")
+  quantityOnHand   Decimal  @default(0) @map("quantity_on_hand") @db.Decimal(18, 4)
+  /// Reserved for held/unconfirmed sales (Phase 5 POS "hold invoice").
+  /// Column exists now so the schema doesn't need reshaping later;
+  /// nothing writes a non-zero value yet in Phase 3.
+  quantityReserved Decimal  @default(0) @map("quantity_reserved") @db.Decimal(18, 4)
+  averageCost      Decimal  @default(0) @map("average_cost") @db.Decimal(18, 4)
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  business  Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "stock_balances_business_fk")
+  warehouse Warehouse      @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, warehouseId, variantId])
+  @@index([businessId])
+  @@index([variantId])
+  @@map("stock_balances")
+}
+
+/// Registry of lot/batch metadata only - NOT a quantity counter. "How
+/// much of lot X remains" is always `SUM(quantity_base) WHERE lot_id = X`
+/// against stock_movements, computed on demand, for exactly the same
+/// reason StockBalance itself is a cache and not a second source of
+/// truth.
+model InventoryLot {
+  id                String    @id @default(uuid())
+  businessId        String    @map("business_id")
+  variantId         String    @map("variant_id")
+  lotNumber         String    @map("lot_number")
+  manufacturingDate DateTime? @map("manufacturing_date")
+  expiryDate        DateTime? @map("expiry_date")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  business  Business        @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "inventory_lots_business_fk")
+  variant   ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  movements StockMovement[]
+
+  @@unique([businessId, variantId, lotNumber])
+  @@index([businessId])
+  @@index([expiryDate])
+  @@map("inventory_lots")
+}
+
+/// One row per physically serialized unit. currentWarehouseId is a
+/// convenience pointer maintained alongside the movement that changes
+/// it (receipt sets it, sale/transfer updates it) - the authoritative
+/// history of where a serial has been is still the StockMovement rows
+/// referencing it via referenceType='SerialNumber'/referenceId.
+model SerialNumber {
+  id                 String             @id @default(uuid())
+  businessId         String             @map("business_id")
+  variantId          String             @map("variant_id")
+  serial             String
+  status             SerialNumberStatus @default(IN_STOCK)
+  currentWarehouseId String?            @map("current_warehouse_id")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  business         Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "serial_numbers_business_fk")
+  variant          ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  currentWarehouse Warehouse?     @relation(fields: [currentWarehouseId], references: [id], onDelete: SetNull)
+
+  @@unique([businessId, serial])
+  @@index([businessId])
+  @@index([variantId])
+  @@index([status])
+  @@map("serial_numbers")
+}
+
+model StockCount {
+  id          String           @id @default(uuid())
+  businessId  String           @map("business_id")
+  warehouseId String           @map("warehouse_id")
+  status      StockCountStatus @default(DRAFT)
+  createdBy   String?          @map("created_by")
+  submittedAt DateTime?        @map("submitted_at")
+  approvedBy  String?          @map("approved_by")
+  approvedAt  DateTime?        @map("approved_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  business  Business         @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "stock_counts_business_fk")
+  warehouse Warehouse        @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  items     StockCountItem[]
+
+  @@index([businessId])
+  @@index([warehouseId])
+  @@map("stock_counts")
+}
+
+model StockCountItem {
+  id               String   @id @default(uuid())
+  stockCountId     String   @map("stock_count_id")
+  variantId        String   @map("variant_id")
+  /// Snapshot at count creation, shown to the counter for reference only.
+  /// The adjustment actually applied on approval is computed against the
+  /// LIVE (locked) balance at approval time, not this snapshot, so sales
+  /// that happen during counting are never silently overwritten (see
+  /// ApproveStockCountUseCase).
+  expectedQuantity Decimal  @map("expected_quantity") @db.Decimal(18, 4)
+  actualQuantity   Decimal? @map("actual_quantity") @db.Decimal(18, 4)
+  reason           String?
+
+  stockCount StockCount     @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@unique([stockCountId, variantId])
+  @@map("stock_count_items")
+}
+
+model StockTransfer {
+  id                     String              @id @default(uuid())
+  businessId             String              @map("business_id")
+  sourceWarehouseId      String              @map("source_warehouse_id")
+  destinationWarehouseId String              @map("destination_warehouse_id")
+  status                 StockTransferStatus @default(DRAFT)
+  createdBy              String?             @map("created_by")
+  sentBy                 String?             @map("sent_by")
+  sentAt                 DateTime?           @map("sent_at")
+  receivedBy             String?             @map("received_by")
+  receivedAt             DateTime?           @map("received_at")
+  createdAt              DateTime            @default(now()) @map("created_at")
+  updatedAt              DateTime            @updatedAt @map("updated_at")
+
+  business             Business            @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "stock_transfers_business_fk")
+  sourceWarehouse      Warehouse           @relation("TransferSource", fields: [sourceWarehouseId], references: [id], onDelete: Restrict)
+  destinationWarehouse Warehouse           @relation("TransferDestination", fields: [destinationWarehouseId], references: [id], onDelete: Restrict)
+  items                StockTransferItem[]
+
+  @@index([businessId])
+  @@index([sourceWarehouseId])
+  @@index([destinationWarehouseId])
+  @@index([status])
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id               String   @id @default(uuid())
+  stockTransferId  String   @map("stock_transfer_id")
+  variantId        String   @map("variant_id")
+  /// Planned/sent quantity, fixed once the transfer is sent.
+  quantity         Decimal  @db.Decimal(18, 4)
+  /// Filled in on receive; may differ from `quantity` (shrinkage/damage
+  /// in transit) - the difference is what the receive action reports,
+  /// not auto-corrected.
+  quantityReceived Decimal? @map("quantity_received") @db.Decimal(18, 4)
+
+  stockTransfer StockTransfer  @relation(fields: [stockTransferId], references: [id], onDelete: Cascade)
+  variant       ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@unique([stockTransferId, variantId])
+  @@map("stock_transfer_items")
 }

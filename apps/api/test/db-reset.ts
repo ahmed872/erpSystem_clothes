@@ -12,6 +12,8 @@ export async function resetDatabase(): Promise<void> {
       TRUNCATE TABLE
         "audit_logs", "refresh_tokens", "user_roles", "user_branches", "role_permissions",
         "settings", "warehouses", "branches", "roles", "users",
+        "stock_movements", "stock_balances", "inventory_lots", "serial_numbers",
+        "stock_count_items", "stock_counts", "stock_transfer_items", "stock_transfers",
         "product_price_history", "product_prices", "price_lists",
         "bundle_items", "barcodes", "product_uoms", "variant_attribute_values",
         "product_variants", "products", "product_attribute_values", "product_attributes",

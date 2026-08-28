@@ -150,6 +150,10 @@ export const createProductSchema = z
     maximumStock: moneySchema.optional(),
     baseUomId: z.string().uuid(),
     images: z.array(imageSchema).max(20).optional(),
+    /// Phase 3 (Inventory Engine): whether receipts/consumptions for this
+    /// product's variants require lot/expiry or serial-number data.
+    tracksLots: z.boolean().optional().default(false),
+    tracksSerialNumbers: z.boolean().optional().default(false),
     variants: z.array(productVariantInputSchema).max(200).optional(),
     bundleItems: z
       .array(z.object({ variantId: z.string().uuid(), quantity: positiveQuantitySchema }))
@@ -181,6 +185,8 @@ export const updateProductSchema = z
     minimumStock: moneySchema.nullable().optional(),
     maximumStock: moneySchema.nullable().optional(),
     images: z.array(imageSchema).max(20).optional(),
+    tracksLots: z.boolean().optional(),
+    tracksSerialNumbers: z.boolean().optional(),
   })
   .refine(
     (d) =>

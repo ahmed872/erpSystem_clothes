@@ -44,3 +44,12 @@ export class ForbiddenDomainError extends DomainError {
     super('FORBIDDEN', message);
   }
 }
+
+/** Raised when a decrease movement would push a StockBalance negative and
+ * negative inventory isn't allowed (tenant setting off, or the actor
+ * lacks inventory.allow_negative even when the setting is on). */
+export class InsufficientStockDomainError extends DomainError {
+  constructor(message = 'Insufficient stock available', details?: unknown) {
+    super('INSUFFICIENT_STOCK', message, details);
+  }
+}
