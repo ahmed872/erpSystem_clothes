@@ -1,0 +1,250 @@
+// Phase 1 (Foundation) schema.
+// Inventory/Accounting/Sales/Purchasing entities are intentionally NOT
+// modeled yet — they arrive in later phases per docs/architecture.
+// Multi-tenancy: shared schema + tenant_id + PostgreSQL Row-Level Security.
+// RLS policies are added via raw SQL in migration
+// 20260828120000_enable_row_level_security (Prisma cannot express RLS).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum BusinessStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGIN_FAILED
+  LOGOUT
+  PERMISSION_DENIED
+}
+
+/// Tenant root. Every tenant-scoped table carries businessId ("tenant_id")
+/// and is protected by a Postgres RLS policy comparing it to
+/// current_setting('app.current_tenant_id').
+model Business {
+  id        String         @id @default(uuid())
+  name      String
+  slug      String         @unique
+  currency  String         @default("EGP")
+  timezone  String         @default("Africa/Cairo")
+  status    BusinessStatus @default(ACTIVE)
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  branches    Branch[]
+  warehouses  Warehouse[]
+  users       User[]
+  roles       Role[]
+  settings    Setting[]
+  auditLogs   AuditLog[]
+
+  @@map("businesses")
+}
+
+model Branch {
+  id        String   @id @default(uuid())
+  businessId String  @map("business_id")
+  name      String
+  address   String?
+  phone     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdBy String?  @map("created_by")
+  updatedBy String?  @map("updated_by")
+
+  business    Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  warehouses  Warehouse[]
+  userBranches UserBranch[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+  @@map("branches")
+}
+
+model Warehouse {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  branchId   String   @map("branch_id")
+  name       String
+  isDefault  Boolean  @default(false) @map("is_default")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  createdBy  String?  @map("created_by")
+  updatedBy  String?  @map("updated_by")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "warehouses_business_fk")
+  branch   Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, name])
+  @@index([businessId])
+  @@index([branchId])
+  @@map("warehouses")
+}
+
+model User {
+  id           String     @id @default(uuid())
+  businessId   String     @map("business_id")
+  name         String
+  email        String
+  passwordHash String     @map("password_hash")
+  status       UserStatus @default(ACTIVE)
+  lastLoginAt  DateTime?  @map("last_login_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  createdBy    String?    @map("created_by")
+  updatedBy    String?    @map("updated_by")
+
+  business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "users_business_fk")
+  userRoles     UserRole[]
+  userBranches  UserBranch[]
+  refreshTokens RefreshToken[]
+
+  @@unique([businessId, email])
+  @@index([businessId])
+  @@map("users")
+}
+
+/// Scopes a user to specific branches. Empty = access to all branches
+/// (subject to permission checks); used by branch-level data isolation
+/// in later phases (sales, inventory, cash).
+model UserBranch {
+  userId   String @map("user_id")
+  branchId String @map("branch_id")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@id([userId, branchId])
+  @@map("user_branches")
+}
+
+model Role {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  name       String
+  isSystem   Boolean  @default(false) @map("is_system")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  business        Business         @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "roles_business_fk")
+  userRoles       UserRole[]
+  rolePermissions RolePermission[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+  @@map("roles")
+}
+
+/// Global catalog of permission codes — NOT tenant-scoped (see §9 Roles &
+/// Permissions in Phase 0 doc). Seeded once at deploy time.
+model Permission {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  description String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model UserRole {
+  userId String @map("user_id")
+  roleId String @map("role_id")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+/// Refresh tokens are stored hashed and are individually revocable
+/// (logout / rotation), unlike short-lived access tokens which are
+/// stateless JWTs validated by signature + expiry only.
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  tokenHash  String    @unique @map("token_hash")
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+/// Key/value business settings (currency display, invoice numbering, RTL,
+/// negative-inventory toggle, etc. — expanded in later phases). Kept
+/// generic in Phase 1 rather than one column per setting.
+model Setting {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  key        String
+  value      Json
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  updatedBy  String?  @map("updated_by")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "settings_business_fk")
+
+  @@unique([businessId, key])
+  @@index([businessId])
+  @@map("settings")
+}
+
+/// Append-only. Application code must never UPDATE or DELETE rows here —
+/// enforced additionally at the DB role level (see migration 3).
+model AuditLog {
+  id         String      @id @default(uuid())
+  businessId String?     @map("business_id")
+  userId     String?     @map("user_id")
+  action     AuditAction
+  entityType String      @map("entity_type")
+  entityId   String?     @map("entity_id")
+  before     Json?
+  after      Json?
+  reason     String?
+  ipAddress  String?     @map("ip_address")
+  userAgent  String?     @map("user_agent")
+  requestId  String?     @map("request_id")
+  createdAt  DateTime    @default(now()) @map("created_at")
+
+  business Business? @relation(fields: [businessId], references: [id], onDelete: SetNull, map: "audit_business_fk")
+
+  @@index([businessId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

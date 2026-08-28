@@ -1,0 +1,24 @@
+{
+  "name": "retail-erp-pos",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@retail/shared-types --workspace=@retail/shared-validation && npm run build --workspace=api",
+    "test": "npm run test --workspace=api",
+    "test:e2e": "npm run test:e2e --workspace=api",
+    "lint": "npm run lint --workspace=api",
+    "typecheck": "npm run typecheck --workspace=api",
+    "prisma:migrate": "npm run prisma:migrate --workspace=api",
+    "prisma:generate": "npm run prisma:generate --workspace=api"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
