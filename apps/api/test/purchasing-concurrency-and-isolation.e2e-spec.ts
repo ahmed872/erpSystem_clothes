@@ -94,6 +94,86 @@ describe('Purchasing: concurrency, permissions, tenant isolation (e2e, real Post
       const movementCount = await admin.stockMovement.count({ where: { businessId: biz.businessId, variantId, movementType: 'PURCHASE' } });
       expect(movementCount).toBe(2);
     });
+
+    it('two TRULY SIMULTANEOUS receive requests with the SAME idempotencyKey never both apply inventory: exactly one succeeds, the other fails without a second movement', async () => {
+      // Unlike the sequential idempotency test in purchasing-receiving.e2e-spec.ts
+      // (which proves a RETRY after the first commits returns the original
+      // receipt), this proves the harder case: two requests racing for the
+      // SAME unique (businessId, idempotencyKey) slot with neither having
+      // committed yet when the second starts. The receiving use case checks
+      // for an existing receipt BEFORE taking any lock, so both requests can
+      // pass that check; the actual safety net is the unique index on
+      // purchase_receipts(business_id, idempotency_key), which Postgres
+      // enforces even under two genuinely concurrent inserts - the second
+      // INSERT blocks until the first commits, then fails with a unique
+      // violation (mapped to 409 CONFLICT) rather than silently succeeding.
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'RACE-IDEMP-1');
+      const purchaseId = await createApprovedPurchase(app, biz.accessToken, biz, [{ variantId, quantityOrdered: 10, unitCost: 7 }]);
+      const itemId = await getItemId(purchaseId, variantId);
+      const idempotencyKey = `race-idempotency-${randomUUID()}`;
+
+      const results = await Promise.all(
+        [1, 2].map(() =>
+          request(app.getHttpServer())
+            .post(`/api/v1/purchasing/purchases/${purchaseId}/receive`)
+            .set('Authorization', auth())
+            .send({ items: [{ purchaseItemId: itemId, quantityReceived: 10 }], idempotencyKey }),
+        ),
+      );
+
+      const succeeded = results.filter((r) => r.status === 201);
+      const failed = results.filter((r) => r.status !== 201);
+      // Exactly one request creates the receipt; the other is rejected by
+      // the unique constraint (never a silent second success).
+      expect(succeeded.length).toBe(1);
+      expect(failed.length).toBe(1);
+
+      const movementCount = await admin.stockMovement.count({ where: { businessId: biz.businessId, variantId, movementType: 'PURCHASE' } });
+      expect(movementCount).toBe(1); // inventory applied exactly once, never twice
+
+      const receiptCount = await admin.purchaseReceipt.count({ where: { businessId: biz.businessId, idempotencyKey } });
+      expect(receiptCount).toBe(1);
+
+      const purchaseItem = await admin.purchaseItem.findFirstOrThrow({ where: { purchaseId, variantId } });
+      expect(Number(purchaseItem.quantityReceived)).toBe(10); // never 20
+    });
+
+    it('two concurrent RETURN requests for the same Purchase, together exceeding what was received, serialize correctly: exactly one over-limit request is rejected, the item is never over-returned', async () => {
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'RACE-RETURN-1');
+      const purchaseId = await createApprovedPurchase(app, biz.accessToken, biz, [{ variantId, quantityOrdered: 10, unitCost: 4 }]);
+      const itemId = await getItemId(purchaseId, variantId);
+      await request(app.getHttpServer())
+        .post(`/api/v1/purchasing/purchases/${purchaseId}/receive`)
+        .set('Authorization', auth())
+        .send({ items: [{ purchaseItemId: itemId, quantityReceived: 10 }] })
+        .expect(201);
+
+      // Two concurrent returns of 6 each against only 10 received (12
+      // total requested) - the SAME Purchase-row lock that serializes
+      // concurrent receiving (tested above) must also serialize this.
+      const results = await Promise.all(
+        [6, 6].map((qty) =>
+          request(app.getHttpServer())
+            .post(`/api/v1/purchasing/purchases/${purchaseId}/returns`)
+            .set('Authorization', auth())
+            .send({ items: [{ purchaseItemId: itemId, quantity: qty }] }),
+        ),
+      );
+
+      const succeeded = results.filter((r) => r.status === 201);
+      const failed = results.filter((r) => r.status === 409);
+      expect(succeeded).toHaveLength(1);
+      expect(failed).toHaveLength(1);
+
+      const purchaseItem = await admin.purchaseItem.findFirstOrThrow({ where: { purchaseId, variantId } });
+      expect(Number(purchaseItem.quantityReturned)).toBe(6); // never 12
+
+      const balance = await admin.stockBalance.findFirstOrThrow({ where: { businessId: biz.businessId, variantId } });
+      expect(Number(balance.quantityOnHand)).toBe(4); // 10 received - 6 returned, never 10-12
+
+      const returnMovementCount = await admin.stockMovement.count({ where: { businessId: biz.businessId, variantId, movementType: 'PURCHASE_RETURN' } });
+      expect(returnMovementCount).toBe(1); // the rejected one left no trace
+    });
   });
 
   describe('Permission violations', () => {

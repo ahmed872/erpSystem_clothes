@@ -1235,10 +1235,10 @@ model PurchaseReceiptItem {
   unitCost          Decimal  @map("unit_cost") @db.Decimal(18, 4)
   createdAt         DateTime @default(now()) @map("created_at")
 
+  business        Business        @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_receipt_items_business_fk")
   purchaseReceipt PurchaseReceipt @relation(fields: [purchaseReceiptId], references: [id], onDelete: Cascade)
   purchaseItem    PurchaseItem    @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
   variant         ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Restrict)
-  Business        Business        @relation(fields: [businessId], references: [id])
 
   @@unique([purchaseReceiptId, purchaseItemId])
   @@index([purchaseReceiptId])
@@ -1291,10 +1291,10 @@ model PurchaseReturnItem {
   unitCost         Decimal  @map("unit_cost") @db.Decimal(18, 4)
   createdAt        DateTime @default(now()) @map("created_at")
 
+  business       Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_return_items_business_fk")
   purchaseReturn PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
   purchaseItem   PurchaseItem   @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
   variant        ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
-  Business       Business       @relation(fields: [businessId], references: [id])
 
   @@index([purchaseReturnId])
   @@index([purchaseItemId])
