@@ -75,6 +75,17 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'purchases.receive': 'Receive goods against an approved purchase, applying inventory and supplier ledger updates',
   'purchases.return': 'Return previously received goods to a supplier, reversing inventory and posting a supplier credit',
   'purchases.pay': 'Record a payment made to a supplier against a purchase',
+  'customers.view': 'View customers and their transaction ledger/balance',
+  'customers.create': 'Create a customer',
+  'customers.edit': 'Edit a customer',
+  'customers.delete': 'Deactivate a customer',
+  'sales.view': 'View sales, sale items, and returns',
+  'sales.create': 'Create (complete) a sale, applying inventory, payment, and customer ledger effects',
+  'sales.return': 'Return previously sold goods, reversing inventory and posting a customer credit',
+  'sales.pay': 'Record a payment from a customer against a credit sale',
+  'shifts.view': 'View shifts',
+  'shifts.open': 'Open a shift, required before completing a sale',
+  'shifts.close': 'Close an open shift',
 };
 
 /**

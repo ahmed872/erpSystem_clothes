@@ -6,7 +6,7 @@ import { PrismaService } from '../../../../common/prisma/prisma.service';
 import { AuditService } from '../../../audit/audit.service';
 import { NotFoundDomainError, ValidationFailedError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
-import { documentNumberFromId } from '../../domain/document-number';
+import { documentNumberFromId } from '../../../../common/domain/document-number';
 
 /**
  * Creates a Purchase document in DRAFT status with its line items. This

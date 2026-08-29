@@ -1,0 +1,68 @@
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import {
+  createSaleSchema,
+  createSaleReturnSchema,
+  createSalePaymentSchema,
+  saleListQuerySchema,
+  CreateSaleInput,
+  CreateSaleReturnInput,
+  CreateSalePaymentInput,
+  SaleListQuery,
+} from '@retail/shared-validation';
+import { ZodValidationPipe } from '../../../common/pipes/zod-validation.pipe';
+import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
+import { CurrentUser, RequestUser } from '../../../common/decorators/current-user.decorator';
+import { CreateSaleUseCase } from '../application/sales/create-sale.use-case';
+import { GetSaleUseCase } from '../application/sales/get-sale.use-case';
+import { ListSalesUseCase } from '../application/sales/list-sales.use-case';
+import { CreateSaleReturnUseCase } from '../application/returns/create-sale-return.use-case';
+import { CreateSalePaymentUseCase } from '../application/payments/create-sale-payment.use-case';
+
+@Controller('sales')
+export class SalesController {
+  constructor(
+    private readonly createSale: CreateSaleUseCase,
+    private readonly getSale: GetSaleUseCase,
+    private readonly listSales: ListSalesUseCase,
+    private readonly createReturn: CreateSaleReturnUseCase,
+    private readonly createPayment: CreateSalePaymentUseCase,
+  ) {}
+
+  @RequirePermissions('sales.view')
+  @Get()
+  async list(@CurrentUser() user: RequestUser, @Query(new ZodValidationPipe(saleListQuerySchema)) query: SaleListQuery) {
+    return this.listSales.execute(user, query);
+  }
+
+  @RequirePermissions('sales.create')
+  @Post()
+  async create(@CurrentUser() user: RequestUser, @Body(new ZodValidationPipe(createSaleSchema)) body: CreateSaleInput) {
+    return { data: await this.createSale.execute(user, body) };
+  }
+
+  @RequirePermissions('sales.view')
+  @Get(':id')
+  async get(@CurrentUser() user: RequestUser, @Param('id') id: string) {
+    return { data: await this.getSale.execute(user, id) };
+  }
+
+  @RequirePermissions('sales.return')
+  @Post(':id/returns')
+  async createSaleReturn(
+    @CurrentUser() user: RequestUser,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(createSaleReturnSchema)) body: CreateSaleReturnInput,
+  ) {
+    return { data: await this.createReturn.execute(user, id, body) };
+  }
+
+  @RequirePermissions('sales.pay')
+  @Post(':id/payments')
+  async pay(
+    @CurrentUser() user: RequestUser,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(createSalePaymentSchema)) body: CreateSalePaymentInput,
+  ) {
+    return { data: await this.createPayment.execute(user, id, body) };
+  }
+}

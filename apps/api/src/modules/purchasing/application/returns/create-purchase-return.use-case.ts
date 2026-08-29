@@ -10,7 +10,7 @@ import { ConflictDomainError, NotFoundDomainError, ValidationFailedError } from 
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { resolveAllowNegative } from '../../../inventory/domain/resolve-allow-negative';
 import { lockPurchase } from '../../domain/lock-purchase';
-import { documentNumberFromId } from '../../domain/document-number';
+import { documentNumberFromId } from '../../../../common/domain/document-number';
 
 /**
  * A purchase return is a single-step atomic action (not a draft/confirm

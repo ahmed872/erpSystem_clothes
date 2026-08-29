@@ -87,6 +87,15 @@ model Business {
   purchaseReturnItems  PurchaseReturnItem[]
   purchasePayments     PurchasePayment[]
 
+  customers            Customer[]
+  customerTransactions CustomerTransaction[]
+  shifts               Shift[]
+  sales                Sale[]
+  saleItems            SaleItem[]
+  salePayments         SalePayment[]
+  saleReturns          SaleReturn[]
+  saleReturnItems      SaleReturnItem[]
+
   @@map("businesses")
 }
 
@@ -107,6 +116,8 @@ model Branch {
   userBranches   UserBranch[]
   stockMovements StockMovement[]
   purchases      Purchase[]
+  shifts         Shift[]
+  sales          Sale[]
 
   @@unique([businessId, name])
   @@index([businessId])
@@ -138,6 +149,10 @@ model Warehouse {
   purchases        Purchase[]
   purchaseReceipts PurchaseReceipt[]
   purchaseReturns  PurchaseReturn[]
+
+  shifts      Shift[]
+  sales       Sale[]
+  saleReturns SaleReturn[]
 
   @@unique([branchId, name])
   @@index([businessId])
@@ -529,6 +544,9 @@ model ProductVariant {
   purchaseItems        PurchaseItem[]
   purchaseReceiptItems PurchaseReceiptItem[]
   purchaseReturnItems  PurchaseReturnItem[]
+
+  saleItems       SaleItem[]
+  saleReturnItems SaleReturnItem[]
 
   @@unique([businessId, sku])
   @@index([businessId])
@@ -1328,4 +1346,331 @@ model PurchasePayment {
   @@index([purchaseId])
   @@index([supplierId])
   @@map("purchase_payments")
+}
+
+// ============================================================================
+// PHASE 5: SALES / POS
+//
+// Sales is a CONSUMER of the Inventory Engine, exactly like Purchasing -
+// the only inventory-affecting code in this domain calls
+// InventoryEngineService.applyMovement (via the shared, tx-accepting
+// consumeVariant helper extracted from Phase 3's ConsumeStockUseCase - see
+// engines/inventory and modules/inventory/domain/consume-variant.ts), never
+// a direct stock_balances/stock_movements write.
+//
+// SCOPE DECISIONS (approved before implementation - see PROJECT_STATE.md
+// for the full rationale of each):
+//   - Held Invoices / stock reservation: OUT for v1. A Sale is created
+//     already-COMPLETED in one atomic call; the POS cart lives client-side
+//     until checkout. StockBalance.quantityReserved (Phase 3) remains
+//     unwritten - SaleStatus is deliberately a single-value enum today so
+//     a future DRAFT/HELD state can be added later (new enum value +
+//     status default stays COMPLETED for every existing row) without
+//     reshaping this schema.
+//   - Shift/Register: IN, minimal. A Sale requires the acting user to hold
+//     an OPEN Shift (enforced both in application code and by the Sale.shiftId
+//     FK being non-nullable) - no cash-count/reconciliation fields, no
+//     Register/Terminal/Device entities.
+//   - Offline batch sync (/pos-sync/*, Device, SyncQueueItem): OUT for v1.
+//     CreateSaleUseCase's idempotencyKey design is exactly what a future
+//     sync layer would reuse unchanged (Phase 0 §8's own
+//     hash(device_id + offline_transaction_id) scheme maps directly onto
+//     it) - no parallel Sales implementation would be needed later.
+//   - Bundle-type SaleItems can be sold (reuses consumeVariant's existing
+//     bundle expansion) but cannot be individually returned in v1 - see
+//     CreateSaleReturnUseCase.
+//
+// MONETARY MODEL (Sale), precisely defined per the Phase 5 review:
+//   subtotal        = SUM(SaleItem.quantity * SaleItem.unitPrice)  [gross, pre-discount]
+//   discountAmount  = SUM(SaleItem.discountAmount)
+//   taxAmount       = SUM(SaleItem.taxAmount)
+//   totalAmount     = subtotal - discountAmount + taxAmount  [the "Sale total" / "Net total" - what the customer owes for these goods]
+//   paidAmount, remainingAmount, paymentStatus are NEVER stored - always
+//   SUM(SalePayment.amount) / (totalAmount - paid) / derived, computed on
+//   read, mirroring the SupplierTransaction-balance-by-SUM principle.
+//   SalePayment.amount is the amount ACTUALLY APPLIED to the sale, never
+//   more than outstanding - change-due (cash tendered minus amount owed)
+//   is a cash-drawer/UI concern, not a ledger amount, and is out of scope.
+//   INVARIANT: if Sale.customerId IS NULL (walk-in/cash sale, no account to
+//   extend credit to), SUM(initial SalePayment.amount) MUST equal
+//   totalAmount exactly at creation - no credit without an identified
+//   Customer. If customerId IS SET, initial payment may be any amount from
+//   0 up to totalAmount (a credit sale), collectible later via
+//   POST /sales/:id/payments.
+// ============================================================================
+
+enum SaleStatus {
+  COMPLETED
+}
+
+enum CustomerTransactionType {
+  SALE
+  SALE_RETURN
+  PAYMENT
+  OPENING_BALANCE
+  ADJUSTMENT
+}
+
+enum SalePaymentMethod {
+  CASH
+  CARD
+  WALLET
+  OTHER
+}
+
+enum SaleReturnCondition {
+  SELLABLE
+  DAMAGED
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+model Customer {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  name       String
+  phone      String?
+  email      String?
+  address    String?
+  taxNumber  String?  @map("tax_number")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  createdBy  String?  @map("created_by")
+  updatedBy  String?  @map("updated_by")
+
+  business     Business              @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "customers_business_fk")
+  sales        Sale[]
+  transactions CustomerTransaction[]
+
+  // Deliberately NO unique constraint on name/phone: unlike Supplier,
+  // customer names/phones legitimately repeat in retail and there is no
+  // reliable natural business key to dedupe on - the operator resolves
+  // duplicates manually if it ever matters to them.
+  @@index([businessId])
+  @@index([phone])
+  @@map("customers")
+}
+
+/// Append-only ledger - the ONLY source of truth for a customer's
+/// balance, mirroring SupplierTransaction exactly (Phase 4). Balance =
+/// SUM(amount), always computed on read, never stored. Sign convention:
+/// positive = increases what the CUSTOMER owes the business (a SALE, or a
+/// positive OPENING_BALANCE); negative = decreases it (a PAYMENT or a
+/// SALE_RETURN credit).
+model CustomerTransaction {
+  id            String                  @id @default(uuid())
+  businessId    String                  @map("business_id")
+  customerId    String                  @map("customer_id")
+  type          CustomerTransactionType
+  amount        Decimal                 @db.Decimal(18, 4)
+  referenceType String?                 @map("reference_type")
+  referenceId   String?                 @map("reference_id")
+  description   String?
+  createdBy     String?                 @map("created_by")
+  createdAt     DateTime                @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "customer_transactions_business_fk")
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+  @@index([customerId])
+  @@index([referenceType, referenceId])
+  @@map("customer_transactions")
+}
+
+/// Minimal Shift/Register concept (Phase 5 scope decision: IN, but not a
+/// cash-management module - no opening/closing cash-count fields). A Sale
+/// requires the acting user to hold an OPEN Shift. Exactly one OPEN shift
+/// per (businessId, openedBy) is enforced by a partial unique index
+/// (see the RLS/constraints migration - Prisma's schema DSL cannot
+/// express a WHERE-qualified unique index) - the database provides this
+/// guarantee, not just an application pre-check.
+model Shift {
+  id          String      @id @default(uuid())
+  businessId  String      @map("business_id")
+  branchId    String      @map("branch_id")
+  warehouseId String      @map("warehouse_id")
+  openedBy    String      @map("opened_by")
+  openedAt    DateTime    @default(now()) @map("opened_at")
+  closedBy    String?     @map("closed_by")
+  closedAt    DateTime?   @map("closed_at")
+  status      ShiftStatus @default(OPEN)
+
+  business  Business  @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "shifts_business_fk")
+  branch    Branch    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  sales     Sale[]
+
+  @@index([businessId])
+  @@index([openedBy])
+  @@index([status])
+  @@map("shifts")
+}
+
+model Sale {
+  id             String     @id @default(uuid())
+  businessId     String     @map("business_id")
+  branchId       String     @map("branch_id")
+  warehouseId    String     @map("warehouse_id")
+  customerId     String?    @map("customer_id")
+  shiftId        String     @map("shift_id")
+  saleNumber     String     @map("sale_number")
+  status         SaleStatus @default(COMPLETED)
+  /// Tenant-scoped idempotency key - the Sale itself is the retryable
+  /// business unit (Phase 5 rule #8). NULL never conflicts with another
+  /// NULL (same opt-in-per-request pattern as PurchaseReceipt).
+  idempotencyKey String?    @map("idempotency_key")
+  subtotal       Decimal    @default(0) @db.Decimal(18, 4)
+  discountAmount Decimal    @default(0) @map("discount_amount") @db.Decimal(18, 4)
+  taxAmount      Decimal    @default(0) @map("tax_amount") @db.Decimal(18, 4)
+  totalAmount    Decimal    @default(0) @map("total_amount") @db.Decimal(18, 4)
+  notes          String?
+  createdBy      String?    @map("created_by")
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+
+  business  Business      @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sales_business_fk")
+  branch    Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  warehouse Warehouse     @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  customer  Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  shift     Shift         @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  items     SaleItem[]
+  payments  SalePayment[]
+  returns   SaleReturn[]
+
+  @@unique([businessId, saleNumber])
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId])
+  @@index([branchId])
+  @@index([warehouseId])
+  @@index([customerId])
+  @@index([shiftId])
+  @@index([status])
+  @@map("sales")
+}
+
+model SaleItem {
+  id               String   @id @default(uuid())
+  businessId       String   @map("business_id")
+  saleId           String   @map("sale_id")
+  variantId        String   @map("variant_id")
+  quantity         Decimal  @db.Decimal(18, 4)
+  /// Historical PRICE snapshot at the moment of sale - never
+  /// recalculated from ProductPrice/PriceList after completion (Phase 5
+  /// rule #6), exactly mirroring PurchaseItem.unitCost's non-retroactivity.
+  unitPrice        Decimal  @map("unit_price") @db.Decimal(18, 4)
+  discountAmount   Decimal  @default(0) @map("discount_amount") @db.Decimal(18, 4)
+  taxAmount        Decimal  @default(0) @map("tax_amount") @db.Decimal(18, 4)
+  lineTotal        Decimal  @default(0) @map("line_total") @db.Decimal(18, 4)
+  /// Cumulative quantity returned across ALL SaleReturns for this line -
+  /// the document-level invariant guarded by CHECK(quantity_returned <=
+  /// quantity) plus the Sale-row lock during returns, exactly mirroring
+  /// PurchaseItem.quantityReturned.
+  quantityReturned Decimal  @default(0) @map("quantity_returned") @db.Decimal(18, 4)
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  business    Business         @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_items_business_fk")
+  sale        Sale             @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  variant     ProductVariant   @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  returnItems SaleReturnItem[]
+
+  @@unique([saleId, variantId])
+  @@index([businessId])
+  @@index([saleId])
+  @@index([variantId])
+  @@map("sale_items")
+}
+
+/// A Sale's payments - both the initial tender(s) recorded atomically at
+/// sale completion AND later installments against a credit sale (via
+/// POST /sales/:id/payments). idempotencyKey from day one (Phase 5 rule
+/// #8/#9 - must not reproduce Purchasing's PurchaseReturn gap, Known
+/// Issue #23).
+model SalePayment {
+  id             String            @id @default(uuid())
+  businessId     String            @map("business_id")
+  saleId         String            @map("sale_id")
+  amount         Decimal           @db.Decimal(18, 4)
+  method         SalePaymentMethod @default(CASH)
+  reference      String?
+  idempotencyKey String?           @map("idempotency_key")
+  receivedBy     String?           @map("received_by")
+  receivedAt     DateTime          @default(now()) @map("received_at")
+  createdAt      DateTime          @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_payments_business_fk")
+  sale     Sale     @relation(fields: [saleId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId])
+  @@index([saleId])
+  @@map("sale_payments")
+}
+
+/// A sale return is a single-step atomic action (not a draft/confirm
+/// workflow), exactly mirroring PurchaseReturn - but WITH idempotencyKey
+/// from day one, correcting Known Issue #23 rather than reproducing it.
+model SaleReturn {
+  id             String   @id @default(uuid())
+  businessId     String   @map("business_id")
+  saleId         String   @map("sale_id")
+  warehouseId    String   @map("warehouse_id")
+  returnNumber   String   @map("return_number")
+  idempotencyKey String?  @map("idempotency_key")
+  reason         String?
+  createdBy      String?  @map("created_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  business  Business         @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_returns_business_fk")
+  sale      Sale             @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  warehouse Warehouse        @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  items     SaleReturnItem[]
+
+  @@unique([businessId, returnNumber])
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId])
+  @@index([saleId])
+  @@map("sale_returns")
+}
+
+model SaleReturnItem {
+  id           String              @id @default(uuid())
+  businessId   String              @map("business_id")
+  saleReturnId String              @map("sale_return_id")
+  saleItemId   String              @map("sale_item_id")
+  variantId    String              @map("variant_id")
+  quantity     Decimal             @db.Decimal(18, 4)
+  /// Snapshot of the original SaleItem.unitPrice - the basis for the
+  /// customer credit, independent of whatever cost the Inventory Engine
+  /// applies to the stock-side movement (same separation of concerns as
+  /// PurchaseReturnItem.unitCost).
+  unitPrice    Decimal             @map("unit_price") @db.Decimal(18, 4)
+  /// SELLABLE -> the returned goods go back into sellable stock (a real
+  /// SALES_RETURN increase movement, costed at the ORIGINAL sale's
+  /// unit_cost_at_movement - carried over, never fabricated, exactly
+  /// like a Stock Transfer receive). DAMAGED -> the same SALES_RETURN
+  /// increase is posted (the goods DID physically come back), IMMEDIATELY
+  /// followed by a DAMAGE decrease of the same quantity (at whatever the
+  /// engine's current average cost is at that instant, per the standard
+  /// decrease-costing rule - zero special-casing) - net stock effect
+  /// zero, but both real events stay visible in the ledger rather than
+  /// being silently netted away. The customer credit is posted the same
+  /// way regardless of condition - a damaged return is the store's
+  /// inventory loss to absorb, not the customer's.
+  condition    SaleReturnCondition @default(SELLABLE)
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  business   Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_return_items_business_fk")
+  saleReturn SaleReturn     @relation(fields: [saleReturnId], references: [id], onDelete: Cascade)
+  saleItem   SaleItem       @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
+  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@index([saleReturnId])
+  @@index([saleItemId])
+  @@index([businessId])
+  @@map("sale_return_items")
 }

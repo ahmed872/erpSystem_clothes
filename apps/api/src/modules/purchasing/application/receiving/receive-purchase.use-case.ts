@@ -8,7 +8,7 @@ import { InventoryEngineService } from '../../../../engines/inventory/inventory-
 import { ConflictDomainError, NotFoundDomainError, ValidationFailedError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { lockPurchase } from '../../domain/lock-purchase';
-import { documentNumberFromId } from '../../domain/document-number';
+import { documentNumberFromId } from '../../../../common/domain/document-number';
 
 const RECEIVABLE_STATUSES = new Set(['APPROVED', 'PARTIALLY_RECEIVED']);
 

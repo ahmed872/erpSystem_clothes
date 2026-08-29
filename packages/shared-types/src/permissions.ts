@@ -93,6 +93,20 @@ export const PERMISSION_CODES = [
   'purchases.receive',
   'purchases.return',
   'purchases.pay',
+  // Sales (Phase 5): Customers
+  'customers.view',
+  'customers.create',
+  'customers.edit',
+  'customers.delete',
+  // Sales (Phase 5): Sales/POS
+  'sales.view',
+  'sales.create',
+  'sales.return',
+  'sales.pay',
+  // Sales (Phase 5): Shifts
+  'shifts.view',
+  'shifts.open',
+  'shifts.close',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -142,6 +156,11 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'purchases.view',
     'purchases.approve',
     'purchases.cancel',
+    'customers.view',
+    'sales.view',
+    'sales.return',
+    'sales.pay',
+    'shifts.view',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -155,6 +174,10 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'suppliers.view',
     'purchases.view',
     'purchases.pay',
+    'customers.view',
+    'sales.view',
+    'sales.pay',
+    'shifts.view',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',
@@ -210,6 +233,40 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // are financial-commitment/oversight actions reserved for
     // Branch Manager, Accountant, or Business Owner in this template set.
   ],
-  CASHIER: ['branches.view', 'products.view', 'inventory.view'],
-  SALES_EMPLOYEE: ['branches.view', 'products.view', 'inventory.view'],
+  CASHIER: [
+    'branches.view',
+    'products.view',
+    'inventory.view',
+    // Deliberately NOT products.view_cost - Phase 0 §9 is explicit that
+    // a Cashier must never see cost/profit (بدون رؤية التكلفة/الربح),
+    // enforced server-side by stripping cost/margin fields from Sale
+    // responses for anyone lacking this permission (see
+    // GetSaleUseCase/ListSalesUseCase).
+    'customers.view',
+    'customers.create',
+    'sales.view',
+    'sales.create',
+    'sales.return',
+    'sales.pay',
+    'shifts.view',
+    'shifts.open',
+    'shifts.close',
+  ],
+  SALES_EMPLOYEE: [
+    'branches.view',
+    'products.view',
+    'inventory.view',
+    'customers.view',
+    'customers.create',
+    'customers.edit',
+    'sales.view',
+    'sales.create',
+    'sales.return',
+    'shifts.view',
+    'shifts.open',
+    'shifts.close',
+    // Not sales.pay (collecting a later payment against a credit sale) or
+    // products.view_cost by default - matching Phase 0 §9's "بدون تعديل
+    // أسعار/تكلفة" (no price/cost editing) posture for this template.
+  ],
 };
