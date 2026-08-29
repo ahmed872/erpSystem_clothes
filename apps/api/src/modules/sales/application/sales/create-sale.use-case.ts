@@ -11,7 +11,32 @@ import { RequestUser } from '../../../../common/decorators/current-user.decorato
 import { resolveAllowNegative } from '../../../inventory/domain/resolve-allow-negative';
 import { consumeVariant } from '../../../inventory/domain/consume-variant';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
+import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
 import { findActiveShift } from '../../domain/find-active-shift';
+
+function saleFingerprint(
+  warehouseId: string,
+  customerId: string | null,
+  items: { variantId: string; quantity: Prisma.Decimal.Value; unitPrice: Prisma.Decimal.Value; discountAmount: Prisma.Decimal.Value; taxAmount: Prisma.Decimal.Value }[],
+  payments: { amount: Prisma.Decimal.Value; method: string }[],
+) {
+  return {
+    warehouseId,
+    customerId,
+    items: items
+      .map((i) => ({
+        variantId: i.variantId,
+        quantity: new Prisma.Decimal(i.quantity).toString(),
+        unitPrice: new Prisma.Decimal(i.unitPrice).toString(),
+        discountAmount: new Prisma.Decimal(i.discountAmount).toString(),
+        taxAmount: new Prisma.Decimal(i.taxAmount).toString(),
+      }))
+      .sort((a, b) => a.variantId.localeCompare(b.variantId)),
+    payments: payments
+      .map((p) => ({ amount: new Prisma.Decimal(p.amount).toString(), method: p.method }))
+      .sort((a, b) => (a.method + a.amount).localeCompare(b.method + b.amount)),
+  };
+}
 
 /**
  * The Phase-5 equivalent of Purchasing's ReceivePurchaseUseCase: the ONE
@@ -54,7 +79,13 @@ export class CreateSaleUseCase {
           where: { businessId: actor.tenantId, idempotencyKey: input.idempotencyKey },
           include: { items: true, payments: true },
         });
-        if (existing) return existing;
+        if (existing) {
+          assertIdempotentReplayMatches(
+            saleFingerprint(existing.warehouseId, existing.customerId, existing.items, existing.payments),
+            saleFingerprint(input.warehouseId, input.customerId ?? null, input.items, input.payments),
+          );
+          return existing;
+        }
       }
 
       const warehouse = await tx.warehouse.findFirst({ where: { id: input.warehouseId, businessId: actor.tenantId } });

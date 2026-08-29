@@ -11,6 +11,16 @@ import { RequestUser } from '../../../../common/decorators/current-user.decorato
 import { resolveAllowNegative } from '../../../inventory/domain/resolve-allow-negative';
 import { lockSale } from '../../domain/lock-sale';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
+import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
+
+function saleReturnFingerprint(saleId: string, items: { saleItemId: string; quantity: Prisma.Decimal.Value; condition: string }[]) {
+  return {
+    saleId,
+    items: items
+      .map((i) => ({ saleItemId: i.saleItemId, quantity: new Prisma.Decimal(i.quantity).toString(), condition: i.condition }))
+      .sort((a, b) => a.saleItemId.localeCompare(b.saleItemId)),
+  };
+}
 
 /**
  * A sale return is a single-step atomic action (not a draft/confirm
@@ -54,7 +64,13 @@ export class CreateSaleReturnUseCase {
           where: { businessId: actor.tenantId, idempotencyKey: input.idempotencyKey },
           include: { items: true },
         });
-        if (existing) return existing;
+        if (existing) {
+          assertIdempotentReplayMatches(
+            saleReturnFingerprint(existing.saleId, existing.items),
+            saleReturnFingerprint(saleId, input.items),
+          );
+          return existing;
+        }
       }
 
       await lockSale(tx, actor.tenantId, saleId);

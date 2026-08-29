@@ -4,6 +4,7 @@ import { EffectivePermissionsService } from '../../../../common/authorization/ef
 import { NotFoundDomainError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { computeSaleCost } from '../../domain/sale-cost';
+import { computePaymentSummary } from '../../domain/payment-summary';
 
 /**
  * COGS/margin fields (`totalCost`, `grossProfit`) are only ever attached
@@ -33,13 +34,21 @@ export class GetSaleUseCase {
       });
       if (!sale) throw new NotFoundDomainError('Sale', saleId);
 
+      const { paidAmount, remainingAmount, paymentStatus } = await computePaymentSummary(tx, actor.tenantId, sale);
+      const withPaymentSummary = {
+        ...sale,
+        paidAmount: paidAmount.toString(),
+        remainingAmount: remainingAmount.toString(),
+        paymentStatus,
+      };
+
       const permissions = await this.effectivePermissions.get(tx, actor.id);
       if (!(permissions?.has('products.view_cost') ?? false)) {
-        return sale;
+        return withPaymentSummary;
       }
 
       const { totalCost, grossProfit } = await computeSaleCost(tx, actor.tenantId, sale);
-      return { ...sale, totalCost: totalCost.toString(), grossProfit: grossProfit.toString() };
+      return { ...withPaymentSummary, totalCost: totalCost.toString(), grossProfit: grossProfit.toString() };
     });
   }
 }

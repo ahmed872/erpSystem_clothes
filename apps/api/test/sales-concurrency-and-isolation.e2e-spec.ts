@@ -161,6 +161,35 @@ describe('Sales: concurrency, permissions, tenant isolation (e2e, real Postgres)
       expect(movementCount).toBe(4); // opening + earlier sale + new sale + return
     });
 
+    it('RETURN + RETURN: two concurrent return requests against the SAME sale line, together exceeding what was sold, serialize correctly - exactly one over-limit request is rejected, never over-returned', async () => {
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SCONC-RETURN-1');
+      await stockUp(variantId, 20, 5);
+      const sale = await sellRequest([{ variantId, quantity: 10, unitPrice: 10 }]).expect(201);
+      const saleItemId = sale.body.data.items[0].id;
+
+      // Two concurrent returns of 6 each against only 10 sold (12 total
+      // requested) - the same Sale-row lock (`lockSale`) that serializes
+      // concurrent late payments must also serialize this.
+      const results = await Promise.all(
+        [6, 6].map((qty) =>
+          request(app.getHttpServer())
+            .post(`/api/v1/sales/${sale.body.data.id}/returns`)
+            .set('Authorization', auth())
+            .send({ items: [{ saleItemId, quantity: qty }] }),
+        ),
+      );
+      const succeeded = results.filter((r) => r.status === 201);
+      const failed = results.filter((r) => r.status === 409);
+      expect(succeeded).toHaveLength(1);
+      expect(failed).toHaveLength(1);
+
+      const saleItem = await admin.saleItem.findUniqueOrThrow({ where: { id: saleItemId } });
+      expect(Number(saleItem.quantityReturned)).toBe(6); // never 12
+
+      const returnMovementCount = await admin.stockMovement.count({ where: { businessId: biz.businessId, variantId, movementType: 'SALES_RETURN' } });
+      expect(returnMovementCount).toBe(1); // the rejected one left no trace
+    });
+
     it('DUPLICATE IDEMPOTENCY: two truly simultaneous sale requests with the SAME idempotencyKey never both apply - exactly one succeeds, one inventory effect', async () => {
       const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SCONC-IDEMP-1');
       await stockUp(variantId, 20, 5);

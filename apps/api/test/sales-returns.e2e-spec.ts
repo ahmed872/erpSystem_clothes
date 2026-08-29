@@ -212,4 +212,28 @@ describe('Sales: sale returns (e2e, real Postgres)', () => {
     const movementCount = await admin.stockMovement.count({ where: { businessId: biz.businessId, variantId, movementType: 'SALES_RETURN' } });
     expect(movementCount).toBe(1);
   });
+
+  it('IDEMPOTENCY KEY REUSE: the same key with a materially different quantity is rejected, not silently substituted for the original return', async () => {
+    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'RET-IDEMP-MISMATCH-1');
+    await stockUp(variantId, 10, 5);
+    const { saleId, saleItemId } = await createSale(undefined, variantId, 8, 10);
+    const idempotencyKey = 'test-idempotency-sale-return-mismatch-1';
+
+    const first = await request(app.getHttpServer())
+      .post(`/api/v1/sales/${saleId}/returns`)
+      .set('Authorization', auth())
+      .send({ items: [{ saleItemId, quantity: 2 }], idempotencyKey })
+      .expect(201);
+
+    const mismatch = await request(app.getHttpServer())
+      .post(`/api/v1/sales/${saleId}/returns`)
+      .set('Authorization', auth())
+      .send({ items: [{ saleItemId, quantity: 3 }], idempotencyKey }) // different quantity
+      .expect(409);
+    expect(mismatch.body.error.code).toBe('CONFLICT');
+
+    const returnCount = await admin.saleReturn.count({ where: { businessId: biz.businessId, idempotencyKey } });
+    expect(returnCount).toBe(1);
+    expect(first.body.data.items[0].quantity).toBe('2'); // unchanged by the rejected mismatch
+  });
 });

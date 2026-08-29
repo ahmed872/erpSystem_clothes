@@ -64,6 +64,11 @@ describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () 
 
     const ledgerCount = await admin.customerTransaction.count({ where: { businessId: biz.businessId, referenceId: res.body.data.id } });
     expect(ledgerCount).toBe(0); // no customer on this sale
+
+    const saleGet = await request(app.getHttpServer()).get(`/api/v1/sales/${res.body.data.id}`).set('Authorization', auth()).expect(200);
+    expect(saleGet.body.data.paidAmount).toBe('44');
+    expect(saleGet.body.data.remainingAmount).toBe('0');
+    expect(saleGet.body.data.paymentStatus).toBe('PAID');
   });
 
   it('completes a credit sale against a customer: posts SALE (+total) and PAYMENT (-paid) ledger entries, computes remaining correctly', async () => {
@@ -94,6 +99,12 @@ describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () 
 
     const customerGet = await request(app.getHttpServer()).get(`/api/v1/sales/customers/${customer.body.data.id}`).set('Authorization', auth()).expect(200);
     expect(Number(customerGet.body.data.balance)).toBe(25); // 40 owed - 15 paid
+
+    // GET /sales/:id surfaces the derived payment summary, not just the raw payments array.
+    const saleGet = await request(app.getHttpServer()).get(`/api/v1/sales/${res.body.data.id}`).set('Authorization', auth()).expect(200);
+    expect(saleGet.body.data.paidAmount).toBe('15');
+    expect(saleGet.body.data.remainingAmount).toBe('25');
+    expect(saleGet.body.data.paymentStatus).toBe('PARTIALLY_PAID');
   });
 
   it('allows a fully-credit sale (zero payment) against a customer, and later payments pay it down without overpaying', async () => {
@@ -108,6 +119,10 @@ describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () 
       .expect(201);
     const saleId = res.body.data.id;
 
+    const unpaidGet = await request(app.getHttpServer()).get(`/api/v1/sales/${saleId}`).set('Authorization', auth()).expect(200);
+    expect(unpaidGet.body.data.paidAmount).toBe('0');
+    expect(unpaidGet.body.data.paymentStatus).toBe('UNPAID');
+
     const paid1 = await request(app.getHttpServer()).post(`/api/v1/sales/${saleId}/payments`).set('Authorization', auth()).send({ amount: 20 }).expect(201);
     expect(paid1.body.data.amount).toBe('20');
 
@@ -118,6 +133,79 @@ describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () 
 
     const fullyPaidAgain = await request(app.getHttpServer()).post(`/api/v1/sales/${saleId}/payments`).set('Authorization', auth()).send({ amount: 1 }).expect(409);
     expect(fullyPaidAgain.body.error.code).toBe('CONFLICT');
+  });
+
+  it('IDEMPOTENCY KEY REUSE: a sequential retry with the SAME payload returns the original sale; the SAME key with a MATERIALLY DIFFERENT payload is rejected, not silently substituted', async () => {
+    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SALE-IDEMP-MISMATCH-1');
+    await stockUp(variantId, 20, 5);
+    const idempotencyKey = 'test-sale-idempotency-mismatch-1';
+    const payload = { warehouseId: biz.warehouseId, items: [{ variantId, quantity: 2, unitPrice: 10 }], payments: [{ amount: 20 }], idempotencyKey };
+
+    const first = await request(app.getHttpServer()).post('/api/v1/sales').set('Authorization', auth()).send(payload).expect(201);
+
+    // Exact same payload replayed - must return the SAME sale, not create a new one.
+    const replay = await request(app.getHttpServer()).post('/api/v1/sales').set('Authorization', auth()).send(payload).expect(201);
+    expect(replay.body.data.id).toBe(first.body.data.id);
+
+    // Same key, but a materially different payload (different quantity) -
+    // must be REJECTED, never silently return the unrelated first sale as
+    // if the second, different request had succeeded.
+    const mismatchQty = await request(app.getHttpServer())
+      .post('/api/v1/sales')
+      .set('Authorization', auth())
+      .send({ ...payload, items: [{ variantId, quantity: 5, unitPrice: 10 }], payments: [{ amount: 50 }] })
+      .expect(409);
+    expect(mismatchQty.body.error.code).toBe('CONFLICT');
+
+    // Same key, different warehouse - also rejected.
+    const { variantId: v2 } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SALE-IDEMP-MISMATCH-2');
+    await stockUp(v2, 20, 5);
+    const mismatchVariant = await request(app.getHttpServer())
+      .post('/api/v1/sales')
+      .set('Authorization', auth())
+      .send({ ...payload, items: [{ variantId: v2, quantity: 2, unitPrice: 10 }] })
+      .expect(409);
+    expect(mismatchVariant.body.error.code).toBe('CONFLICT');
+
+    // No extra Sale or StockMovement was created by any of the rejected attempts.
+    const saleCount = await admin.sale.count({ where: { businessId: biz.businessId, idempotencyKey } });
+    expect(saleCount).toBe(1);
+  });
+
+  it('IDEMPOTENCY KEY REUSE (payments): the SAME key with a different amount is rejected', async () => {
+    const customer = await request(app.getHttpServer()).post('/api/v1/sales/customers').set('Authorization', auth()).send({ name: 'Idempotent Payment Customer' }).expect(201);
+    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SALE-PAYIDEMP-MISMATCH-1');
+    await stockUp(variantId, 20, 5);
+    const sale = await request(app.getHttpServer())
+      .post('/api/v1/sales')
+      .set('Authorization', auth())
+      .send({ warehouseId: biz.warehouseId, customerId: customer.body.data.id, items: [{ variantId, quantity: 4, unitPrice: 10 }], payments: [] })
+      .expect(201);
+    const saleId = sale.body.data.id;
+    const idempotencyKey = 'test-payment-idempotency-mismatch-1';
+
+    const first = await request(app.getHttpServer())
+      .post(`/api/v1/sales/${saleId}/payments`)
+      .set('Authorization', auth())
+      .send({ amount: 10, idempotencyKey })
+      .expect(201);
+
+    const replay = await request(app.getHttpServer())
+      .post(`/api/v1/sales/${saleId}/payments`)
+      .set('Authorization', auth())
+      .send({ amount: 10, idempotencyKey })
+      .expect(201);
+    expect(replay.body.data.id).toBe(first.body.data.id);
+
+    const mismatch = await request(app.getHttpServer())
+      .post(`/api/v1/sales/${saleId}/payments`)
+      .set('Authorization', auth())
+      .send({ amount: 15, idempotencyKey })
+      .expect(409);
+    expect(mismatch.body.error.code).toBe('CONFLICT');
+
+    const paymentCount = await admin.salePayment.count({ where: { businessId: biz.businessId, idempotencyKey } });
+    expect(paymentCount).toBe(1);
   });
 
   it('rejects a walk-in sale (no customer) that is not paid in full', async () => {
@@ -188,6 +276,58 @@ describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () 
       .send({ warehouseId: '00000000-0000-0000-0000-000000000000', items: [{ variantId, quantity: 1, unitPrice: 10 }], payments: [{ amount: 10 }] })
       .expect(404);
     expect(badWarehouse.body.error.code).toBe('NOT_FOUND');
+  });
+
+  it('ATOMICITY: a sale with one valid line and one insufficient-stock line rolls back EVERYTHING - no Sale row, no SaleItem, no inventory effect on the valid line, no payment, no customer ledger effect', async () => {
+    const customer = await request(app.getHttpServer()).post('/api/v1/sales/customers').set('Authorization', auth()).send({ name: 'Atomicity Customer' }).expect(201);
+    const { variantId: okVariant } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SALE-ATOMIC-OK');
+    const { variantId: scarceVariant } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SALE-ATOMIC-SCARCE');
+    await stockUp(okVariant, 100, 5);
+    await stockUp(scarceVariant, 2, 5); // only 2 in stock
+
+    const balanceBefore = await admin.stockBalance.findFirstOrThrow({ where: { businessId: biz.businessId, variantId: okVariant } });
+    const movementCountBefore = await admin.stockMovement.count({ where: { businessId: biz.businessId, variantId: okVariant } });
+    const saleCountBefore = await admin.sale.count({ where: { businessId: biz.businessId } });
+    const paymentCountBefore = await admin.salePayment.count({ where: { businessId: biz.businessId } });
+
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/sales')
+      .set('Authorization', auth())
+      .send({
+        warehouseId: biz.warehouseId,
+        customerId: customer.body.data.id,
+        items: [
+          { variantId: okVariant, quantity: 10, unitPrice: 10 }, // plenty of stock
+          { variantId: scarceVariant, quantity: 5, unitPrice: 10 }, // only 2 available - fails
+        ],
+        payments: [],
+      })
+      .expect(409);
+    expect(res.body.error.code).toBe('INSUFFICIENT_STOCK');
+
+    // The FIRST (valid, plentiful) line must be COMPLETELY untouched -
+    // proves the whole multi-line sale is one transaction, not applied
+    // line-by-line with a partial commit.
+    const balanceAfter = await admin.stockBalance.findFirstOrThrow({ where: { businessId: biz.businessId, variantId: okVariant } });
+    expect(balanceAfter.quantityOnHand.toString()).toBe(balanceBefore.quantityOnHand.toString());
+    const movementCountAfter = await admin.stockMovement.count({ where: { businessId: biz.businessId, variantId: okVariant } });
+    expect(movementCountAfter).toBe(movementCountBefore);
+
+    // No Sale/SaleItem row was left behind.
+    const saleCountAfter = await admin.sale.count({ where: { businessId: biz.businessId } });
+    expect(saleCountAfter).toBe(saleCountBefore);
+    const saleItemCount = await admin.saleItem.count({ where: { businessId: biz.businessId, variantId: okVariant } });
+    expect(saleItemCount).toBe(0);
+
+    // No payment and no customer ledger effect from the rolled-back attempt
+    // (scoped to the delta - other tests in this file create their own
+    // payments against the same shared business).
+    const paymentCountAfter = await admin.salePayment.count({ where: { businessId: biz.businessId } });
+    expect(paymentCountAfter).toBe(paymentCountBefore);
+    // This customer is brand new in this test, so its ledger must have
+    // exactly zero rows - no scoping ambiguity here.
+    const ledgerCount = await admin.customerTransaction.count({ where: { businessId: biz.businessId, customerId: customer.body.data.id } });
+    expect(ledgerCount).toBe(0);
   });
 
   it('rejects selling to an inactive customer', async () => {

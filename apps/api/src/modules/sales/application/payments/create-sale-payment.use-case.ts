@@ -6,6 +6,12 @@ import { AuditService } from '../../../audit/audit.service';
 import { ConflictDomainError, NotFoundDomainError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { lockSale } from '../../domain/lock-sale';
+import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
+import { computePaymentSummary } from '../../domain/payment-summary';
+
+function salePaymentFingerprint(saleId: string, amount: Prisma.Decimal.Value, method: string) {
+  return { saleId, amount: new Prisma.Decimal(amount).toString(), method };
+}
 
 /**
  * Records a LATER payment against a credit sale (the initial tender(s)
@@ -29,16 +35,20 @@ export class CreateSalePaymentUseCase {
     return this.prisma.withTenant(actor.tenantId, async (tx) => {
       if (input.idempotencyKey) {
         const existing = await tx.salePayment.findFirst({ where: { businessId: actor.tenantId, idempotencyKey: input.idempotencyKey } });
-        if (existing) return existing;
+        if (existing) {
+          assertIdempotentReplayMatches(
+            salePaymentFingerprint(existing.saleId, existing.amount, existing.method),
+            salePaymentFingerprint(saleId, input.amount, input.method),
+          );
+          return existing;
+        }
       }
 
       await lockSale(tx, actor.tenantId, saleId);
       const sale = await tx.sale.findFirst({ where: { id: saleId, businessId: actor.tenantId } });
       if (!sale) throw new NotFoundDomainError('Sale', saleId);
 
-      const paidSoFar = await tx.salePayment.aggregate({ where: { businessId: actor.tenantId, saleId }, _sum: { amount: true } });
-      const alreadyPaid = paidSoFar._sum.amount ?? new Prisma.Decimal(0);
-      const remaining = sale.totalAmount.minus(alreadyPaid);
+      const { remainingAmount: remaining } = await computePaymentSummary(tx, actor.tenantId, sale);
 
       if (remaining.lessThanOrEqualTo(0)) {
         throw new ConflictDomainError('This sale is already fully paid');
