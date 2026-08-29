@@ -53,3 +53,15 @@ export class InsufficientStockDomainError extends DomainError {
     super('INSUFFICIENT_STOCK', message, details);
   }
 }
+
+/** Raised by AccountingEngineService.postEntry when SUM(debit) !=
+ * SUM(credit) across a journal entry's lines, or a line is malformed
+ * (both/neither debit and credit set). This is the application-layer
+ * half of the double-entry invariant (Phase 0 §6.1) - the DEFERRED
+ * constraint trigger on journal_entry_lines is the DB-level backstop
+ * behind it. */
+export class UnbalancedJournalEntryError extends DomainError {
+  constructor(message = 'Journal entry is not balanced', details?: unknown) {
+    super('UNBALANCED_JOURNAL_ENTRY', message, details);
+  }
+}

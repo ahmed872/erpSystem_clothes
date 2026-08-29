@@ -5,6 +5,8 @@ import { PrismaService } from '../../../../common/prisma/prisma.service';
 import { AuditService } from '../../../audit/audit.service';
 import { NotFoundDomainError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
+import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
+import { buildPurchasePaymentJournalLines } from '../../../accounting/domain/purchase-journal-lines';
 
 /**
  * Records money paid to a supplier against a Purchase. Deliberately NOT
@@ -20,6 +22,7 @@ export class CreatePurchasePaymentUseCase {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly accounting: AccountingEngineService,
   ) {}
 
   async execute(actor: RequestUser, purchaseId: string, input: CreatePurchasePaymentInput) {
@@ -52,6 +55,21 @@ export class CreatePurchasePaymentUseCase {
           createdBy: actor.id,
         },
       });
+
+      // Phase 6: post the accounting fact for this payment in the SAME
+      // transaction.
+      const paymentJournalLines = await buildPurchasePaymentJournalLines(tx, actor.tenantId, new Prisma.Decimal(input.amount), input.method);
+      if (paymentJournalLines.length > 0) {
+        await this.accounting.postEntry(tx, {
+          businessId: actor.tenantId,
+          entryDate: new Date(),
+          sourceType: 'PurchasePayment',
+          sourceId: payment.id,
+          description: `Payment against purchase ${purchase.purchaseNumber}`,
+          createdBy: actor.id,
+          lines: paymentJournalLines,
+        });
+      }
 
       await this.audit.record(tx, {
         businessId: actor.tenantId,

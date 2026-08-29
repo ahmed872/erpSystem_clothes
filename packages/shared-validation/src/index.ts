@@ -6,6 +6,7 @@ export * from './catalog';
 export * from './inventory';
 export * from './purchasing';
 export * from './sales';
+export * from './accounting';
 
 export const registerBusinessSchema = z.object({
   businessName: nameSchema,

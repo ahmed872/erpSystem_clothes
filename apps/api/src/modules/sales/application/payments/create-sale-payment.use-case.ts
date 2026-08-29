@@ -8,6 +8,8 @@ import { RequestUser } from '../../../../common/decorators/current-user.decorato
 import { lockSale } from '../../domain/lock-sale';
 import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
 import { computePaymentSummary } from '../../domain/payment-summary';
+import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
+import { buildSalePaymentJournalLines } from '../../../accounting/domain/sale-payment-journal-lines';
 
 function salePaymentFingerprint(saleId: string, amount: Prisma.Decimal.Value, method: string) {
   return { saleId, amount: new Prisma.Decimal(amount).toString(), method };
@@ -29,6 +31,7 @@ export class CreateSalePaymentUseCase {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly accounting: AccountingEngineService,
   ) {}
 
   async execute(actor: RequestUser, saleId: string, input: CreateSalePaymentInput) {
@@ -84,6 +87,21 @@ export class CreateSalePaymentUseCase {
             description: `Payment against sale ${sale.saleNumber}`,
             createdBy: actor.id,
           },
+        });
+      }
+
+      // Phase 6: post the accounting fact for this payment in the SAME
+      // transaction.
+      const paymentJournalLines = await buildSalePaymentJournalLines(tx, actor.tenantId, new Prisma.Decimal(input.amount), input.method);
+      if (paymentJournalLines.length > 0) {
+        await this.accounting.postEntry(tx, {
+          businessId: actor.tenantId,
+          entryDate: new Date(),
+          sourceType: 'SalePayment',
+          sourceId: payment.id,
+          description: `Payment against sale ${sale.saleNumber}`,
+          createdBy: actor.id,
+          lines: paymentJournalLines,
         });
       }
 

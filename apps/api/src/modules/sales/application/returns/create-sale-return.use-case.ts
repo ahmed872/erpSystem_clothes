@@ -12,6 +12,8 @@ import { resolveAllowNegative } from '../../../inventory/domain/resolve-allow-ne
 import { lockSale } from '../../domain/lock-sale';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
 import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
+import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
+import { buildSaleReturnJournalLines } from '../../../accounting/domain/sale-return-journal-lines';
 
 function saleReturnFingerprint(saleId: string, items: { saleItemId: string; quantity: Prisma.Decimal.Value; condition: string }[]) {
   return {
@@ -55,6 +57,7 @@ export class CreateSaleReturnUseCase {
     private readonly audit: AuditService,
     private readonly engine: InventoryEngineService,
     private readonly effectivePermissions: EffectivePermissionsService,
+    private readonly accounting: AccountingEngineService,
   ) {}
 
   async execute(actor: RequestUser, saleId: string, input: CreateSaleReturnInput) {
@@ -121,6 +124,8 @@ export class CreateSaleReturnUseCase {
       });
 
       let totalCredit = new Prisma.Decimal(0);
+      let returnInCost = new Prisma.Decimal(0);
+      let damageWriteOff = new Prisma.Decimal(0);
       for (const line of input.items) {
         const saleItem = itemsById.get(line.saleItemId)!;
 
@@ -147,9 +152,10 @@ export class CreateSaleReturnUseCase {
           createdBy: actor.id,
           allowNegative,
         });
+        returnInCost = returnInCost.plus(new Prisma.Decimal(line.quantity).times(originalMovement.unitCostAtMovement));
 
         if (line.condition === 'DAMAGED') {
-          await this.engine.applyMovement(tx, {
+          const damageResult = await this.engine.applyMovement(tx, {
             businessId: actor.tenantId,
             branchId: sale.branchId,
             warehouseId: sale.warehouseId,
@@ -162,6 +168,7 @@ export class CreateSaleReturnUseCase {
             createdBy: actor.id,
             allowNegative,
           });
+          damageWriteOff = damageWriteOff.plus(new Prisma.Decimal(line.quantity).times(damageResult.movement.unitCostAtMovement));
         }
 
         await tx.saleReturnItem.create({
@@ -196,6 +203,27 @@ export class CreateSaleReturnUseCase {
             description: `Sale return credit against ${sale.saleNumber}`,
             createdBy: actor.id,
           },
+        });
+      }
+
+      // Phase 6: post the accounting fact for this return in the SAME
+      // transaction - see buildSaleReturnJournalLines's doc comment for
+      // the walk-in-return revenue-reversal limitation.
+      const returnJournalLines = await buildSaleReturnJournalLines(tx, actor.tenantId, {
+        customerId: sale.customerId,
+        totalCredit,
+        returnInCost,
+        damageWriteOff,
+      });
+      if (returnJournalLines.length > 0) {
+        await this.accounting.postEntry(tx, {
+          businessId: actor.tenantId,
+          entryDate: new Date(),
+          sourceType: 'SaleReturn',
+          sourceId: saleReturn.id,
+          description: `Sale return ${saleReturn.returnNumber}`,
+          createdBy: actor.id,
+          lines: returnJournalLines,
         });
       }
 

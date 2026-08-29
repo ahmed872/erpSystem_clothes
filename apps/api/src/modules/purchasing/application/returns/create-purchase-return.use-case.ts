@@ -11,6 +11,8 @@ import { RequestUser } from '../../../../common/decorators/current-user.decorato
 import { resolveAllowNegative } from '../../../inventory/domain/resolve-allow-negative';
 import { lockPurchase } from '../../domain/lock-purchase';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
+import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
+import { buildPurchaseReturnJournalLines } from '../../../accounting/domain/purchase-journal-lines';
 
 /**
  * A purchase return is a single-step atomic action (not a draft/confirm
@@ -34,6 +36,7 @@ export class CreatePurchaseReturnUseCase {
     private readonly audit: AuditService,
     private readonly engine: InventoryEngineService,
     private readonly effectivePermissions: EffectivePermissionsService,
+    private readonly accounting: AccountingEngineService,
   ) {}
 
   async execute(actor: RequestUser, purchaseId: string, input: CreatePurchaseReturnInput) {
@@ -134,6 +137,22 @@ export class CreatePurchaseReturnUseCase {
             description: `Purchase return credit against ${purchase.purchaseNumber}`,
             createdBy: actor.id,
           },
+        });
+      }
+
+      // Phase 6: post the accounting fact for this return in the SAME
+      // transaction - totalCredit is the exact same figure the
+      // SupplierTransaction above just used.
+      const returnJournalLines = await buildPurchaseReturnJournalLines(tx, actor.tenantId, totalCredit);
+      if (returnJournalLines.length > 0) {
+        await this.accounting.postEntry(tx, {
+          businessId: actor.tenantId,
+          entryDate: new Date(),
+          sourceType: 'PurchaseReturn',
+          sourceId: purchaseReturn.id,
+          description: `Purchase return against ${purchase.purchaseNumber}`,
+          createdBy: actor.id,
+          lines: returnJournalLines,
         });
       }
 

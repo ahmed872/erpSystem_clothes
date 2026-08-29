@@ -96,6 +96,12 @@ model Business {
   saleReturns          SaleReturn[]
   saleReturnItems      SaleReturnItem[]
 
+  accounts               Account[]
+  fiscalPeriods          FiscalPeriod[]
+  accountingMappingRules AccountingMappingRule[]
+  journalEntries         JournalEntry[]
+  journalEntryLines      JournalEntryLine[]
+
   @@map("businesses")
 }
 
@@ -1673,4 +1679,226 @@ model SaleReturnItem {
   @@index([saleItemId])
   @@index([businessId])
   @@map("sale_return_items")
+}
+
+// ============================================================================
+// Phase 6: Accounting (Chart of Accounts, General Ledger, Fiscal Periods)
+// ============================================================================
+// AccountingEngine.postEntry(tx, ...) is the ONLY way an automatic journal
+// entry is created - never a direct insert from Sales/Purchasing/Inventory
+// code. Every automatic posting happens inside the SAME DB transaction as
+// the business event it represents (Sale, PurchaseReceipt, SaleReturn,
+// PurchaseReturn, SalePayment, PurchasePayment, or a standalone inventory
+// Adjustment), so the journal entry and the business fact it represents
+// commit or roll back together - never one without the other. Automatic
+// postings go straight to POSTED (Phase 6 scope decision: no manual-review
+// workflow for routine business events); DRAFT is reserved for a future
+// manual/adjusting-entry capability that is NOT built in Phase 6 (no HTTP
+// path ever creates a DRAFT entry today - see PROJECT_STATE.md).
+//
+// No branch-level GL hierarchy (Phase 6 scope decision): Account has no
+// branchId. TRANSFER_IN/TRANSFER_OUT stock movements between branches of
+// the same business therefore have NO accounting posting at all - the same
+// business-scoped Inventory account nets to zero either way.
+//
+// No historical backfill (Phase 6 scope decision): Phase 6 posts only for
+// events created from its own activation onward. Phases 1-5's pre-existing
+// Sales/Purchases/Payments/Adjustments never get retroactive journal
+// entries - see the one-time bootstrap seed (COA + mapping rules + a single
+// open-ended FiscalPeriod per existing business) in prisma/seed.ts, which
+// is infrastructure setup, not a reinterpretation of historical data.
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum JournalEntryStatus {
+  DRAFT
+  POSTED
+  REVERSED
+}
+
+enum FiscalPeriodStatus {
+  OPEN
+  CLOSED
+}
+
+/// The fixed set of accounting "roles" AccountingMappingRule resolves to a
+/// real Account. One row per (businessId, key) - see
+/// modules/accounting/domain/resolve-mapped-account.ts. Deliberately NOT a
+/// per-transaction-type mapping (e.g. no separate "Sale Cash" vs "Sale
+/// Credit" keys) - the caller (CreateSaleUseCase etc.) already knows the
+/// exact business shape (which payment methods, how much credit) and
+/// assembles the journal lines itself from these account-role primitives,
+/// keeping the mapping table small and the posting logic auditable in the
+/// use-case that owns the business fact - not hidden inside a generic
+/// rules-interpreter.
+enum AccountingMappingKey {
+  SALES_REVENUE
+  COGS
+  INVENTORY_ASSET
+  ACCOUNTS_RECEIVABLE
+  ACCOUNTS_PAYABLE
+  TAX_PAYABLE
+  INVENTORY_SHRINKAGE
+  INVENTORY_GAIN
+  INTERNAL_CONSUMPTION_EXPENSE
+  TENDER_CASH
+  TENDER_CARD
+  TENDER_WALLET
+  TENDER_BANK_TRANSFER
+  TENDER_CHEQUE
+  TENDER_OTHER
+}
+
+/// Chart of Accounts - business-scoped only (Phase 6 scope decision: no
+/// branch-level GL hierarchy). System accounts (isSystemAccount=true) are
+/// seeded once per business (RegisterBusinessUseCase for new businesses,
+/// the one-time bootstrap in prisma/seed.ts for pre-existing ones) and are
+/// referenced by AccountingMappingRule; they can be renamed or deactivated
+/// but never deleted - the same "protected default, no hard delete"
+/// posture every other reference entity in this codebase already uses
+/// (Customer.isActive, ProductVariant.status), enforced in the application
+/// layer, not a DB constraint.
+model Account {
+  id              String        @id @default(uuid())
+  businessId      String        @map("business_id")
+  code            String
+  name            String
+  type            AccountType
+  normalBalance   NormalBalance @map("normal_balance")
+  parentAccountId String?       @map("parent_account_id")
+  isSystemAccount Boolean       @default(false) @map("is_system_account")
+  isActive        Boolean       @default(true) @map("is_active")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  createdBy       String?       @map("created_by")
+  updatedBy       String?       @map("updated_by")
+
+  business      Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "accounts_business_fk")
+  parentAccount Account?                @relation("AccountHierarchy", fields: [parentAccountId], references: [id], onDelete: Restrict)
+  childAccounts Account[]               @relation("AccountHierarchy")
+  mappingRules  AccountingMappingRule[]
+  journalLines  JournalEntryLine[]
+
+  @@unique([businessId, code])
+  @@index([businessId])
+  @@index([parentAccountId])
+  @@map("accounts")
+}
+
+/// Entries are linked to the fiscal period covering their entryDate (Phase
+/// 0 §6.4). A CLOSED period rejects new entries dated within it, unless the
+/// actor holds accounting.reopen_period. Every existing business gets one
+/// open-ended bootstrap period at Phase 6 activation (see prisma/seed.ts) -
+/// the Accountant can close it at any cutoff and open the next one via the
+/// period endpoints, exactly like normal ongoing period management.
+model FiscalPeriod {
+  id         String             @id @default(uuid())
+  businessId String             @map("business_id")
+  name       String
+  startDate  DateTime           @map("start_date")
+  endDate    DateTime           @map("end_date")
+  status     FiscalPeriodStatus @default(OPEN)
+  closedBy   String?            @map("closed_by")
+  closedAt   DateTime?          @map("closed_at")
+  createdAt  DateTime           @default(now()) @map("created_at")
+  createdBy  String?            @map("created_by")
+
+  business       Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "fiscal_periods_business_fk")
+  journalEntries JournalEntry[]
+
+  @@index([businessId])
+  @@map("fiscal_periods")
+}
+
+model AccountingMappingRule {
+  id         String               @id @default(uuid())
+  businessId String               @map("business_id")
+  key        AccountingMappingKey
+  accountId  String               @map("account_id")
+  createdAt  DateTime             @default(now()) @map("created_at")
+  updatedAt  DateTime             @updatedAt @map("updated_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "accounting_mapping_rules_business_fk")
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, key])
+  @@index([businessId])
+  @@map("accounting_mapping_rules")
+}
+
+/// The immutable business-event header (Phase 0 §6.2: Draft -> Posted ->
+/// (Reversed); no UPDATE on a Posted entry - corrections are new reversal
+/// entries only, never edits). sourceType/sourceId is the exact same
+/// polymorphic-reference pattern StockMovement.referenceType/referenceId
+/// already uses, and (businessId, sourceType, sourceId) is the final
+/// DB-level duplicate-posting backstop (Phase 0 §10: idempotency must not
+/// rely on an application pre-check alone). (businessId, reversalOfId) is
+/// a second, nullable-opt-in unique constraint (same pattern as every
+/// idempotencyKey column in this schema) guaranteeing at most ONE reversal
+/// per original entry, DB-enforced - not just an application check.
+model JournalEntry {
+  id             String             @id @default(uuid())
+  businessId     String             @map("business_id")
+  fiscalPeriodId String             @map("fiscal_period_id")
+  entryNumber    String             @map("entry_number")
+  entryDate      DateTime           @map("entry_date")
+  status         JournalEntryStatus @default(POSTED)
+  sourceType     String             @map("source_type")
+  sourceId       String             @map("source_id")
+  reversalOfId   String?            @map("reversal_of_id")
+  description    String?
+  postedBy       String?            @map("posted_by")
+  postedAt       DateTime?          @map("posted_at")
+  createdBy      String?            @map("created_by")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  business     Business           @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "journal_entries_business_fk")
+  fiscalPeriod FiscalPeriod       @relation(fields: [fiscalPeriodId], references: [id], onDelete: Restrict)
+  reversalOf   JournalEntry?      @relation("JournalEntryReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedBy   JournalEntry[]     @relation("JournalEntryReversal")
+  lines        JournalEntryLine[]
+
+  @@unique([businessId, sourceType, sourceId])
+  @@unique([businessId, entryNumber])
+  @@unique([businessId, reversalOfId])
+  @@index([businessId])
+  @@index([fiscalPeriodId])
+  @@map("journal_entries")
+}
+
+/// Append-only at the DB-privilege level (erp_app: SELECT+INSERT only, no
+/// UPDATE, no DELETE - see accounting_app_role_grants). A DEFERRED
+/// constraint trigger (accounting_schema migration) re-verifies
+/// SUM(debit)=SUM(credit) per journal_entry_id at transaction-commit time
+/// as the second line of defense behind AccountingEngine.postEntry's own
+/// pre-insert application-layer check (Phase 0 §6.1).
+model JournalEntryLine {
+  id             String   @id @default(uuid())
+  businessId     String   @map("business_id")
+  journalEntryId String   @map("journal_entry_id")
+  accountId      String   @map("account_id")
+  debit          Decimal  @default(0) @db.Decimal(18, 4)
+  credit         Decimal  @default(0) @db.Decimal(18, 4)
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "journal_entry_lines_business_fk")
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Restrict)
+  account      Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+  @@index([journalEntryId])
+  @@index([accountId])
+  @@map("journal_entry_lines")
 }

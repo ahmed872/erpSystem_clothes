@@ -107,6 +107,17 @@ export const PERMISSION_CODES = [
   'shifts.view',
   'shifts.open',
   'shifts.close',
+  // Accounting (Phase 6): Chart of Accounts
+  'accounting.accounts.view',
+  'accounting.accounts.create',
+  'accounting.accounts.edit',
+  'accounting.accounts.delete',
+  // Accounting (Phase 6): Journal / General Ledger
+  'accounting.journal.view',
+  'accounting.journal.reverse',
+  // Accounting (Phase 6): Fiscal Periods
+  'accounting.periods.manage',
+  'accounting.reopen_period',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -178,6 +189,20 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'sales.view',
     'sales.pay',
     'shifts.view',
+    // Accounting (Phase 6): the Accountant runs the books - full COA and
+    // journal access, plus period open/close for month-end/year-end
+    // procedures. NOT accounting.reopen_period - reserved for the
+    // Business Owner by default (Phase 0 §6.4 names it as a special,
+    // separately-granted permission, distinct from ordinary period
+    // management), grantable to a specific Accountant explicitly if the
+    // owner chooses to.
+    'accounting.accounts.view',
+    'accounting.accounts.create',
+    'accounting.accounts.edit',
+    'accounting.accounts.delete',
+    'accounting.journal.view',
+    'accounting.journal.reverse',
+    'accounting.periods.manage',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',

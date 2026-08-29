@@ -9,6 +9,8 @@ import { RequestUser } from '../../../../common/decorators/current-user.decorato
 import { loadVariantContext } from '../../domain/load-variant-context';
 import { toBaseQuantity } from '../../domain/uom-conversion';
 import { resolveAllowNegative } from '../../domain/resolve-allow-negative';
+import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
+import { buildInventoryAdjustmentJournalLines } from '../../../accounting/domain/inventory-adjustment-journal-lines';
 
 /**
  * Signed manual correction: positive = found extra stock (ADJUSTMENT),
@@ -25,6 +27,7 @@ export class AdjustStockUseCase {
     private readonly audit: AuditService,
     private readonly engine: InventoryEngineService,
     private readonly effectivePermissions: EffectivePermissionsService,
+    private readonly accounting: AccountingEngineService,
   ) {}
 
   async execute(actor: RequestUser, input: AdjustStockInput) {
@@ -50,6 +53,27 @@ export class AdjustStockUseCase {
         createdBy: actor.id,
         allowNegative,
       });
+
+      // Phase 6: post the accounting fact for this adjustment in the
+      // SAME transaction - see buildInventoryAdjustmentJournalLines's
+      // doc comment for the known no-idempotency-on-retry limitation
+      // this inherits from Phase 3.
+      const adjustmentJournalLines = await buildInventoryAdjustmentJournalLines(tx, actor.tenantId, {
+        movementType: input.movementType,
+        quantityDelta: baseQty,
+        unitCostAtMovement: result.movement.unitCostAtMovement,
+      });
+      if (adjustmentJournalLines.length > 0) {
+        await this.accounting.postEntry(tx, {
+          businessId: actor.tenantId,
+          entryDate: new Date(),
+          sourceType: 'StockMovement',
+          sourceId: result.movement.id,
+          description: `Inventory adjustment: ${input.movementType} - ${input.reason}`,
+          createdBy: actor.id,
+          lines: adjustmentJournalLines,
+        });
+      }
 
       await this.audit.record(tx, {
         businessId: actor.tenantId,

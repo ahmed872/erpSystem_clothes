@@ -11,7 +11,9 @@ import { CatalogModule } from './modules/catalog/catalog.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { PurchasingModule } from './modules/purchasing/purchasing.module';
 import { SalesModule } from './modules/sales/sales.module';
+import { AccountingModule } from './modules/accounting/accounting.module';
 import { InventoryEngineModule } from './engines/inventory/inventory-engine.module';
+import { AccountingEngineModule } from './engines/accounting/accounting-engine.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
 
@@ -23,12 +25,14 @@ import { PermissionsGuard } from './common/guards/permissions.guard';
     AuthorizationModule,
     AuditModule,
     InventoryEngineModule,
+    AccountingEngineModule,
     IamModule,
     TenancyModule,
     CatalogModule,
     InventoryModule,
     PurchasingModule,
     SalesModule,
+    AccountingModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

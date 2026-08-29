@@ -6,6 +6,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AuditService } from '../../audit/audit.service';
 import { PasswordHasherService } from '../../../common/security/password-hasher.service';
 import { ConflictDomainError } from '../../../common/errors/domain-error';
+import { seedAccountingDefaults } from '../../accounting/domain/seed-accounting-defaults';
 
 export interface RegisterBusinessResult {
   businessId: string;
@@ -109,6 +110,12 @@ export class RegisterBusinessUseCase {
       });
       await tx.userRole.create({ data: { userId: ownerUserId, roleId: ownerRoleId } });
       await tx.userBranch.create({ data: { userId: ownerUserId, branchId } });
+
+      // Phase 6: every business gets its default Chart of Accounts +
+      // AccountingMappingRule set + one open-ended FiscalPeriod at
+      // onboarding, so its very first Sale/Purchase can post immediately -
+      // see seedAccountingDefaults's own doc comment.
+      await seedAccountingDefaults(tx, businessId, ownerUserId);
 
       await this.audit.record(tx, {
         businessId,

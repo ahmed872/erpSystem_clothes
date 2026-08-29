@@ -13,6 +13,9 @@ import { consumeVariant } from '../../../inventory/domain/consume-variant';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
 import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
 import { findActiveShift } from '../../domain/find-active-shift';
+import { computeSaleCost } from '../../domain/sale-cost';
+import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
+import { buildSaleJournalLines } from '../../../accounting/domain/sale-journal-lines';
 
 function saleFingerprint(
   warehouseId: string,
@@ -70,6 +73,7 @@ export class CreateSaleUseCase {
     private readonly audit: AuditService,
     private readonly engine: InventoryEngineService,
     private readonly effectivePermissions: EffectivePermissionsService,
+    private readonly accounting: AccountingEngineService,
   ) {}
 
   async execute(actor: RequestUser, input: CreateSaleInput) {
@@ -229,6 +233,35 @@ export class CreateSaleUseCase {
             },
           });
         }
+      }
+
+      // Phase 6: post the accounting fact for this Sale in the SAME
+      // transaction - COGS sourced exclusively from computeSaleCost,
+      // which reads the SALE/BUNDLE_CONSUMPTION StockMovement rows
+      // consumeVariant just wrote above (unit_cost_at_movement, never a
+      // recomputed/current cost). Nothing here duplicates Sales'
+      // business logic - the lines are built from values already
+      // computed by this exact use-case (subtotal/discountAmount/
+      // taxAmount/totalAmount/payments).
+      const { totalCost } = await computeSaleCost(tx, actor.tenantId, { id: sale.id, subtotal, discountAmount });
+      const journalLines = await buildSaleJournalLines(tx, actor.tenantId, {
+        subtotal,
+        discountAmount,
+        taxAmount,
+        totalAmount,
+        totalCost,
+        payments: input.payments,
+      });
+      if (journalLines.length > 0) {
+        await this.accounting.postEntry(tx, {
+          businessId: actor.tenantId,
+          entryDate: new Date(),
+          sourceType: 'Sale',
+          sourceId: sale.id,
+          description: `Sale ${sale.saleNumber}`,
+          createdBy: actor.id,
+          lines: journalLines,
+        });
       }
 
       const finalSale = await tx.sale.findUniqueOrThrow({ where: { id: sale.id }, include: { items: true, payments: true } });

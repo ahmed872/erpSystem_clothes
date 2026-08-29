@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { PERMISSION_CODES } from '@retail/shared-types';
+import { seedAccountingDefaults } from '../src/modules/accounting/domain/seed-accounting-defaults';
 
 const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'users.view': 'View users',
@@ -86,6 +87,14 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'shifts.view': 'View shifts',
   'shifts.open': 'Open a shift, required before completing a sale',
   'shifts.close': 'Close an open shift',
+  'accounting.accounts.view': 'View the Chart of Accounts',
+  'accounting.accounts.create': 'Create a tenant-specific account',
+  'accounting.accounts.edit': 'Rename an account',
+  'accounting.accounts.delete': 'Deactivate a tenant-specific account',
+  'accounting.journal.view': 'View journal entries, account balances, and the trial balance',
+  'accounting.journal.reverse': 'Reverse a posted journal entry',
+  'accounting.periods.manage': 'Open and close fiscal periods',
+  'accounting.reopen_period': 'Reopen a closed fiscal period',
 };
 
 /**
@@ -133,6 +142,25 @@ async function main() {
       // eslint-disable-next-line no-console
       console.log(`Backfilled ${backfilled} permission grant(s) across ${ownerRoles.length} BUSINESS_OWNER role(s).`);
     }
+
+    // Phase 6 one-time bootstrap: every business that existed BEFORE
+    // Phase 6 shipped needs its default Chart of Accounts +
+    // AccountingMappingRule set + one open-ended FiscalPeriod too, or its
+    // very next Sale/Purchase would fail with "no accounting mapping" /
+    // "no open fiscal period" the moment Phase 6's postEntry calls are
+    // wired in. This is infrastructure setup ONLY - it creates no
+    // JournalEntry rows and never reinterprets any Phase 1-5 historical
+    // data (Phase 6 scope decision: no historical backfill of past
+    // transactions). seedAccountingDefaults is idempotent (upsert-based),
+    // so re-running this is always safe, including for businesses
+    // onboarded after Phase 6 shipped (RegisterBusinessUseCase already
+    // seeded them - this is a no-op for those).
+    const businesses = await prisma.business.findMany({ select: { id: true } });
+    for (const business of businesses) {
+      await prisma.$transaction((tx) => seedAccountingDefaults(tx, business.id));
+    }
+    // eslint-disable-next-line no-console
+    console.log(`Ensured Phase 6 accounting defaults (Chart of Accounts + mapping rules + an open fiscal period) for ${businesses.length} business(es).`);
   } finally {
     await prisma.$disconnect();
   }

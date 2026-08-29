@@ -9,6 +9,8 @@ import { ConflictDomainError, NotFoundDomainError, ValidationFailedError } from 
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { lockPurchase } from '../../domain/lock-purchase';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
+import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
+import { buildPurchaseReceiptJournalLines } from '../../../accounting/domain/purchase-journal-lines';
 
 const RECEIVABLE_STATUSES = new Set(['APPROVED', 'PARTIALLY_RECEIVED']);
 
@@ -42,6 +44,7 @@ export class ReceivePurchaseUseCase {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly engine: InventoryEngineService,
+    private readonly accounting: AccountingEngineService,
   ) {}
 
   async execute(actor: RequestUser, purchaseId: string, input: ReceivePurchaseInput) {
@@ -152,6 +155,22 @@ export class ReceivePurchaseUseCase {
             description: `Goods received against purchase ${purchase.purchaseNumber}`,
             createdBy: actor.id,
           },
+        });
+      }
+
+      // Phase 6: post the accounting fact for this receipt in the SAME
+      // transaction - totalReceivedValue is the exact same figure the
+      // SupplierTransaction above just used.
+      const receiptJournalLines = await buildPurchaseReceiptJournalLines(tx, actor.tenantId, totalReceivedValue);
+      if (receiptJournalLines.length > 0) {
+        await this.accounting.postEntry(tx, {
+          businessId: actor.tenantId,
+          entryDate: new Date(),
+          sourceType: 'PurchaseReceipt',
+          sourceId: receipt.id,
+          description: `Goods received against purchase ${purchase.purchaseNumber}`,
+          createdBy: actor.id,
+          lines: receiptJournalLines,
         });
       }
 
