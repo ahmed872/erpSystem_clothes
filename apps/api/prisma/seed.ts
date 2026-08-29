@@ -103,6 +103,8 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'warranty.view': 'View warranties and warranty claims',
   'warranty.register': 'Register a warranty against a sold serial-tracked item',
   'warranty.claim': 'Register and resolve warranty claims',
+  'loyalty.view': "View a customer's loyalty point balance and ledger history",
+  'loyalty.adjust': 'Manually add or remove loyalty points for a customer',
 };
 
 /**

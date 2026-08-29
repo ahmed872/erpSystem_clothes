@@ -104,6 +104,7 @@ model Business {
 
   warranties     Warranty[]
   warrantyClaims WarrantyClaim[]
+  customerPoints CustomerPoints[]
 
   @@map("businesses")
 }
@@ -1456,6 +1457,7 @@ model Customer {
   sales        Sale[]
   transactions CustomerTransaction[]
   warranties   Warranty[]
+  points       CustomerPoints[]
 
   // Deliberately NO unique constraint on name/phone: unlike Supplier,
   // customer names/phones legitimately repeat in retail and there is no
@@ -2029,4 +2031,73 @@ model WarrantyClaim {
   @@index([warrantyId])
   @@index([status])
   @@map("warranty_claims")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8B - Loyalty Ledger
+// ---------------------------------------------------------------------------
+
+/// Why a point event has a type at all: a balance of "150" is useless on
+/// its own - the business needs to see WHY. EARN/REDEEM/RETURN_CLAWBACK
+/// are all machine-generated from a Sale or SaleReturn; ADJUSTMENT is the
+/// only human-entered one, and it is the only one that may be signed
+/// either way.
+enum CustomerPointsType {
+  EARN
+  REDEEM
+  RETURN_CLAWBACK
+  ADJUSTMENT
+}
+
+/// APPEND-ONLY loyalty ledger (approved Phase 8 policy). A customer's
+/// point balance is ALWAYS `SUM(points)` computed on read - there is
+/// deliberately no stored, mutable balance column anywhere in this
+/// schema, exactly like `CustomerTransaction`/`SupplierTransaction`
+/// already work for money. `erp_app` gets SELECT+INSERT only (no UPDATE,
+/// no DELETE), so append-only is a database guarantee rather than an
+/// application convention.
+///
+/// Corrections are new compensating rows, never edits: a return's
+/// clawback inserts a RETURN_CLAWBACK row and leaves the original EARN
+/// row byte-for-byte intact.
+///
+/// `basisAmount`/`rateSnapshot` freeze the BD-3 earning calculation onto
+/// the row itself, so a later change to the business's loyalty rate can
+/// never alter, re-derive, or invalidate points already earned - and a
+/// return's clawback can reproduce the ORIGINAL earning arithmetic
+/// without consulting current configuration.
+model CustomerPoints {
+  id             String             @id @default(uuid())
+  businessId     String             @map("business_id")
+  customerId     String             @map("customer_id")
+  type           CustomerPointsType
+  /// Signed: positive adds to the balance, negative removes from it.
+  /// Never zero (CHECK-enforced) - a zero-point event carries no
+  /// information and would only pollute the ledger.
+  points         Decimal            @db.Decimal(18, 4)
+  /// The merchandise amount the points were computed from (BD-3:
+  /// subtotal - discounts, excluding tax). Snapshot, not a live link.
+  basisAmount    Decimal?           @map("basis_amount") @db.Decimal(18, 4)
+  /// The points-per-currency-unit rate in force at the moment of the
+  /// event. Snapshot, not a live link.
+  rateSnapshot   Decimal?           @map("rate_snapshot") @db.Decimal(18, 6)
+  referenceType  String?            @map("reference_type")
+  referenceId    String?            @map("reference_id")
+  description    String?
+  /// Present only on human-entered ADJUSTMENT rows; machine-generated
+  /// events inherit the idempotency of the Sale/SaleReturn that produced
+  /// them.
+  idempotencyKey String?            @map("idempotency_key")
+  createdBy      String?            @map("created_by")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "customer_points_business_fk")
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId])
+  @@index([businessId, customerId])
+  @@index([referenceType, referenceId])
+  @@index([type])
+  @@map("customer_points")
 }

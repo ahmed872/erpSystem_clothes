@@ -1,7 +1,14 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 8A — Warranty (**Complete, awaiting explicit approval to start Phase 8B**)
+Phase 8B — Loyalty Ledger (**Complete, awaiting explicit approval to start Phase 8C**)
+
+Phase 8B delivered the loyalty **ledger foundation ONLY**, exactly as approved: an append-only `CustomerPoints` table, a balance that is always `SUM(points)` derived on read, the BD-3 earning rule, permissions, and a manual adjustment endpoint. **No Redemption (8C). No Promotions (8D). No Sales integration (8E).** `CreateSaleUseCase` and `CreateSaleReturnUseCase` were not touched. **No GL change** — `LoyaltyModule` imports neither `InventoryEngineModule` nor `AccountingEngineModule`, so points cannot reach the ledger even by mistake, matching the approved decision that loyalty points are **not** a General Ledger liability in Phase 8. **No expiry and no scheduler.** Phases 1-8A source is untouched apart from wiring the new module.
+
+**There is no stored mutable balance anywhere** — asserted by a test that scans `information_schema` for any balance-shaped column and requires none. Append-only is a **database** guarantee: `erp_app` holds `SELECT, INSERT` and nothing else on `customer_points`, proven by a direct-connection UPDATE/DELETE rejection test.
+
+### Phase 8A (previously completed)
+Phase 8A — Warranty (**Complete, release-gate approved**)
 
 Phase 8A delivered the Warranty module ONLY, exactly as approved: warranty registration against a sold serial-tracked unit, a business-default duration with a per-registration override, a **snapshotted** duration/coverage window, an ACTIVE/EXPIRED/CLAIMED/VOID lifecycle, and OPEN→RESOLVED|REJECTED claims. **Record-keeping only** — `WarrantyModule` imports neither `InventoryEngineModule` nor `AccountingEngineModule`, so no warranty action can move stock, replace a unit, or post to the ledger; that is structural, not a convention. **No Loyalty. No Promotions. No Sales integration. No Accounting change. No Inventory change.** Phases 1-7 source is untouched apart from wiring the new module.
 
@@ -134,8 +141,30 @@ All in one DB transaction - any failure anywhere rolls back everything, verified
 
 **Claims** (`POST /warranties/:id/claims`) are **record-keeping only** (approved decision): registering or resolving a claim creates no `StockMovement`, no `JournalEntry`, no `SaleReturn`, no refund, and no replacement — any replacement workflow is explicitly deferred. Eligibility is checked against the warranty's own snapshotted dates: a `VOID` warranty and one outside `[startDate, endDate)` are both rejected 409. A warranty already `CLAIMED` **can** take another claim (a first claim may have been REJECTED, or a second unrelated fault may occur) — blocking that would invent a one-claim-per-warranty rule Phase 0 does not state. Claim statuses are exactly the three approved: **OPEN → RESOLVED | REJECTED**, one-way, with no path back to OPEN and no richer workflow. A resolution records `resolvedAt`/`resolvedBy` and never rewrites `claimedAt` or `description`; the `warranty_claims_resolution_audit_consistent` CHECK makes that pairing a database guarantee, proven by a test that tries to violate it via raw SQL.
 
+### Phase 8B — Loyalty Ledger
+**`CustomerPoints` is append-only, and the database is what enforces it.** `erp_app` is granted `SELECT, INSERT` only — no UPDATE, no DELETE — the same strictest-in-the-system posture as Phase 6's `journal_entries`/`journal_entry_lines`. A correction is therefore always a **new compensating row**; the original event survives byte-for-byte (tested). No locking-only UPDATE grant was needed either, because the concurrency boundary for a balance is the **Customer** row, not the ledger rows: locking existing ledger rows cannot block the INSERT of a new one, which is precisely the race that matters.
+
+**Balance is `SUM(CustomerPoints.points)`, computed on every read.** There is no `balance` column on `Customer`, no cache, and nothing to invalidate — asserted by a test that queries `information_schema` for any balance-shaped column and requires zero. Every row is **signed** (EARN positive; REDEEM and RETURN_CLAWBACK negative; ADJUSTMENT either way), so a plain `SUM()` is the whole computation, and a CHECK constraint (`customer_points_sign_matches_type`) makes a sign that contradicts its own type unrepresentable — without it a `REDEEM` row with a positive value would silently *increase* a balance while reading as a spend.
+
+**Negative balances are impossible** (approved policy: no negative balance, no debt/negative-points mechanism). A deduction larger than the current balance is rejected 409 with nothing written. The check runs while holding `SELECT … FOR UPDATE` on the **Customer** row with the balance re-read under that lock, so two concurrent deductions that are each individually affordable can never together overdraw — proven by a real concurrent-HTTP test, plus a global assertion that no customer anywhere in the database holds a negative derived balance.
+
+**BD-3 earning rule**, implemented literally: `pointsEarned = floor(loyaltyEligibleAmount × pointsPerCurrencyUnit)`. **Floor, never half-up**; `Prisma.Decimal` throughout with no floating-point step anywhere. The rate comes from the existing Phase 1 `Setting` store (`loyalty.points_per_currency_unit`) — **no new configuration table**. An absent *or invalid* stored rate resolves to `null` meaning "this business runs no loyalty programme", never a guessed default. Computing `loyaltyEligibleAmount` itself is 8E's job; 8B owns only the deterministic conversion to points.
+
+**Historical integrity is snapshotted onto the row**: `basisAmount` and `rateSnapshot` freeze the arithmetic that produced the points, so a later rate change can never alter, re-derive or invalidate points already earned — proven by a test that changes the rate to 99 afterwards and confirms the row still reproduces its own value from its own snapshot. A `customer_points_snapshot_complete` CHECK makes the pair all-or-nothing, since a row with a basis but no rate could not reproduce its own arithmetic.
+
+**Manual adjustment** (`POST /sales/customers/:id/points/adjust`) is the one human-entered write and the only ledger writer that exists in 8B — EARN, REDEEM and RETURN_CLAWBACK rows come from a Sale or SaleReturn and are 8C/8E's approved scope. Its `idempotencyKey` and `reason` are both **required** (unlike Sales' optional keys): there is no source document behind a manual adjustment, so a double submission would otherwise be indistinguishable from two deliberate identical grants, and a point grant with no stated cause is an entry an audit cannot explain later. The DB-level `(business_id, idempotency_key)` unique index is the real guarantee; `assertIdempotentReplayMatches` rejects the same key reused with a **different** payload rather than returning a stale row.
+
 ## Pending Features
-Everything from Phase 8B onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+Everything from Phase 8C onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+
+Deliberately out of Phase 8B scope (approved constraints, none of them worked around):
+- **Redemption** (8C) — no redemption endpoint, no conversion rate, no proportional BD-2 allocation. `REDEEM` rows are unreachable in 8B.
+- **Promotions** (8D) — no `Promotion` model, no `SalePromotionApplication`.
+- **Sales integration** (8E) — `CreateSaleUseCase` and `CreateSaleReturnUseCase` were not modified; no sale earns or spends points yet, so `EARN` rows are likewise unreachable outside a direct test insert.
+- **Return clawback** (8C) — the §6.2 clawback formula was deliberately **not** implemented in 8B even as an unwired helper. `RETURN_CLAWBACK` exists in the enum (it is part of the approved ledger data model) but has no writer until 8C. Three of the four event types being reachable only from later phases is the approved phase split working as intended, not an oversight.
+- **Accounting** — no Loyalty Liability account, no GL mapping, no journal entry, no Phase 6 refactor. Asserted by test.
+- **Expiry / scheduler** — none, per the approved decision.
+- **Loyalty reporting** — Phase 7's `/reports/*` layer was not extended.
 
 Deliberately out of Phase 8A scope (approved constraints, none of them worked around):
 - **Loyalty** (`CustomerPoints`, earn/redeem/clawback) and **Promotions** — Phase 8B/8C onward, untouched.
@@ -204,6 +233,10 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 
 3 new global permission codes: `warranty.{view,register,claim}` (**100 permissions total now**).
 
+**Phase 8B**: 1 new Prisma model: `CustomerPoints`. New enum: `CustomerPointsType` (`EARN`/`REDEEM`/`RETURN_CLAWBACK`/`ADJUSTMENT`). Carries its own `businessId` for direct RLS scoping, plus a tenant-scoped unique `(business_id, idempotency_key)`. FK posture: `business_id` CASCADEs, `customer_id` is `RESTRICT` — a customer with point history can never be deleted out from under it. **No new configuration table** (the earning rate reuses `Setting`) and **no new column on `Customer`** — there is deliberately no stored balance.
+
+2 new global permission codes: `loyalty.view`, `loyalty.adjust` (**102 permissions total now**).
+
 ## Migrations
 **Phase 5**:
 1. `20260829112729_sales_schema` - the 8 tables/5 enums above, plus hand-written `CHECK` constraints: non-zero `amount` on `customer_transactions`; `closed_at >= opened_at` on `shifts`; non-negative subtotal/discount/tax/total on `sales`; positive quantity, non-negative price/discount/tax/line-total/quantity-returned, and **`quantity_returned <= quantity`** on `sale_items`; positive quantity + non-negative price on `sale_return_items`; positive `amount` on `sale_payments`. Plus a **partial unique index** `shifts_one_open_per_user (business_id, opened_by) WHERE status = 'OPEN'` - the database-level guarantee behind the "one open shift per user" invariant, not just an application pre-check.
@@ -224,6 +257,11 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 10. `20260829165100_warranty_rls` — RLS **and FORCE RLS** on both tables with `<table>_tenant_isolation` policies (`USING` + `WITH CHECK` on `business_id = current_setting('app.current_tenant_id', true)`), identical default-deny pattern to every prior phase.
 11. `20260829165200_warranty_app_role_grants` — `erp_app` gets `SELECT, INSERT, UPDATE` on both tables and **no DELETE**. `UPDATE` is for genuine status transitions only (ACTIVE→CLAIMED/VOID, OPEN→RESOLVED/REJECTED); the migration notes explicitly that neither table is row-locked, so this is not a `FOR UPDATE` support grant.
 
+**Phase 8B**:
+12. `20260829220846_loyalty_ledger_schema` — the `customer_points` table + `CustomerPointsType` enum, plus hand-written `CHECK` constraints: `customer_points_nonzero` (`points <> 0` — a zero-point event carries no information in a ledger whose whole purpose is `SUM(points)`); `customer_points_sign_matches_type` (EARN `> 0`, REDEEM `< 0`, RETURN_CLAWBACK `< 0`, ADJUSTMENT either — **not a new business rule**, but the database enforcing the meaning the approved policy already gives each type, so a positive REDEEM that would silently *raise* a balance is unrepresentable); `customer_points_snapshot_complete` (`basis_amount`/`rate_snapshot` all-or-nothing, since a row with one but not the other could not reproduce its own arithmetic); `customer_points_rate_positive`.
+13. `20260829220900_loyalty_ledger_rls` — RLS **and FORCE RLS** with the `customer_points_tenant_isolation` policy (`USING` + `WITH CHECK`), identical default-deny pattern to every prior phase.
+14. `20260829221000_loyalty_ledger_app_role_grants` — `erp_app` gets **`SELECT, INSERT` only**: no UPDATE, no DELETE, at all. This is the strictest grant in the system alongside Phase 6's `journal_entries`, and it is what makes append-only a **database** guarantee rather than an application convention. No locking-only UPDATE grant was needed either (the Phase 5 `sales` lesson applied up front for the third phase running): the serialization point for a balance is the **`customers`** row — which already carries the UPDATE grant from Phase 5 — because a row lock on existing ledger rows cannot block the INSERT of a new one, which is exactly the race that matters.
+
 Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate status`: both "up to date", **22 migrations total** across all six phases). Verified directly via SQL, not just assumed:
 - `pg_class.relrowsecurity`/`relforcerowsecurity` = true on all 5 new Phase 6 tables.
 - `information_schema.role_table_grants` for `erp_app` matches the design exactly: `accounts`/`fiscal_periods` → `INSERT,SELECT,UPDATE`; `accounting_mapping_rules`/`journal_entries`/`journal_entry_lines` → `INSERT,SELECT`.
@@ -238,6 +276,13 @@ Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate stat
 - `information_schema.role_table_grants` for `erp_app` = `INSERT,SELECT,UPDATE` on both tables, **no DELETE**.
 - All 5 hand-written CHECK constraints present in `pg_constraint` on both databases.
 - Both databases re-seeded: **100 permissions** each, warranty codes backfilled onto existing `BUSINESS_OWNER` roles.
+
+**Phase 8B migration verification** — run as direct SQL against **both** `erp_dev` and `erp_test`, not assumed (**29 migrations total**, `migrate deploy` reporting no pending migrations on either database):
+- `pg_class.relrowsecurity` **and** `relforcerowsecurity` = `true` on `customer_points`.
+- `pg_policies` shows `customer_points_tenant_isolation`.
+- `information_schema.role_table_grants` for `erp_app` = exactly `INSERT, SELECT` — **no UPDATE, no DELETE** (also asserted by an e2e test, and by a direct-connection UPDATE/DELETE rejection test that confirms the row is unchanged afterwards).
+- All 4 hand-written CHECK constraints present in `pg_constraint` on both databases.
+- Both databases re-seeded: **102 permissions** each, loyalty codes backfilled onto existing `BUSINESS_OWNER` roles.
 
 ## API Endpoints
 All Phase 5 endpoints under `/api/v1/sales`, same `{ data }` / `{ error }` envelope (list endpoints also return `pagination`).
@@ -311,6 +356,18 @@ Claim routes are nested under their warranty so the parent is always resolved in
 
 Role-template grants: `BUSINESS_OWNER` everything (as always). `BRANCH_MANAGER` all three. `ACCOUNTANT` **`warranty.view` only** — visibility without operational authority. `CASHIER` all three: registering a warranty at the till and taking a claim over the counter are POS-floor actions, and **this does not breach the no-cost-visibility rule**, since a warranty carries no cost or profit field at all. `SALES_EMPLOYEE` gets `warranty.view` + `warranty.register` but deliberately **not** `warranty.claim` — deciding a claim is a supervisory act. `INVENTORY_MANAGER` gets none.
 
+All new Phase 8B endpoints are nested under the customer they belong to, same `{ data }` / `{ error }` envelope (the ledger endpoint also returns `pagination`). **Every route carries an explicit `@RequirePermissions`**:
+
+| Method | Path | Permission |
+|---|---|---|
+| GET | `/sales/customers/:customerId/points` | `loyalty.view` |
+| GET | `/sales/customers/:customerId/points/ledger` | `loyalty.view` |
+| POST | `/sales/customers/:customerId/points/adjust` | `loyalty.adjust` |
+
+The parent customer is always resolved inside the caller's tenant first, so another business's customer id returns 404 rather than a zero balance. The balance endpoint returns the derived figure plus an explicit `derivation` string on the response itself, so a consumer cannot mistake it for a stored value. The ledger endpoint returns the customer's **whole** balance alongside the page, never the filtered page's subtotal — so nobody can accidentally derive a balance from one page of a paginated list. Ledger filters: `type`, `page`/`limit` (max 200). All bodies/queries validated against `packages/shared-validation/src/loyalty.ts`.
+
+Role-template grants: `BUSINESS_OWNER` both. `ACCOUNTANT` **both** — a point correction is a value decision of the same kind as the customer-ledger corrections that role already owns. `BRANCH_MANAGER`, `CASHIER` and `SALES_EMPLOYEE` get **`loyalty.view` only** — a cashier must be able to tell a customer their balance at the till but must not be able to hand out points by hand. `INVENTORY_MANAGER` gets neither.
+
 ## Screens
 None (still backend-only - unchanged from Phases 1-5; still flagging this for your review).
 
@@ -346,6 +403,20 @@ None (still backend-only - unchanged from Phases 1-5; still flagging this for yo
 - **Unit**: no new unit tests — the two domain helpers (`resolveWarrantyDurationDays`, `effectiveWarrantyStatus`/`isWarrantyCoverageActive`) are exercised end-to-end through both their success and failure paths, including the missing-configuration path, which is stronger than isolating them. Phase 1-7's 28 unit tests remain green.
 - Full regression after 8A: **306/306 e2e (34 files) + 28/28 unit**, zero regressions from Phases 1-7. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
 
+**Phase 8B**: E2E: **38 new tests, 1 new file** (`loyalty-ledger.e2e-spec.ts`), real NestJS app + real PostgreSQL `erp_test` with RLS/FORCE RLS active and the restricted `erp_app` runtime role. No mocks.
+- **Derived balance (5)** — a fresh customer reads `0`; an `information_schema` scan proves **no balance-shaped column exists anywhere**; the API balance is compared against an independently computed `SUM(points)` from the raw table across positive, fractional and negative events; the ledger listing returns the whole balance rather than the filtered page subtotal; an out-of-range `limit` is rejected 422.
+- **Append-only, proven at the database layer (5)** — `erp_app`'s grants read exactly `['INSERT','SELECT']` from `information_schema`; a raw UPDATE **and** a raw DELETE on the runtime connection *with the correct tenant set* both fail with `permission denied`, and the row is re-read and confirmed unchanged; a correction is shown to be a new row with the original event byte-for-byte intact; the DB rejects a zero-point row and a sign contradicting its type for all three machine types; the DB rejects a half-populated earning snapshot and a non-positive rate.
+- **Negative balances impossible (4)** — an over-deduction is rejected 409 with the balance and row count unchanged; a deduction down to exactly zero succeeds and one point further is refused; **two truly concurrent deductions** (`Promise.all`, neither awaiting first) that are each individually affordable but jointly overdrawn resolve to exactly one 201 and one 409 with a correct final balance; and a global query asserts **no customer anywhere in the database** holds a negative derived balance.
+- **Idempotency (4)** — a same-key/same-payload replay returns the original row and writes nothing new; a same-key/**different**-payload replay is rejected 409 rather than returning the stale row (both a changed amount and a changed reason); a missing key is rejected 422; two truly concurrent same-key requests produce **exactly one** ledger row.
+- **Validation (2)** — zero points, blank reason and a non-numeric value all 422; an unknown customer 404s on both read and write.
+- **BD-3 earning rule (5)** — floor proven against half-up (`99.99 × 1 → 99`, `99 × 0.5 → 49`); determinism and absence of floating-point drift (`1000.15 × 0.3 → 300`, not 300.045); non-positive eligible amounts earn nothing; the rate resolves from `Setting` and **absent, zero, negative, non-numeric and null all resolve to `null`** (no programme) rather than a guessed default; and **a snapshotted EARN row is unaffected by a later rate change** — the rate is moved to 99 afterwards and the row still reproduces its own value from its own `basisAmount`/`rateSnapshot`.
+- **No accounting effect (2)** — adjusting points creates **no** `JournalEntry` and **no** `CustomerTransaction` (before/after counts); no loyalty-named `Account` exists and no journal/account column exists on `customer_points`.
+- **Tenant isolation (4)** — business B cannot read the balance, read the ledger, or adjust business A's customer (404 on all three); B's own ledger is unaffected; **RLS is proven at the database layer** (a raw read on the runtime connection with B's tenant returns zero rows for A's event); and an unfiltered read with **no** tenant context returns nothing while a cross-tenant INSERT is refused by `WITH CHECK`.
+- **Permissions (6)** — unauthenticated 401 on read and write; `CASHIER`, `SALES_EMPLOYEE` and `BRANCH_MANAGER` each read 200 but adjust **403**; `ACCOUNTANT` both reads and performs a genuine successful adjustment (201); `INVENTORY_MANAGER` 403 on read.
+- **Audit trail (1)** — every manual adjustment records `createdBy`, its stated reason, and a matching `AuditLog` row.
+- **Unit**: no new unit tests — `computePointsEarned` and `resolveLoyaltyEarnRate` are exercised directly inside the e2e suite against a real `Setting` row and a real ledger row, covering both the success and the no-programme paths, which is stronger than isolating them. Phase 1-8A's 28 unit tests remain green.
+- Full regression after 8B: **344/344 e2e (35 files) + 28/28 unit**, zero regressions from Phases 1-8A. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
+
 ## Security Review
 Everything from Phases 1-4 stands unchanged. Phase 5 additions:
 - Every sales-mutating endpoint requires its own specific permission (11 new codes) rather than one blanket `sales.manage` - verified by test at two privilege levels: a Cashier (the intended POS-floor role) allowed to open a shift, sell, and return, but rejected from an out-of-template action; a role with zero sales permissions rejected from every sales route entirely.
@@ -364,6 +435,12 @@ Phase 8A additions:
 - RLS **and FORCE RLS** are active on both new tables and proven at the database layer, not merely in application code: a raw query on the restricted `erp_app` connection with another tenant's `app.current_tenant_id` returns zero rows for a warranty that demonstrably exists.
 - Every claim route resolves its parent warranty **inside the caller's tenant first**, so a claim belonging to another business cannot be reached by guessing a warranty id — tested against all four claim/void/list/resolve paths.
 - The Cashier's `warranty.claim` grant does **not** breach Phase 0 §9's no-cost/profit-visibility rule for that template: neither warranty table has a cost, price or profit column, and the module exposes none.
+
+Phase 8B additions:
+- Both new codes are route-enforced server-side and the **full six-role matrix is tested**, not sampled: Cashier / Sales Employee / Branch Manager each read but are 403 on adjust; Accountant performs a genuine successful adjustment; Inventory Manager is 403 on read. Read and write are separate permissions because telling a customer their balance and creating points from nothing are very different acts.
+- `customer_points` has **no UPDATE and no DELETE** grant for `erp_app` — the strictest grant in the system alongside `journal_entries` — verified both by reading `information_schema` and by a direct-connection UPDATE/DELETE rejection test that re-reads the row afterwards to confirm it is unchanged.
+- RLS **and FORCE RLS** proven at the database layer: a raw read on the restricted connection with another tenant's `app.current_tenant_id` returns zero rows, an unfiltered read with no tenant context returns nothing, and a cross-tenant INSERT is refused by `WITH CHECK`.
+- The manual adjustment endpoint requires **both** an idempotency key and a stated reason, so the one write with no source document behind it cannot be silently double-submitted and cannot produce an entry an audit is unable to explain.
 
 ## Business Logic Review
 - Every sales use case validates its references (warehouse/customer/variant belong to the caller's tenant, customer is active, shift matches the warehouse) before writing anything, returning 404/422/409 rather than silently creating cross-tenant, invalid, or shift-less data.
@@ -418,6 +495,13 @@ Phase 8A additions:
 - **The audit trail is a database guarantee, not an application convention**: `warranty_claims_resolution_audit_consistent` makes a resolved-claim-without-`resolvedAt` unrepresentable, proven by a raw-SQL attempt that the constraint rejects.
 - **Voiding preserves history**: the snapshotted dates, `durationDays` and every existing claim survive a void untouched; only `status` moves. `erp_app` has no DELETE on either table, so a warranty or claim can never be erased.
 - **Concurrency**: both status transitions use a single conditional `updateMany` (`WHERE status = 'OPEN'` / `WHERE status <> 'VOID'`) rather than read-then-write, so two simultaneous resolutions or voids can never both report success — the `CloseShiftUseCase` pattern from Phase 5.
+
+Phase 8B additions:
+- **The ledger cannot be rewritten.** `erp_app` holds `SELECT, INSERT` only on `customer_points`; a correction is a new compensating row and the original event survives byte-for-byte (proven by re-reading `points`, `description` and `createdAt` after a later correction). This is the same never-edit-history posture as `SaleReturn` towards `Sale` and `reverseEntry` towards `JournalEntry`, but enforced one level stricter — those tables at least permit a locking UPDATE; this one permits none.
+- **A balance can never drift from its own history**, because there is no second copy of it: no stored balance column exists (asserted against `information_schema`), so `SUM(points)` is not a cache that could go stale but the only representation there is.
+- **Earned points are immune to configuration change.** `basisAmount` and `rateSnapshot` freeze the BD-3 arithmetic onto the row, so a later rate change cannot alter, re-derive or invalidate points already earned — proven by moving the business rate to 99 after the fact and confirming the row still reproduces its own value from its own snapshot with no current configuration consulted. `customer_points_snapshot_complete` makes that pair all-or-nothing at the database layer.
+- **Sign integrity is structural**: `customer_points_sign_matches_type` makes a REDEEM that raises a balance, or an EARN that lowers one, unrepresentable — so a future code path cannot corrupt the meaning of the ledger even if its application logic is wrong.
+- **Concurrency**: the balance is re-read under a `SELECT … FOR UPDATE` lock on the **Customer** row before any deduction, so the overdraw race is closed at the serialization point that actually governs new inserts — proven by a real concurrent-HTTP test, not asserted from code reading.
 
 ## Accounting Engine & Integration Review (Phase 6)
 
@@ -488,6 +572,15 @@ New from Phase 8A:
 51. **Claim resolution has no replacement, refund, or credit path** — approved 8A scope is record-keeping only. `WarrantyModule` imports neither `InventoryEngineModule` nor `AccountingEngineModule`, so this is structural: no warranty action can move stock or post to the ledger even by mistake. A future replacement workflow would go through `InventoryEngineService` and `AccountingEngineService` like every other module, never around them.
 52. **A warranty is not auto-created at sale time** — registration is an explicit, separate call. Wiring it into the POS sale flow is Phase 8B's Sales integration, deliberately not started.
 
+New from Phase 8B:
+
+53. **Three of the four `CustomerPointsType` values have no writer yet** — `EARN`, `REDEEM` and `RETURN_CLAWBACK` are all produced by a Sale or SaleReturn, which is 8C/8E's approved scope. `ADJUSTMENT` is the only type reachable in 8B. This is the approved phase split working as intended, not a dead-enum defect of the Known Issue #37 kind: each value has a named phase that will write it, and pulling those writers forward would be exactly the scope creep the phase split exists to prevent. The clawback formula was deliberately **not** implemented in 8B even as an unwired helper.
+54. **No loyalty reporting** — Phase 7's `/reports/*` layer was not extended, so a point balance is visible only per-customer through the loyalty endpoints. There is no business-wide outstanding-points figure anywhere.
+55. **Points are not a GL liability** (approved decision, restated as a limitation because it has a real accounting consequence): outstanding points represent a future obligation that appears **nowhere** on the Balance Sheet. A business with a large point float carries an unrecorded obligation. This is the approved Phase 8 treatment; if it is ever revisited, it is a Phase 6 accounting change with a new mapping key, not a loyalty change.
+56. **No expiry** — points never lapse, and there is no scheduler (approved decision). Combined with #55, the point float only ever grows until redeemed.
+57. **A manual `ADJUSTMENT` has no `basisAmount`/`rateSnapshot`** — deliberately: a human correction is not derived from a merchandise amount at a rate, and populating those fields would make the row look like a computed `EARN` it is not. The all-or-nothing CHECK accepts both-null.
+58. **The earning rate is business-wide** — there is no per-customer tier, per-branch rate, or category-specific multiplier. Customer-specific pricing/tiers are explicitly deferred by the approved decisions.
+
 ## Files Created
 Prisma migrations: `apps/api/prisma/migrations/20260829112729_sales_schema/`, `.../20260829112800_sales_rls/`, `.../20260829112900_sales_app_role_grants/`, `.../20260829130000_sales_lock_update_grant/`.
 
@@ -550,6 +643,20 @@ Tests: `apps/api/test/warranty.e2e-spec.ts`.
 
 **No Phase 1-7 business logic was modified.** The only changes outside the new module are the four wiring/registration touches above — no Sales, Inventory, Accounting or Reporting use-case was edited, and `WarrantyModule`'s dependency graph structurally excludes both engines.
 
+### Phase 8B Files Created
+Prisma migrations: `apps/api/prisma/migrations/20260829220846_loyalty_ledger_schema/`, `.../20260829220900_loyalty_ledger_rls/`, `.../20260829221000_loyalty_ledger_app_role_grants/`.
+
+Shared validation: `packages/shared-validation/src/loyalty.ts`.
+
+Loyalty module (`apps/api/src/modules/loyalty/`): `loyalty.module.ts`; `domain/{customer-points-balance,lock-customer,loyalty-earning}.ts`; `application/{get-customer-points,list-customer-points,adjust-customer-points}.use-case.ts`; `presentation/loyalty.controller.ts`.
+
+Tests: `apps/api/test/loyalty-ledger.e2e-spec.ts`.
+
+### Phase 8B Files Modified
+`apps/api/prisma/schema.prisma` (1 new model/1 enum + `Business`/`Customer` back-relations), `apps/api/prisma/seed.ts` (2 new permission descriptions), `apps/api/src/app.module.ts` (wire `LoyaltyModule`), `apps/api/test/db-reset.ts` (truncate `customer_points`), `packages/shared-types/src/permissions.ts` (2 new codes + `BRANCH_MANAGER`/`ACCOUNTANT`/`CASHIER`/`SALES_EMPLOYEE` role-template grants), `packages/shared-validation/src/index.ts` (re-export `loyalty.ts`), `docs/state/PROJECT_STATE.md`.
+
+**No Phase 1-8A business logic was modified.** The only changes outside the new module are those four wiring/registration touches — no Sales, Inventory, Accounting, Reporting or Warranty use-case was edited, and `LoyaltyModule`'s dependency graph structurally excludes both engines.
+
 ## Next Phase
-**Phase 8B and beyond — Loyalty, Promotions, and the approved Sales integration** (including the BD-1 effective-unit-price correction to Phase 5 sale returns, the BD-2 proportional line allocation, and the serial-capture-on-sale work that closes Known Issue #47). None of it has been started: no Loyalty model, no Promotion model, no `CustomerPoints`, and no modification to `CreateSaleUseCase` or `CreateSaleReturnUseCase` exists in the tree.
-**8B will not start until you explicitly approve this Phase 8A report.**
+**Phase 8C — Loyalty Redemption**: redemption, locking, idempotency, concurrency, sale integration, return clawback, tests. None of it has been started — there is no redemption endpoint, no conversion-rate setting, no BD-2 allocation code, no §6.2 clawback implementation, and no modification to `CreateSaleUseCase` or `CreateSaleReturnUseCase` anywhere in the tree. Known Issue #47 (serial capture in Sales) remains an accepted cross-phase dependency for **8E** and must not be worked around in 8C.
+**8C will not start until you explicitly approve this Phase 8B report.**

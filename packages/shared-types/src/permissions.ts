@@ -132,6 +132,13 @@ export const PERMISSION_CODES = [
   'warranty.view',
   'warranty.register',
   'warranty.claim',
+  // Loyalty (Phase 8B) - an append-only points ledger. `loyalty.view`
+  // reads a customer's derived balance and ledger history;
+  // `loyalty.adjust` is the one human-entered write, deliberately held to
+  // Owner/Accountant since a manual point grant is a monetary-value
+  // decision with no source document behind it.
+  'loyalty.view',
+  'loyalty.adjust',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -199,6 +206,9 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'warranty.view',
     'warranty.register',
     'warranty.claim',
+    // Loyalty (Phase 8B): read-only. Adjusting points by hand is not a
+    // branch-level decision - it is deliberately Owner/Accountant only.
+    'loyalty.view',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -240,6 +250,11 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // Warranty (Phase 8A): read-only oversight. An Accountant does not
     // register warranties or process claims at the counter.
     'warranty.view',
+    // Loyalty (Phase 8B): full ledger oversight INCLUDING manual
+    // adjustment - a point correction is a value decision of the same
+    // kind as the customer-ledger corrections this role already owns.
+    'loyalty.view',
+    'loyalty.adjust',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',
@@ -320,6 +335,9 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'warranty.view',
     'warranty.register',
     'warranty.claim',
+    // Loyalty (Phase 8B): a cashier must be able to tell a customer their
+    // point balance at the till, but NOT hand out points by hand.
+    'loyalty.view',
   ],
   SALES_EMPLOYEE: [
     'branches.view',
@@ -342,5 +360,7 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // Cashier/Branch Manager/Owner in this template set.
     'warranty.view',
     'warranty.register',
+    // Loyalty (Phase 8B): read-only, same reasoning as the Cashier.
+    'loyalty.view',
   ],
 };
