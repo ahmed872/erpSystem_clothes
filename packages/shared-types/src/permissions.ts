@@ -118,6 +118,15 @@ export const PERMISSION_CODES = [
   // Accounting (Phase 6): Fiscal Periods
   'accounting.periods.manage',
   'accounting.reopen_period',
+  // Reporting (Phase 7) - a strictly read-only layer over the
+  // source-of-truth systems. `reports.view_profit` gates profit/margin
+  // FIELDS (not whole reports) and is deliberately separate from
+  // `products.view_cost`, which continues to gate cost fields.
+  'reports.sales.view',
+  'reports.inventory.view',
+  'reports.financial.view',
+  'reports.dashboard.view',
+  'reports.view_profit',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -172,6 +181,14 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'sales.return',
     'sales.pay',
     'shifts.view',
+    // Reporting (Phase 7): operational oversight for their own branches
+    // only (enforced server-side via UserBranch - see branch-scope.ts).
+    // Deliberately NOT reports.financial.view and NOT
+    // reports.view_profit: a Branch Manager sees operational volume, not
+    // the company's financial statements or profit/margin figures.
+    'reports.sales.view',
+    'reports.inventory.view',
+    'reports.dashboard.view',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -203,6 +220,13 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'accounting.journal.view',
     'accounting.journal.reverse',
     'accounting.periods.manage',
+    // Reporting (Phase 7): the Accountant runs the books, so gets every
+    // report including financial statements and profit visibility.
+    'reports.sales.view',
+    'reports.inventory.view',
+    'reports.financial.view',
+    'reports.dashboard.view',
+    'reports.view_profit',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',

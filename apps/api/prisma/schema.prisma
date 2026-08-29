@@ -1556,6 +1556,11 @@ model Sale {
   @@index([customerId])
   @@index([shiftId])
   @@index([status])
+  /// Phase 7 (Reporting): every date-ranged sales report and dashboard
+  /// KPI filters on (business_id, created_at) - previously unindexed.
+  @@index([businessId, createdAt])
+  /// Phase 7 (Reporting): sales-by-employee/user grouping.
+  @@index([businessId, createdBy])
   @@map("sales")
 }
 
@@ -1588,6 +1593,9 @@ model SaleItem {
   @@index([businessId])
   @@index([saleId])
   @@index([variantId])
+  /// Phase 7 (Reporting): sales-by-product and sales-by-category
+  /// aggregation groups SaleItems by variant within a business.
+  @@index([businessId, variantId])
   @@map("sale_items")
 }
 
@@ -1614,6 +1622,9 @@ model SalePayment {
   @@unique([businessId, idempotencyKey])
   @@index([businessId])
   @@index([saleId])
+  /// Phase 7 (Reporting): payment-method breakdown filters by period
+  /// before grouping on method.
+  @@index([businessId, receivedAt])
   @@map("sale_payments")
 }
 
@@ -1874,6 +1885,10 @@ model JournalEntry {
   @@unique([businessId, reversalOfId])
   @@index([businessId])
   @@index([fiscalPeriodId])
+  /// Phase 7 (Reporting): the P&L, Balance Sheet and General Ledger
+  /// reports are all bounded on (business_id, entry_date) - previously
+  /// unindexed.
+  @@index([businessId, entryDate])
   @@map("journal_entries")
 }
 

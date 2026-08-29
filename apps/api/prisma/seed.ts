@@ -95,6 +95,11 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'accounting.journal.reverse': 'Reverse a posted journal entry',
   'accounting.periods.manage': 'Open and close fiscal periods',
   'accounting.reopen_period': 'Reopen a closed fiscal period',
+  'reports.sales.view': 'View sales and purchasing reports',
+  'reports.inventory.view': 'View inventory reports and inventory reconciliation',
+  'reports.financial.view': 'View financial reports (General Ledger, P&L, Balance Sheet, receivables/payables)',
+  'reports.dashboard.view': 'View the dashboard KPI summary',
+  'reports.view_profit': 'See profit and margin fields on reports',
 };
 
 /**
