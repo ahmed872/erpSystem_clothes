@@ -6,6 +6,11 @@ import { SalesReturnsReportUseCase } from './application/sales/sales-returns-rep
 import { PurchasingReportUseCase } from './application/sales/purchasing-report.use-case';
 import { InventoryReportsController } from './presentation/inventory-reports.controller';
 import { InventoryReportsUseCase } from './application/inventory/inventory-reports.use-case';
+import { FinancialReportsController } from './presentation/financial-reports.controller';
+import { FinancialReportsUseCase } from './application/financial/financial-reports.use-case';
+import { DashboardController } from './presentation/dashboard.controller';
+import { DashboardUseCase } from './application/dashboard/dashboard.use-case';
+import { ReconciliationUseCase } from './application/reconciliation/reconciliation.use-case';
 
 /**
  * Phase 7: a strictly READ-ONLY reporting layer over the source-of-truth
@@ -19,7 +24,16 @@ import { InventoryReportsUseCase } from './application/inventory/inventory-repor
  * other module.
  */
 @Module({
-  controllers: [SalesReportsController, InventoryReportsController],
-  providers: [SalesSummaryUseCase, SalesByDimensionUseCase, SalesReturnsReportUseCase, PurchasingReportUseCase, InventoryReportsUseCase],
+  controllers: [SalesReportsController, InventoryReportsController, FinancialReportsController, DashboardController],
+  providers: [
+    SalesSummaryUseCase,
+    SalesByDimensionUseCase,
+    SalesReturnsReportUseCase,
+    PurchasingReportUseCase,
+    InventoryReportsUseCase,
+    FinancialReportsUseCase,
+    DashboardUseCase,
+    ReconciliationUseCase,
+  ],
 })
 export class ReportingModule {}
