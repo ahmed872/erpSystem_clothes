@@ -127,6 +127,11 @@ export const PERMISSION_CODES = [
   'reports.financial.view',
   'reports.dashboard.view',
   'reports.view_profit',
+  // Warranty (Phase 8A) - record-keeping only: registering a warranty or
+  // a claim never touches inventory or accounting.
+  'warranty.view',
+  'warranty.register',
+  'warranty.claim',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -189,6 +194,11 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'reports.sales.view',
     'reports.inventory.view',
     'reports.dashboard.view',
+    // Warranty (Phase 8A): full operational handling for their branches'
+    // customers - register, view, and process claims.
+    'warranty.view',
+    'warranty.register',
+    'warranty.claim',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -227,6 +237,9 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'reports.financial.view',
     'reports.dashboard.view',
     'reports.view_profit',
+    // Warranty (Phase 8A): read-only oversight. An Accountant does not
+    // register warranties or process claims at the counter.
+    'warranty.view',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',
@@ -300,6 +313,13 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'shifts.view',
     'shifts.open',
     'shifts.close',
+    // Warranty (Phase 8A): POS-floor actions - register a warranty at the
+    // till and take a claim over the counter. Warranty carries no cost or
+    // profit information, so this does not breach the Cashier's
+    // no-cost-visibility rule above.
+    'warranty.view',
+    'warranty.register',
+    'warranty.claim',
   ],
   SALES_EMPLOYEE: [
     'branches.view',
@@ -317,5 +337,10 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // Not sales.pay (collecting a later payment against a credit sale) or
     // products.view_cost by default - matching Phase 0 §9's "بدون تعديل
     // أسعار/تكلفة" (no price/cost editing) posture for this template.
+    // Warranty (Phase 8A): can register a warranty when selling, but NOT
+    // warranty.claim - processing a claim is a decision reserved for a
+    // Cashier/Branch Manager/Owner in this template set.
+    'warranty.view',
+    'warranty.register',
   ],
 };

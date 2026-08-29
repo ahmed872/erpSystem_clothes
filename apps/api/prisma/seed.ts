@@ -100,6 +100,9 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'reports.financial.view': 'View financial reports (General Ledger, P&L, Balance Sheet, receivables/payables)',
   'reports.dashboard.view': 'View the dashboard KPI summary',
   'reports.view_profit': 'See profit and margin fields on reports',
+  'warranty.view': 'View warranties and warranty claims',
+  'warranty.register': 'Register a warranty against a sold serial-tracked item',
+  'warranty.claim': 'Register and resolve warranty claims',
 };
 
 /**

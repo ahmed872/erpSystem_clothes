@@ -1,7 +1,14 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 7 — Reports & Dashboard (**Complete, awaiting explicit approval to start Phase 8**)
+Phase 8A — Warranty (**Complete, awaiting explicit approval to start Phase 8B**)
+
+Phase 8A delivered the Warranty module ONLY, exactly as approved: warranty registration against a sold serial-tracked unit, a business-default duration with a per-registration override, a **snapshotted** duration/coverage window, an ACTIVE/EXPIRED/CLAIMED/VOID lifecycle, and OPEN→RESOLVED|REJECTED claims. **Record-keeping only** — `WarrantyModule` imports neither `InventoryEngineModule` nor `AccountingEngineModule`, so no warranty action can move stock, replace a unit, or post to the ledger; that is structural, not a convention. **No Loyalty. No Promotions. No Sales integration. No Accounting change. No Inventory change.** Phases 1-7 source is untouched apart from wiring the new module.
+
+One real gap in the existing system was found while implementing 8A and is recorded as **Known Issue #47** rather than worked around: Phase 5 sales record no `SaleItem → SerialNumber` link, so warranty registration can verify the variant but not that the supplied serial is the unit that actually left on that line.
+
+### Phase 7 (previously completed)
+Phase 7 — Reports & Dashboard (**Complete, release-gate approved**)
 
 Phase 7 delivered a strictly **read-only** reporting layer (`modules/reporting/`) over the source-of-truth systems built in Phases 3-6: sales/purchasing/inventory/financial reports, a dashboard read model, and four reconciliation reports. No writes to any transactional table, no reporting tables, no new `erp_app` grants, no Phase 1-6 refactor.
 
@@ -116,8 +123,28 @@ All in one DB transaction - any failure anywhere rolls back everything, verified
 
 **Reconciliation** — four reports, zero tolerance, discrepancies always listed rather than summarised away: (1) Stock ledger vs `StockBalance`; (2) Customer subledger vs AR control account; (3) Supplier subledger vs AP control account; (4) Inventory ledger value vs the GL Inventory account, **excluding the two documented non-posting sources** (`referenceType='StockCount'` and `movementType='OPENING_BALANCE'`) with each excluded value reported **visibly and separately**, and an explicit note that these divergences are expected and are NOT accounting errors.
 
+### Phase 8A — Warranty
+**Registration** (`POST /warranties`) binds ONE physical serial unit to ONE sale line. Validation runs in order, every reference checked inside the caller's own tenant before anything is written: the `SaleItem` exists here → its product is **serial-tracked** (a non-serialized line is rejected 422, because a warranty must identify one physical unit and such a line cannot say which) → the `SerialNumber` exists here → the serial belongs to the **same variant** as the sale line → no warranty already exists for that (saleItem, serial) pair. Duplicate protection is the `(business_id, sale_item_id, serial_number_id)` unique index — a DB guarantee; the application pre-check exists only to return a friendlier 409.
+
+**Duration** resolves as: explicit `durationDays` override, else `Setting['warranty.default_duration_days']` for the business. If neither is present or the stored default is not a valid positive integer, registration **fails 422 rather than guessing a duration** — no default is invented anywhere in the code. This reuses Phase 1's generic `Setting` store exactly as `resolveAllowNegative` does; no new configuration table was added. **No business maximum was invented** — the 36500-day ceiling on both the zod schema and the `warranties_duration_days_technical_bound` CHECK is a technical timestamp-overflow bound and is documented as such in both places.
+
+**Coverage is snapshotted at registration and never recomputed.** `startDate` is always the **SALE's own `createdAt`** — never the registration time, never client-supplied. `durationDays` is stored on the row and `endDate` derived from it once. Changing the business default afterwards provably cannot widen or narrow an already-issued warranty (tested at both the DB row and the API read model). The interval is **half-open `[startDate, endDate)`**, the same convention Phase 7's date ranges use, so a boundary instant belongs to exactly one side.
+
+**Lifecycle**: `status` is the stored, human-set value (`ACTIVE`/`CLAIMED`/`VOID`); `effectiveStatus` is derived **on read** from the row's own dates. Phase 8A adds **no job runner**, so nothing flips `ACTIVE` to `EXPIRED` in the background — an elapsed warranty still stores `ACTIVE` and reads `EXPIRED`, and both are returned so the distinction is never hidden. `VOID` has a real transition path (`POST /warranties/:id/void`) deliberately: a status the schema declares but no code can set would be a dead enum member masquerading as behaviour — the Phase 7 `STOCK_COUNT` lesson (Known Issue #37) applied up front.
+
+**Claims** (`POST /warranties/:id/claims`) are **record-keeping only** (approved decision): registering or resolving a claim creates no `StockMovement`, no `JournalEntry`, no `SaleReturn`, no refund, and no replacement — any replacement workflow is explicitly deferred. Eligibility is checked against the warranty's own snapshotted dates: a `VOID` warranty and one outside `[startDate, endDate)` are both rejected 409. A warranty already `CLAIMED` **can** take another claim (a first claim may have been REJECTED, or a second unrelated fault may occur) — blocking that would invent a one-claim-per-warranty rule Phase 0 does not state. Claim statuses are exactly the three approved: **OPEN → RESOLVED | REJECTED**, one-way, with no path back to OPEN and no richer workflow. A resolution records `resolvedAt`/`resolvedBy` and never rewrites `claimedAt` or `description`; the `warranty_claims_resolution_audit_consistent` CHECK makes that pairing a database guarantee, proven by a test that tries to violate it via raw SQL.
+
 ## Pending Features
-Everything from Phase 8 onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+Everything from Phase 8B onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+
+Deliberately out of Phase 8A scope (approved constraints, none of them worked around):
+- **Loyalty** (`CustomerPoints`, earn/redeem/clawback) and **Promotions** — Phase 8B/8C onward, untouched.
+- **Sales integration** — `CreateSaleUseCase` was not modified; no warranty is auto-created at sale time and no serial is captured on a sale line (Known Issue #47).
+- **Accounting** — no warranty provision/liability account, no posting of any kind. `AccountingEngineService` is not injected anywhere in the module.
+- **Inventory** — no replacement unit, no automatic stock adjustment, no serial status change. `InventoryEngineService` is not injected anywhere in the module.
+- No background job to expire warranties (expiry is derived on read instead).
+- No warranty reporting endpoints under `/reports/*` (Phase 7's layer was not extended).
+- No BD-1 sale-return effective-unit-price fix — that is an approved Phase 8B/8C item, deliberately not smuggled into 8A.
 
 Deliberately out of Phase 6 scope (see Known Issues for the reasoning on each):
 - `FinancialAccount`/`CashRegister`/`CashTransaction`, `Expense`/`ExpenseCategory`/`RecurringExpense` (explicit scope decisions above).
@@ -171,6 +198,12 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 
 8 new global permission codes: `accounting.accounts.{view,create,edit,delete}`, `accounting.journal.{view,reverse}`, `accounting.periods.manage`, `accounting.reopen_period` (92 permissions total now).
 
+**Phase 7**: no new models and no new tables — 5 `@@index` entries only. 5 new permission codes (97 total).
+
+**Phase 8A**: 2 new Prisma models: `Warranty`, `WarrantyClaim`. New enums: `WarrantyStatus` (`ACTIVE`/`EXPIRED`/`CLAIMED`/`VOID` — all four reachable, see Lifecycle above), `WarrantyClaimStatus` (`OPEN`/`RESOLVED`/`REJECTED` — exactly the three approved). Both tables carry their own `businessId` for direct RLS scoping. `Warranty` has a tenant-scoped unique constraint `(business_id, sale_item_id, serial_number_id)`. FK posture: `business_id` CASCADEs (a deleted business takes its own rows), every other FK is `RESTRICT` — a `SaleItem`, `SerialNumber` or `Customer` referenced by a warranty can never be silently deleted out from under its warranty history. **No new configuration table** — the default duration reuses Phase 1's `Setting`.
+
+3 new global permission codes: `warranty.{view,register,claim}` (**100 permissions total now**).
+
 ## Migrations
 **Phase 5**:
 1. `20260829112729_sales_schema` - the 8 tables/5 enums above, plus hand-written `CHECK` constraints: non-zero `amount` on `customer_transactions`; `closed_at >= opened_at` on `shifts`; non-negative subtotal/discount/tax/total on `sales`; positive quantity, non-negative price/discount/tax/line-total/quantity-returned, and **`quantity_returned <= quantity`** on `sale_items`; positive quantity + non-negative price on `sale_return_items`; positive `amount` on `sale_payments`. Plus a **partial unique index** `shifts_one_open_per_user (business_id, opened_by) WHERE status = 'OPEN'` - the database-level guarantee behind the "one open shift per user" invariant, not just an application pre-check.
@@ -183,6 +216,14 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 6. `20260829123500_accounting_rls` - RLS on all 5 tables, same default-deny pattern as every prior phase.
 7. `20260829123600_accounting_app_role_grants` - extends `erp_app`: `accounts`/`fiscal_periods` get SELECT+INSERT+UPDATE (`accounts` for rename/deactivate; `fiscal_periods` for OPEN↔CLOSED transitions AND because `postEntry`/`ClosePeriodUseCase`/`ReopenPeriodUseCase` all take `SELECT ... FOR UPDATE` on it - the Phase 5 `sales`-table lesson applied UP FRONT this time, not discovered live again); `accounting_mapping_rules`/`journal_entries`/`journal_entry_lines` get SELECT+INSERT only - `journal_entries`/`journal_entry_lines` are genuinely append-only with **no locking-only UPDATE grant either**, since nothing ever locks them (the reversal race is closed by the unique index, not a row lock).
 
+**Phase 7**:
+8. `20260829140000_reporting_indexes` - five `@@index` entries only; no tables, views, materialized views or grants.
+
+**Phase 8A**:
+9. `20260829165055_warranty_schema` — the 2 tables/2 enums above, plus hand-written `CHECK` constraints: `duration_days > 0`; `duration_days <= 36500` (**technical timestamp-overflow bound, explicitly NOT a business maximum** — a comment in the migration says so, because Phase 0 defines no maximum and inventing one was forbidden); `end_date > start_date`; a non-empty trimmed claim `description`; and `warranty_claims_resolution_audit_consistent` — `(status = 'OPEN' AND resolved_at IS NULL AND resolved_by IS NULL) OR (status <> 'OPEN' AND resolved_at IS NOT NULL)`, so a resolved claim can never exist without its audit trail and an OPEN claim can never carry one.
+10. `20260829165100_warranty_rls` — RLS **and FORCE RLS** on both tables with `<table>_tenant_isolation` policies (`USING` + `WITH CHECK` on `business_id = current_setting('app.current_tenant_id', true)`), identical default-deny pattern to every prior phase.
+11. `20260829165200_warranty_app_role_grants` — `erp_app` gets `SELECT, INSERT, UPDATE` on both tables and **no DELETE**. `UPDATE` is for genuine status transitions only (ACTIVE→CLAIMED/VOID, OPEN→RESOLVED/REJECTED); the migration notes explicitly that neither table is row-locked, so this is not a `FOR UPDATE` support grant.
+
 Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate status`: both "up to date", **22 migrations total** across all six phases). Verified directly via SQL, not just assumed:
 - `pg_class.relrowsecurity`/`relforcerowsecurity` = true on all 5 new Phase 6 tables.
 - `information_schema.role_table_grants` for `erp_app` matches the design exactly: `accounts`/`fiscal_periods` → `INSERT,SELECT,UPDATE`; `accounting_mapping_rules`/`journal_entries`/`journal_entry_lines` → `INSERT,SELECT`.
@@ -190,6 +231,13 @@ Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate stat
 - An unfiltered `SELECT * FROM accounts`/`journal_entries` as `erp_app` with no tenant context returns zero rows; a cross-tenant raw `INSERT` is rejected by RLS `WITH CHECK`.
 - The deferred balance trigger verified firing correctly via a direct raw-SQL insert of unbalanced lines as `erp_app` (reproduced independently via plain `psql` outside the test harness too - see Known Issues #35 for a Prisma-client-specific quirk found while writing this test, unrelated to the trigger's own correctness).
 - `erp_app` has no UPDATE/DELETE privilege on `journal_entries`/`journal_entry_lines` - verified via a direct-connection UPDATE/DELETE rejection test.
+
+**Phase 8A migration verification** — run as direct SQL against **both** `erp_dev` and `erp_test`, not assumed (**26 migrations total** across all phases, `migrate deploy` reporting no pending migrations on either database):
+- `pg_class.relrowsecurity` **and** `relforcerowsecurity` = `true` on `warranties` and `warranty_claims`.
+- `pg_policies` shows `warranties_tenant_isolation` and `warranty_claims_tenant_isolation`.
+- `information_schema.role_table_grants` for `erp_app` = `INSERT,SELECT,UPDATE` on both tables, **no DELETE**.
+- All 5 hand-written CHECK constraints present in `pg_constraint` on both databases.
+- Both databases re-seeded: **100 permissions** each, warranty codes backfilled onto existing `BUSINESS_OWNER` roles.
 
 ## API Endpoints
 All Phase 5 endpoints under `/api/v1/sales`, same `{ data }` / `{ error }` envelope (list endpoints also return `pagination`).
@@ -247,6 +295,22 @@ All new Phase 7 endpoints under `/api/v1/reports`, same envelope. All are **GET 
 
 Shared query params: `from`/`to` (optional, server-defaulted to the current month, resolved in the business timezone, always bounded), `branchId?` (validated against the caller's permitted branches), `page`/`limit` (max 200, matching every other list endpoint). Role-template grants: `BUSINESS_OWNER` everything; `ACCOUNTANT` all five reporting codes including `reports.view_profit`; `BRANCH_MANAGER` gets `reports.{sales,inventory,dashboard}.view` only — **deliberately not `reports.financial.view` and not `reports.view_profit`**; `INVENTORY_MANAGER`, `CASHIER` and `SALES_EMPLOYEE` get **no reporting permission at all**. `reports.export` was deliberately **not created**, since exports are deferred and a permission for a non-existent feature is misleading.
 
+All new Phase 8A endpoints under `/api/v1/warranties`, same `{ data }` / `{ error }` envelope (the list endpoint also returns `pagination`). **Every route carries an explicit `@RequirePermissions`** — no warranty route is reachable on authentication alone:
+
+| Method | Path | Permission |
+|---|---|---|
+| GET | `/warranties` | `warranty.view` |
+| GET | `/warranties/:id` | `warranty.view` |
+| POST | `/warranties` | `warranty.register` |
+| POST | `/warranties/:id/void` | `warranty.register` |
+| GET | `/warranties/:id/claims` | `warranty.view` |
+| POST | `/warranties/:id/claims` | `warranty.claim` |
+| POST | `/warranties/:id/claims/:claimId/resolve` | `warranty.claim` |
+
+Claim routes are nested under their warranty so the parent is always resolved inside the caller's tenant before a claim is touched. List filters: `status`, `customerId`, `serialNumberId`, `page`/`limit` (max 200, matching every other list endpoint). All request bodies/queries validated against shared zod schemas in `packages/shared-validation/src/warranty.ts`.
+
+Role-template grants: `BUSINESS_OWNER` everything (as always). `BRANCH_MANAGER` all three. `ACCOUNTANT` **`warranty.view` only** — visibility without operational authority. `CASHIER` all three: registering a warranty at the till and taking a claim over the counter are POS-floor actions, and **this does not breach the no-cost-visibility rule**, since a warranty carries no cost or profit field at all. `SALES_EMPLOYEE` gets `warranty.view` + `warranty.register` but deliberately **not** `warranty.claim` — deciding a claim is a supervisory act. `INVENTORY_MANAGER` gets none.
+
 ## Screens
 None (still backend-only - unchanged from Phases 1-5; still flagging this for your review).
 
@@ -268,6 +332,20 @@ None (still backend-only - unchanged from Phases 1-5; still flagging this for yo
 - **Unit**: no new unit tests — reporting has no standalone algorithm worth isolating from the database; every calculation is verified end-to-end against real data, which is stronger. Phase 1-6's 28 unit tests remain green.
 - Full regression: **271/271 e2e + 28/28 unit**, zero regressions from Phases 1-6, verified after every sub-phase (7A→7G) rather than only at the end.
 
+**Phase 8A**: E2E: **35 new tests, 1 new file** (`warranty.e2e-spec.ts`), real NestJS app + real PostgreSQL `erp_test` with RLS/FORCE RLS active and the restricted `erp_app` runtime role. **No mocks** — tenant isolation, permission boundaries and record-keeping-only guarantees are security and integrity invariants, and a mock cannot prove them.
+- **Registration / validation / serial-tracked enforcement (9)** — registers with the business default and snapshots it; coverage starts at the **SALE date** (compared against the `Sale.createdAt` row, not the response); a per-registration override wins over the default with `endDate` recomputed to match; a duplicate (saleItem, serial) is rejected 409; a **non serial-tracked** sale line is rejected 422; a serial belonging to a **different variant** is rejected 422; non-existent sale line and non-existent serial both 404; malformed input (bad uuid, `durationDays` of 0, -1 and 36501) all 422; and — the one that matters most — **with no override and no valid default configured, registration fails 422 rather than guessing**, while an explicit override still succeeds under the same missing-config conditions.
+- **Duration snapshot / historical integrity (1)** — the business default is changed to `1` after a warranty was issued at `365`; the stored row's `durationDays`, `startDate` and `endDate` are all re-read and confirmed unmoved, and the API read model still reports `365`/`ACTIVE`. Coverage is provably not recomputed from current configuration.
+- **Expiry and eligibility (2)** — an elapsed warranty reads `status: ACTIVE` (stored, untouched) but `effectiveStatus: EXPIRED` (derived), and a claim against it is rejected 409; the interval is proven **half-open** — `endDate` exactly now already reads EXPIRED.
+- **Claim lifecycle (8)** — a claim registers OPEN with null `resolvedAt`/`resolvedBy` and flips the warranty to CLAIMED while changing **no** coverage fact; an empty/whitespace description is rejected 422; a **second claim in the same coverage period is allowed**; resolution records `resolvedAt` and the correct `resolvedBy`; re-transitioning a resolved claim is rejected 409 (**one-way**); `OPEN`/`CLOSED`/`PENDING` as a resolve status are all rejected 422; `claimedAt`/`description`/`createdBy` are re-read from the DB after resolution and confirmed unchanged; and **the database itself refuses** a resolved claim with a nulled audit trail — a raw `UPDATE` as the owner connection is rejected by `warranty_claims_resolution_audit_consistent`.
+- **Void (1)** — voiding sets VOID, **preserves the snapshotted `durationDays`** (history is not erased), blocks any further claim (409), and a second void is rejected (409).
+- **Record-keeping only (2)** — `StockMovement` count, `JournalEntry` count and every `StockBalance.quantityOnHand` for the sold variant are captured before and after registering, claiming, resolving and voiding, and asserted **identical**; plus an `information_schema` query proving no column on either warranty table references a journal, movement or account.
+- **Tenant isolation (5)** — business B cannot read A's warranty by id (404), never sees A's rows in its own list, cannot claim/resolve/void/list-claims against A's warranty (404 on all four), and cannot register a warranty against A's sale line (404); finally **RLS is proven at the database layer**, not merely in application code: a raw query on the `erp_app` runtime connection with `app.current_tenant_id` set to B returns **zero rows** for A's warranty.
+- **Permissions (4)** — an unauthenticated caller gets 401 on both read and write routes; an `ACCOUNTANT` may list but is 403 on register, claim and void; a `SALES_EMPLOYEE` may list but is **403 on claim**; a `CASHIER` performs a genuine write (registers a real claim, 201) proving the POS-floor grant works, not just that a read succeeds.
+- **Listing (2)** — status/serial filters and pagination all reconcile, every row carries `effectiveStatus`, and an out-of-range `limit` is rejected 422.
+- **Known Issue #47 (1)** — asserts current behaviour explicitly (a sold serial-tracked variant's serials remain `IN_STOCK`) so the gap is **visible** and Phase 8B's Sales integration has a regression anchor showing exactly what changed.
+- **Unit**: no new unit tests — the two domain helpers (`resolveWarrantyDurationDays`, `effectiveWarrantyStatus`/`isWarrantyCoverageActive`) are exercised end-to-end through both their success and failure paths, including the missing-configuration path, which is stronger than isolating them. Phase 1-7's 28 unit tests remain green.
+- Full regression after 8A: **306/306 e2e (34 files) + 28/28 unit**, zero regressions from Phases 1-7. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
+
 ## Security Review
 Everything from Phases 1-4 stands unchanged. Phase 5 additions:
 - Every sales-mutating endpoint requires its own specific permission (11 new codes) rather than one blanket `sales.manage` - verified by test at two privilege levels: a Cashier (the intended POS-floor role) allowed to open a shift, sell, and return, but rejected from an out-of-template action; a role with zero sales permissions rejected from every sales route entirely.
@@ -279,6 +357,13 @@ Phase 6 additions:
 - Every accounting-mutating endpoint requires its own specific permission (8 new codes) - verified by test: a Cashier forbidden from every accounting route; an Accountant allowed to view/reverse but explicitly rejected (403) from `accounting.reopen_period`, which only the Owner has by default.
 - `journal_entries`/`journal_entry_lines` have no UPDATE **or** DELETE grant at all for `erp_app` - stricter than every prior phase's "append-only" tables (which at most needed a narrow, explained UPDATE for row-locking support) - verified by a direct-connection UPDATE/DELETE rejection test against both tables.
 - The same RLS + non-superuser-role pattern proven again via raw SQL for all 5 new tables: unfiltered `SELECT`s return zero rows with no tenant context; a cross-tenant raw `INSERT` is rejected by `WITH CHECK`.
+
+Phase 8A additions:
+- Every warranty route carries its own explicit `@RequirePermissions` (3 new codes) — there is no route reachable on authentication alone, verified by test at three privilege levels: `ACCOUNTANT` (view-only, 403 on register/claim/void), `SALES_EMPLOYEE` (403 specifically on `warranty.claim`), and `CASHIER` (a genuine successful write, so the grant is proven working rather than merely present).
+- `warranties`/`warranty_claims` have **no DELETE grant** for `erp_app`. The `UPDATE` grant is for genuine status transitions only and is documented as such in the grants migration; neither table is row-locked, so no `FOR UPDATE` support grant was needed (the Phase 5 `sales` lesson, applied up front for the second phase running).
+- RLS **and FORCE RLS** are active on both new tables and proven at the database layer, not merely in application code: a raw query on the restricted `erp_app` connection with another tenant's `app.current_tenant_id` returns zero rows for a warranty that demonstrably exists.
+- Every claim route resolves its parent warranty **inside the caller's tenant first**, so a claim belonging to another business cannot be reached by guessing a warranty id — tested against all four claim/void/list/resolve paths.
+- The Cashier's `warranty.claim` grant does **not** breach Phase 0 §9's no-cost/profit-visibility rule for that template: neither warranty table has a cost, price or profit column, and the module exposes none.
 
 ## Business Logic Review
 - Every sales use case validates its references (warehouse/customer/variant belong to the caller's tenant, customer is active, shift matches the warehouse) before writing anything, returning 404/422/409 rather than silently creating cross-tenant, invalid, or shift-less data.
@@ -325,6 +410,14 @@ Mechanism, summarized: identical locking primitives to Phase 3/4 - `InventoryEng
 - Corrections always use a proper workflow: an over-quantity or wrong-price sale is corrected via `SaleReturn` (a new document, new movements), never by editing the original `Sale`/`SaleItem`/`StockMovement` rows.
 - Soft-deactivating a Customer (`isActive = false`) does not touch or hide their historical Sales - `erp_app` has no DELETE grant on `customers`, and no read path filters sales by the customer's current `isActive` status.
 - **Void semantics, stated exactly (verified against the actual schema, not assumed)**: `sales.status` is `SaleStatus`, a deliberate single-value enum (`COMPLETED` only - see Migrations item 1 / Architecture Decisions) - there is no `VOID`/`CANCELLED` value and no `voidedAt`/`voidedBy` column anywhere on `Sale`, and no application code path ever transitions a Sale's status. **Void is intentionally unsupported after completion.** `SaleReturn` is the one and only correction mechanism for a completed Sale, and it is a bounded, additive correction (new rows, `SaleItem.quantityReturned` capped at `SaleItem.quantity`), never a full reversal of the original document. This mirrors Purchasing's own posture (a `RECEIVED` Purchase is corrected via `PurchaseReturn`, never edited or voided) and was a deliberate, not accidental, design choice: a POS environment needs every completed sale to remain a permanent, auditable fact once inventory and payment have moved, exactly like Phase 3's `StockMovement` immutability principle.
+
+Phase 8A additions:
+- **Coverage is a snapshot, never a recomputation.** `durationDays` is stored on the `Warranty` row and `endDate` derived from it exactly once, at registration. `isWarrantyCoverageActive`/`effectiveWarrantyStatus` read only the row's own dates and never consult `Setting`, so changing `warranty.default_duration_days` cannot widen or narrow an already-issued warranty — proven by a test that changes the default from 365 to 1 and re-reads both the DB row and the API response.
+- **`startDate` is the Sale's own `createdAt`**, never the registration time and never client-supplied: there is no code path by which a user can choose when their own warranty started.
+- **Claims are never edited.** Resolution writes only `status`/`resolution`/`resolvedAt`/`resolvedBy`; `claimedAt`, `description` and `createdBy` are re-read after resolution and confirmed unchanged. The transition is **one-way** — a resolved or rejected claim can never be re-transitioned, so a decision is never silently overwritten. A correction is a **new claim**, the same never-edit-history posture as `SaleReturn` correcting a `Sale`.
+- **The audit trail is a database guarantee, not an application convention**: `warranty_claims_resolution_audit_consistent` makes a resolved-claim-without-`resolvedAt` unrepresentable, proven by a raw-SQL attempt that the constraint rejects.
+- **Voiding preserves history**: the snapshotted dates, `durationDays` and every existing claim survive a void untouched; only `status` moves. `erp_app` has no DELETE on either table, so a warranty or claim can never be erased.
+- **Concurrency**: both status transitions use a single conditional `updateMany` (`WHERE status = 'OPEN'` / `WHERE status <> 'VOID'`) rather than read-then-write, so two simultaneous resolutions or voids can never both report success — the `CloseShiftUseCase` pattern from Phase 5.
 
 ## Accounting Engine & Integration Review (Phase 6)
 
@@ -385,6 +478,16 @@ New from Phase 7:
 45. **No caching on reports or the dashboard** — every figure is computed live. Deliberate: premature without measured load, and a stale financial KPI is worse than a slow one. Indexing is the performance lever instead; revisit only with real numbers.
 46. **Branch scoping applies to reporting only** — Phase 7 introduced the first server-side `UserBranch` enforcement, but only within `/reports/*`. Pre-existing Phase 1-6 read endpoints remain tenant-scoped-but-not-branch-scoped, unchanged. Extending branch restriction to those is a separate, deliberate decision.
 
+New from Phase 8A:
+
+47. **Phase 5 sales record no `SaleItem → SerialNumber` link — so a warranty cannot be proven to cover the unit that was actually sold.** Found while implementing 8A, deliberately **not** worked around. `CreateSaleUseCase` calls `consumeVariant` **without** serials, so `consumeSerialsForSale` returns early: selling a serial-tracked variant marks no `SerialNumber` as `SOLD` and stores no link anywhere saying which physical unit left on which sale line. `RegisterWarrantyUseCase` therefore validates the strongest thing the current data model supports — the serial exists in the tenant and belongs to the **same variant** as the sale line — but cannot verify it is the unit that was sold. Requiring `status = 'SOLD'` was considered and **rejected**: no sale ever sets it, so that check would reject every legitimate registration in the system while appearing correct (the same failure shape as Known Issue #37's dead `STOCK_COUNT` value). Current behaviour is asserted by a test so the gap is visible and Phase 8B has a regression anchor. **Closing this requires the Sales integration explicitly deferred to Phase 8B** — capturing serials on a sale line — and was not invented here.
+48. **No background expiry job** — nothing flips a stored `ACTIVE` warranty to `EXPIRED` when its period elapses. Expiry is derived on read as `effectiveStatus`, and both the stored and derived values are returned so the distinction is never hidden. Approved 8A scope adds no job runner. A consequence worth stating: a query filtering on the stored `status = 'ACTIVE'` will include elapsed warranties; callers must use `effectiveStatus`, which every read path returns.
+- **Consequence for reporting**: no `/reports/*` endpoint surfaces warranty data at all — Phase 7's layer was not extended, so there is no report where this stored-vs-derived distinction could be misread.
+49. **`durationDays` has no business maximum** — only the technical 36500-day (100-year) timestamp-overflow bound, enforced identically in the zod schema and the `warranties_duration_days_technical_bound` CHECK, and documented as technical in both. Phase 0 defines no maximum warranty length and inventing one was explicitly forbidden. If a business maximum is ever specified, it belongs as a `Setting`, not as a change to this bound.
+50. **Multiple claims per warranty are allowed by design** — a first claim may be REJECTED, or a second unrelated fault may occur within one coverage period. If a one-claim-per-warranty rule is ever wanted, it is a business decision that must be stated, not derived.
+51. **Claim resolution has no replacement, refund, or credit path** — approved 8A scope is record-keeping only. `WarrantyModule` imports neither `InventoryEngineModule` nor `AccountingEngineModule`, so this is structural: no warranty action can move stock or post to the ledger even by mistake. A future replacement workflow would go through `InventoryEngineService` and `AccountingEngineService` like every other module, never around them.
+52. **A warranty is not auto-created at sale time** — registration is an explicit, separate call. Wiring it into the POS sale flow is Phase 8B's Sales integration, deliberately not started.
+
 ## Files Created
 Prisma migrations: `apps/api/prisma/migrations/20260829112729_sales_schema/`, `.../20260829112800_sales_rls/`, `.../20260829112900_sales_app_role_grants/`, `.../20260829130000_sales_lock_update_grant/`.
 
@@ -433,6 +536,20 @@ Tests: `apps/api/test/reporting-{isolation-and-permissions,sales-purchasing,inve
 
 **No Phase 1-6 source file was modified.** Reporting reads existing tables through existing privileges; the only schema change is five indexes, each backing a specific audited query.
 
+### Phase 8A Files Created
+Prisma migrations: `apps/api/prisma/migrations/20260829165055_warranty_schema/`, `.../20260829165100_warranty_rls/`, `.../20260829165200_warranty_app_role_grants/`.
+
+Shared validation: `packages/shared-validation/src/warranty.ts`.
+
+Warranty module (`apps/api/src/modules/warranty/`): `warranty.module.ts`; `domain/{resolve-warranty-duration,warranty-eligibility}.ts`; `application/{register-warranty,list-warranties,get-warranty,void-warranty,register-warranty-claim,list-warranty-claims,resolve-warranty-claim}.use-case.ts`; `presentation/warranty.controller.ts`.
+
+Tests: `apps/api/test/warranty.e2e-spec.ts`.
+
+### Phase 8A Files Modified
+`apps/api/prisma/schema.prisma` (2 new models/2 enums + `Business`/`SaleItem`/`SerialNumber`/`Customer` back-relations), `apps/api/prisma/seed.ts` (3 new permission descriptions), `apps/api/src/app.module.ts` (wire `WarrantyModule`), `apps/api/test/db-reset.ts` (truncate the 2 new tables), `packages/shared-types/src/permissions.ts` (3 new codes + `BRANCH_MANAGER`/`ACCOUNTANT`/`CASHIER`/`SALES_EMPLOYEE` role-template grants), `packages/shared-validation/src/index.ts` (re-export `warranty.ts`), `docs/state/PROJECT_STATE.md`.
+
+**No Phase 1-7 business logic was modified.** The only changes outside the new module are the four wiring/registration touches above — no Sales, Inventory, Accounting or Reporting use-case was edited, and `WarrantyModule`'s dependency graph structurally excludes both engines.
+
 ## Next Phase
-**Phase 8 — Advanced (Promotions / Loyalty / Warranty)**: per Phase 0 §15's ordering. Phase 2's `PriceList`/`ProductPrice` and Phase 5's caller-supplied `unitPrice` are the natural integration points for a Promotions engine (Known Issue #29), and `CustomerPoints` appears in Phase 0 §4.5's ERD but has never been modelled.
-**Will not start until you explicitly approve this Phase 7 report.**
+**Phase 8B and beyond — Loyalty, Promotions, and the approved Sales integration** (including the BD-1 effective-unit-price correction to Phase 5 sale returns, the BD-2 proportional line allocation, and the serial-capture-on-sale work that closes Known Issue #47). None of it has been started: no Loyalty model, no Promotion model, no `CustomerPoints`, and no modification to `CreateSaleUseCase` or `CreateSaleReturnUseCase` exists in the tree.
+**8B will not start until you explicitly approve this Phase 8A report.**

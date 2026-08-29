@@ -102,6 +102,9 @@ model Business {
   journalEntries         JournalEntry[]
   journalEntryLines      JournalEntryLine[]
 
+  warranties     Warranty[]
+  warrantyClaims WarrantyClaim[]
+
   @@map("businesses")
 }
 
@@ -907,6 +910,7 @@ model SerialNumber {
   business         Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "serial_numbers_business_fk")
   variant          ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
   currentWarehouse Warehouse?     @relation(fields: [currentWarehouseId], references: [id], onDelete: SetNull)
+  warranties       Warranty[]
 
   @@unique([businessId, serial])
   @@index([businessId])
@@ -1451,6 +1455,7 @@ model Customer {
   business     Business              @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "customers_business_fk")
   sales        Sale[]
   transactions CustomerTransaction[]
+  warranties   Warranty[]
 
   // Deliberately NO unique constraint on name/phone: unlike Supplier,
   // customer names/phones legitimately repeat in retail and there is no
@@ -1588,6 +1593,7 @@ model SaleItem {
   sale        Sale             @relation(fields: [saleId], references: [id], onDelete: Cascade)
   variant     ProductVariant   @relation(fields: [variantId], references: [id], onDelete: Restrict)
   returnItems SaleReturnItem[]
+  warranties  Warranty[]
 
   @@unique([saleId, variantId])
   @@index([businessId])
@@ -1916,4 +1922,111 @@ model JournalEntryLine {
   @@index([journalEntryId])
   @@index([accountId])
   @@map("journal_entry_lines")
+}
+
+// ============================================================================
+// Phase 8A: Warranty (record-keeping only)
+// ============================================================================
+// Deliberately inert with respect to every other engine: registering a
+// warranty or a claim creates NO StockMovement, NO JournalEntry, NO
+// SalePayment and NO SaleReturn. Warranty is a record of an obligation,
+// not a financial or inventory event - any replacement/refund workflow is
+// explicitly deferred to a later phase (approved Phase 8 scope decision
+// 14). This is why the module injects neither InventoryEngineService nor
+// AccountingEngineService: it structurally cannot mutate either.
+//
+// Scope is SERIAL-TRACKED ITEMS ONLY (approved decision 13, and what
+// Phase 0 §4.7's `Warranty ──> SerialNumber / SaleItem / Customer`
+// anchors on): a warranty always identifies exactly one physical unit.
+// A SaleItem for a non-serialized product cannot be warranted.
+
+enum WarrantyStatus {
+  ACTIVE
+  EXPIRED
+  CLAIMED
+  VOID
+}
+
+enum WarrantyClaimStatus {
+  OPEN
+  RESOLVED
+  REJECTED
+}
+
+/// One warranty = one physical serial unit sold on one SaleItem.
+///
+/// `durationDays` is SNAPSHOTTED at registration (from the optional
+/// per-registration override, else the business default in
+/// `Setting['warranty.default_duration_days']`), and `endDate` is derived
+/// from it once. Changing the business default afterwards therefore
+/// affects only FUTURE registrations - an issued warranty is never
+/// recomputed from current configuration, the same historical-integrity
+/// rule Sale/SaleItem and StockMovement already follow.
+model Warranty {
+  id             String         @id @default(uuid())
+  businessId     String         @map("business_id")
+  saleItemId     String         @map("sale_item_id")
+  serialNumberId String         @map("serial_number_id")
+  /// Denormalised from the Sale at registration so a warranty lookup
+  /// never has to join back through Sale - and so it stays correct even
+  /// if the Sale's customer association were ever to change (it cannot
+  /// today: a Sale is immutable).
+  customerId     String?        @map("customer_id")
+  /// Always the SALE's own createdAt - never the registration time, and
+  /// never client-supplied. A warranty period starts when the customer
+  /// took the goods, not when someone got round to registering it.
+  startDate      DateTime       @map("start_date")
+  endDate        DateTime       @map("end_date")
+  durationDays   Int            @map("duration_days")
+  status         WarrantyStatus @default(ACTIVE)
+  notes          String?
+  createdBy      String?        @map("created_by")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  business     Business        @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "warranties_business_fk")
+  saleItem     SaleItem        @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
+  serialNumber SerialNumber    @relation(fields: [serialNumberId], references: [id], onDelete: Restrict)
+  customer     Customer?       @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  claims       WarrantyClaim[]
+
+  /// One warranty per (sale line, serial unit) - the DB-level guarantee
+  /// that a retried registration request cannot issue a duplicate
+  /// warranty for the same physical unit, rather than relying on an
+  /// application pre-check alone.
+  @@unique([businessId, saleItemId, serialNumberId])
+  @@index([businessId])
+  @@index([saleItemId])
+  @@index([serialNumberId])
+  @@index([customerId])
+  @@index([status])
+  @@map("warranties")
+}
+
+/// Append-only at INSERT: a claim row is never deleted, and the only
+/// mutation permitted is the OPEN -> RESOLVED|REJECTED transition, which
+/// records `resolvedAt`/`resolvedBy`/`resolution` alongside the status so
+/// the transition stays auditable rather than silently overwriting
+/// history (approved decision 15). `claimedAt` and `description` are
+/// never rewritten.
+model WarrantyClaim {
+  id          String              @id @default(uuid())
+  businessId  String              @map("business_id")
+  warrantyId  String              @map("warranty_id")
+  claimedAt   DateTime            @default(now()) @map("claimed_at")
+  description String
+  status      WarrantyClaimStatus @default(OPEN)
+  resolution  String?
+  resolvedAt  DateTime?           @map("resolved_at")
+  resolvedBy  String?             @map("resolved_by")
+  createdBy   String?             @map("created_by")
+  createdAt   DateTime            @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "warranty_claims_business_fk")
+  warranty Warranty @relation(fields: [warrantyId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+  @@index([warrantyId])
+  @@index([status])
+  @@map("warranty_claims")
 }
