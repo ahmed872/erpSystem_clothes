@@ -1,7 +1,63 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 8F — Full Verification (**Complete, awaiting explicit approval to start Phase 8G**)
+Phase 8G — Release Gate (**Complete. PHASE 8 IS CLOSED.**)
+
+Phase 8G is the final gate for Phase 8. It added no feature, changed no source file, created no migration, altered no schema and added no permission or test. It performed a final verification run and consolidated the record.
+
+**Final verification (G1), all green:** 453/453 e2e across 40 files · 28/28 unit · build, `tsc --noEmit` and lint clean · both `erp_dev` and `erp_test` report "Database schema is up to date" · `prisma migrate diff --exit-code` reports **no drift** · **39 migrations**, **106 permissions**.
+
+---
+
+## PHASE 8 — CONSOLIDATED VIEW (as delivered)
+
+Phase 8 delivered four capabilities and one integration, across seven gated sub-phases. Each was reviewed before implementation, implemented against explicitly approved business decisions, and accepted at its own release gate.
+
+| Sub-phase | Delivered | Gate |
+|---|---|---|
+| **8A** | **Warranty** — registration against a sold serial unit, business-default duration with per-registration override, snapshotted coverage, ACTIVE/EXPIRED/CLAIMED/VOID lifecycle, OPEN→RESOLVED\|REJECTED claims. Record-keeping only. | Accepted |
+| **8B** | **Loyalty Ledger** — append-only `CustomerPoints`, balance always `SUM(points)`, BD-3 earning rule, manual adjustment. No stored balance, no GL liability, no expiry. | Accepted |
+| **8C** | **Loyalty Redemption** — redemption at 4 dp HALF-UP into line discounts, earning after redemption, cumulative clawback and restoration on return, **and the BD-1 return-credit correction** it depends on. | Accepted |
+| **8D** | **Promotions** — percentage, fixed-amount and Buy-X-Get-Y; product, variant and category targets; best-applicable only; business-timezone validity; immutable provenance. | Accepted |
+| **8E** | **Sales Integration** — BD-12 discount cap, mandatory serial capture, `SaleItemSerial`/`SaleReturnItemSerial`, serial quarantine on return, warranty auto-void, **closing Known Issue #47**. | Accepted |
+| **8F** | **Full Verification** — structural, architectural, query and behavioural audit of the whole surface. Zero product defects; four documentation errors corrected. | Accepted |
+| **8G** | **Release Gate** — this final verification and consolidation. | — |
+
+### The Phase 8 business rules, as approved and implemented
+
+Every rule below was decided by explicit approval before any code was written. **None was inferred, and none was chosen for implementation convenience.**
+
+- **BD-1** Return credit uses the historical effective unit price, apportioned by **cumulative** returned quantity — never a per-return proportion, which drifts. One definition serves the refund, the loyalty clawback and the redemption restoration.
+- **BD-2** Loyalty redemption is allocated proportionally across eligible lines by largest-remainder with a per-line cap, preserving `Sale.discountAmount = SUM(SaleItem.discountAmount)`.
+- **BD-3** Earning basis is net merchandise after **all** discounts and before tax; `floor`, never half-up.
+- **BD-4** Warranty duration is a business default plus an optional override, snapshotted; no business maximum was invented.
+- **BD-5** Warranty claims have exactly three states, one-way.
+- **BD-6** Monetary rounding is **4 dp HALF-UP** — the codebase's first rounding policy, introduced at the scale the columns already store.
+- **BD-7** Redemption is bounded by remaining merchandise value; no other cap, and it may reduce merchandise revenue to zero.
+- **BD-8** Redeemed points are restored on return, cumulatively and exactly.
+- **BD-9** 8C wires both redemption and earning into sale creation.
+- **BD-10** Buy-X-Get-Y is evaluated **per line only** — never aggregated across lines.
+- **BD-11** Manual discount and promotion are **additive, capped at line gross**.
+- **BD-12** A manual discount is capped at line gross **universally**, so net merchandise value can never be negative.
+- **BD-13** Serial identity is **mandatory** at sale creation for a serial-tracked variant.
+- **BD-14** A returned serial transitions `SOLD → RETURNED` — quarantine, not straight back to sellable.
+- **BD-15** A warranty covering a returned unit **auto-voids** atomically with the return.
+- Zero-value redemption is **rejected**, never silently converted into a no-op.
+
+### Architecture and security invariants, verified in 8F
+
+Each was established by direct PostgreSQL introspection or exhaustive code search, not inferred from passing tests:
+
+- **All 53 tenant-owned tables** carry RLS **and** FORCE RLS, exactly one policy each, every one with both `USING` and `WITH CHECK`; all 9 join tables without `business_id` carry transitive policies. Only the global `permissions` catalogue (`SELECT`-only) and `_prisma_migrations` (no grant) sit outside. **No unrestricted path exists.**
+- **`InventoryEngine` is the sole inventory mutation authority** — zero writes to `stock_movements`/`stock_balances` anywhere else.
+- **`AccountingEngine` is the sole journal-entry authority** — zero writes to `journal_entries`/`journal_entry_lines` anywhere else.
+- **`CustomerPoints` is append-only** — all five call sites are inserts; `erp_app` holds no UPDATE or DELETE. The same holds for `sale_promotion_applications`, `sale_item_serials` and `sale_return_item_serials`.
+- **Historical sales never recompute**: every live-configuration read occurs only at creation time; the return path reads none. `tx.sale.update` exists nowhere; `tx.saleItem.update` exists once, for `quantityReturned`.
+- **Reports remain read-only** — zero write calls in the reporting module.
+- **Canonical lock order** is `Customer → Sale → StockBalance → SerialNumber`, with no opposite ordering anywhere.
+
+### Phase 8F (previously completed)
+Phase 8F — Full Verification (**Complete, release-gate approved**)
 
 Phase 8F was a verification and hardening audit only — **no feature was added and no architecture changed**. It verified the whole Phase 8 surface (8A Warranty, 8B Loyalty Ledger, 8C Redemption, 8D Promotions, 8E Sales Integration) as one integrated system, using four independent methods: direct PostgreSQL structural queries, code inspection, `EXPLAIN` plans, and new end-to-end tests.
 
@@ -811,6 +867,34 @@ Phase 8E additions:
 **Period controls**: `postEntry` resolves and row-locks the covering `FiscalPeriod` before inserting; a CLOSED period rejects the posting (and the whole source-event transaction rolls back with it, proven by a delta-count test showing zero Sale/JournalEntry trace left behind). `ClosePeriodUseCase`/`ReopenPeriodUseCase` lock the same row, proven race-safe by a real concurrent Sale-vs-close test.
 
 ## Known Issues / Technical Debt
+
+### Scope of the Phase 8 final register (approved decision BD-16, Option A)
+
+The register below is the **Phase 8 final register and covers entries #26–#82 only** — 57 contiguous entries, verified during Phase 8G to contain no gaps and no duplicates.
+
+**Entries #1–#25 belong to earlier phases (Phases 1–4).** They are preserved in git history and in prior revisions of this file. **They were NOT re-verified as part of the Phase 8 release gate**, and they are therefore intentionally outside the Phase 8 final register. Their current status is deliberately **not** asserted here — not open, not closed, not accepted and not deferred — because no such status is independently established by an approved record, and inferring one would be a guess. Anyone needing them should read them from git history and verify each against the current code.
+
+The one exception is the three carried-forward entries **#23/#24/#25**, whose interaction with Phase 5 is described under Completed Features by an approved record; that description stands as written and is not extended here.
+
+### Status classification for the Phase 8 register (#26–#82)
+
+Every entry carries exactly one status. These are descriptive classifications of records already approved at their own gates — no status below is newly decided.
+
+| Status | Meaning | Entries |
+|---|---|---|
+| **CLOSED** | Resolved by implementation; the entry is retained for history | **#47** (closed in 8E) |
+| **FIXED — RELEASE-GATE ACCEPTED** | A real defect found and fixed within Phase 8, accepted at a gate | **#59, #60, #61** |
+| **DOCUMENTATION — CORRECTED** | A documentation error found and corrected in 8F, accepted at the 8F gate | **#77, #78, #79, #80** |
+| **ACCEPTED LIMITATION** | Intentional consequence of an approved decision; no action planned | **#26, #27, #28, #30, #38, #39, #40, #45, #46, #48, #49, #50, #51, #52, #53, #55, #57, #58, #62, #63, #64, #65, #66, #67, #68, #69, #70, #71, #72, #73, #74, #75, #81, #82** |
+| **DEFERRED FEATURE** | Approved as out of Phase 8 scope; belongs to Phase 9+ | **#29, #31, #32, #33, #41, #42, #43, #44, #54, #56, #76** |
+| **PRE-EXISTING, CARRIED FORWARD** | Inherited from an earlier phase, explicitly not addressed by Phase 8 | **#34, #35, #36, #37** |
+
+**No entry in the Phase 8 register is an open, unclassified defect.** Every one is either closed, fixed-and-accepted, an accepted limitation, a deferred feature, or an explicitly carried-forward pre-existing item.
+
+The most operationally significant accepted limitations, restated so they are not overlooked at release: **#55** outstanding loyalty points are not a GL liability and appear nowhere on the Balance Sheet; **#56** points never expire, so the float only grows until redeemed; **#72** a returned serial is quarantined as `RETURNED` and cannot be resold until a future inspection workflow exists; **#73** BD-13 is a breaking change for any client selling a serial-tracked product without naming its serials; **#76** reporting cannot break a discount into manual, promotional and loyalty components.
+
+### The register
+
 Phase 1-4's lists stand unchanged (including the carried-forward #23/#24/#25 - see the note under Completed Features for exactly which of those Phase 5 did and didn't address). New from Phase 5:
 
 26. **No Bundle-type `SaleReturn`** - a bundle sale can be completed, but returning it is rejected explicitly (`VALIDATION_FAILED`) rather than attempting a partial component-level return. The correct semantics (which components come back, in what condition, individually) were judged too complex to build without an explicit spec requirement; flagged rather than guessed at.
@@ -1040,6 +1124,14 @@ Tests: `apps/api/test/phase8-verification.e2e-spec.ts`.
 ### Phase 8F Files Modified
 `docs/state/PROJECT_STATE.md` only — four stale entries corrected (see Known Issues). **No source file, schema, migration, permission or configuration was changed**: 8F was verification and documentation correction, nothing else.
 
+### Phase 8G Files Created
+None.
+
+### Phase 8G Files Modified
+`docs/state/PROJECT_STATE.md` only. **No source file, schema, migration, seed, permission, validation schema or test was changed** — 8G was documentation and final verification, nothing else, and the only repository modification was verified to be this file before any edit was made.
+
 ## Next Phase
-**Phase 8G — Release Gate**: complete verification, documentation, PROJECT_STATE update, known issues, final release-gate report. Not started.
-**8G will not start until you explicitly approve this Phase 8F report.**
+**PHASE 8 IS CLOSED.** 8A Warranty, 8B Loyalty Ledger, 8C Loyalty Redemption, 8D Promotions, 8E Sales Integration, 8F Full Verification and 8G Release Gate are all complete and gate-accepted.
+
+Phase 9 and any post-Phase-8 feature work have **not** been started, scoped or designed. The deferred register above (#29, #31, #32, #33, #41, #42, #43, #44, #54, #56, #76) is the natural input to that scoping, but nothing in it is approved or planned.
+**No further phase will start without explicit instruction.**
