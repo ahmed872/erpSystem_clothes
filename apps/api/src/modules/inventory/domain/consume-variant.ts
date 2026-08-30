@@ -25,6 +25,10 @@ export interface ConsumeVariantParams {
 
 export interface ConsumeVariantResult {
   movementId: string;
+  /** Phase 8E: the SerialNumber ids actually consumed, so the caller can
+   * record which physical unit left on which sale line. Empty for
+   * non-serial-tracked variants. */
+  consumedSerialIds?: string[];
   quantityOnHand: string;
   averageCost: string;
   cogsPerUnit: string;
@@ -76,10 +80,6 @@ export async function consumeVariant(
 
   const baseQty = toBaseQuantity(product.baseUomId, product.productUoms, params.uomId, params.quantity);
 
-  if (product.tracksSerialNumbers && params.movementType === 'SALE') {
-    await consumeSerialsForSale(tx, params.businessId, params.variantId, params.warehouseId, params.serials, params.quantity);
-  }
-
   const result = await engine.applyMovement(tx, {
     businessId: params.businessId,
     branchId: warehouse.branchId,
@@ -96,6 +96,24 @@ export async function consumeVariant(
     createdBy: params.createdBy,
     allowNegative: params.allowNegative,
   });
+
+  // Serial consumption runs AFTER applyMovement so the lock sequence is
+  // StockBalance -> SerialNumber, matching the canonical system-wide
+  // order Customer -> Sale -> StockBalance -> SerialNumber (Phase 8E).
+  // Both happen inside the caller's single transaction, so the two either
+  // commit together or roll back together exactly as before - only the
+  // ORDER in which the locks are taken changed.
+  let consumedSerialIds: string[] = [];
+  if (product.tracksSerialNumbers && params.movementType === 'SALE') {
+    consumedSerialIds = await consumeSerialsForSale(
+      tx,
+      params.businessId,
+      params.variantId,
+      params.warehouseId,
+      params.serials,
+      params.quantity,
+    );
+  }
 
   await audit.record(tx, {
     businessId: params.businessId,
@@ -115,6 +133,7 @@ export async function consumeVariant(
     quantityOnHand: result.quantityOnHand.toString(),
     averageCost: result.averageCost.toString(),
     cogsPerUnit: result.movement.unitCostAtMovement.toString(),
+    consumedSerialIds,
   };
 }
 

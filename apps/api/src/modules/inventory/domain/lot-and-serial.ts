@@ -60,7 +60,30 @@ export async function createSerialsForReceipt(
   });
 }
 
-/** Validates and consumes (marks SOLD) the given serials for a sale. */
+interface LockedSerialRow {
+  id: string;
+  serial: string;
+  status: string;
+  current_warehouse_id: string | null;
+}
+
+/**
+ * Validates and consumes (marks SOLD) the given serials for a sale,
+ * returning the ids of the units actually consumed so the caller can
+ * record WHICH physical unit left on WHICH sale line (Phase 8E).
+ *
+ * CONCURRENCY (Phase 8E): the candidate rows are taken with
+ * `SELECT ... FOR UPDATE`, in a deterministic order, BEFORE their status
+ * is read. Without the lock this was a read-then-write race - two
+ * simultaneous sales could each see the same unit as IN_STOCK and both
+ * mark it SOLD, selling one physical item twice. Ordering the lock by
+ * `id` means two sales requesting an overlapping set can never grab them
+ * in opposite orders and deadlock.
+ *
+ * `serial_numbers` already carries the UPDATE privilege from Phase 3, and
+ * PostgreSQL requires exactly that for `FOR UPDATE`, so this needs no new
+ * grant.
+ */
 export async function consumeSerialsForSale(
   tx: TenantTx,
   businessId: string,
@@ -68,24 +91,35 @@ export async function consumeSerialsForSale(
   warehouseId: string,
   serials: string[] | undefined,
   quantity: number,
-): Promise<void> {
-  if (!serials || serials.length === 0) return;
+): Promise<string[]> {
+  if (!serials || serials.length === 0) return [];
 
   if (!Number.isInteger(quantity) || serials.length !== quantity) {
     throw new ValidationFailedError('The number of serials provided must equal the quantity for a serial-tracked variant');
   }
+  if (new Set(serials).size !== serials.length) {
+    throw new ValidationFailedError('Duplicate serial number in request');
+  }
 
-  const rows = await tx.serialNumber.findMany({ where: { businessId, variantId, serial: { in: serials } } });
+  const rows = await tx.$queryRawUnsafe<LockedSerialRow[]>(
+    `SELECT id, serial, status::text AS status, current_warehouse_id
+       FROM serial_numbers
+      WHERE business_id = $1 AND variant_id = $2 AND serial = ANY($3::text[])
+      ORDER BY id
+        FOR UPDATE`,
+    businessId,
+    variantId,
+    serials,
+  );
   if (rows.length !== serials.length) {
     throw new ValidationFailedError('One or more serials do not exist for this variant');
   }
-  const notAvailable = rows.find((r) => r.status !== 'IN_STOCK' || r.currentWarehouseId !== warehouseId);
+  const notAvailable = rows.find((r) => r.status !== 'IN_STOCK' || r.current_warehouse_id !== warehouseId);
   if (notAvailable) {
     throw new ConflictDomainError(`Serial ${notAvailable.serial} is not IN_STOCK at this warehouse`);
   }
 
-  await tx.serialNumber.updateMany({
-    where: { id: { in: rows.map((r) => r.id) } },
-    data: { status: 'SOLD', currentWarehouseId: null },
-  });
+  const ids = rows.map((r) => r.id);
+  await tx.serialNumber.updateMany({ where: { id: { in: ids } }, data: { status: 'SOLD', currentWarehouseId: null } });
+  return ids;
 }

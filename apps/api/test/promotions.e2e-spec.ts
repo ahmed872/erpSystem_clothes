@@ -336,9 +336,11 @@ describe('Promotions (e2e, real Postgres)', () => {
       expect(await applicationsFor(sale.id)).toEqual([]);
     });
 
-    it('a line with NO promotion keeps its manual discount uncapped - Phase 5 behaviour untouched', async () => {
+    it('a line with NO promotion is unaffected by the promotion path - a discount at the gross stands', async () => {
       const { variantId } = await stocked(`PR-BD11D-${seq++}`);
-      // No promotion for this variant at all.
+      // No promotion for this variant at all. A manual discount exactly
+      // equal to the line gross is untouched (Phase 8E's BD-12 cap is the
+      // identity here) and the customer still owes the tax.
       const res = await sell({ items: [{ variantId, quantity: 1, unitPrice: 100, discountAmount: 100, taxAmount: 20 }], payments: [{ amount: 20 }] }).expect(201);
       const sale = await saleRow(res.body.data.id);
       expect(sale.discountAmount.toString()).toBe('100');

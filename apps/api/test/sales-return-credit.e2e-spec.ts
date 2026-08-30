@@ -61,7 +61,10 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
       .send({ warehouseId: biz.warehouseId, variantId, quantity: quantity + 50, unitCost: 1 })
       .expect(201);
 
-    const total = unitPrice * quantity - discountAmount + taxAmount;
+    // BD-12: the manual discount is capped at the line gross, so the
+    // amount actually owed follows the capped figure.
+    const gross = unitPrice * quantity;
+    const total = gross - Math.min(discountAmount, gross) + taxAmount;
     const res = await request(app.getHttpServer())
       .post('/api/v1/sales')
       .set('Authorization', auth())
@@ -204,6 +207,126 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
     await returnUnits(saleId, saleItemId, 1).expect(201);
     await returnUnits(saleId, saleItemId, 0.5).expect(201);
     expect((await totalCreditForSale(saleId)).toString()).toBe('8.3333');
+  });
+
+  // ------------------------------------------------------------------
+  // Phase 8E / BD-12: a manual discount may never exceed the line gross.
+  // Before the cap, `merchandiseValue = gross - discount` went NEGATIVE
+  // whenever tax gave the discount headroom, and the customer returning
+  // the goods was silently credited nothing while the stock came back.
+  // ------------------------------------------------------------------
+  describe('BD-12 - the manual discount is capped at the line gross', () => {
+    it('caps an over-discounted line and never produces negative merchandise value', async () => {
+      // gross 100, requested discount 110, tax 20. The old CHECK
+      // (line_total >= 0) accepted this; the discount is now capped at 100.
+      const { saleId, saleItemId } = await sellOneLine('BD12-CAP', 1, 100, 110, 20);
+      const sale = await admin.sale.findUniqueOrThrow({ where: { id: saleId }, include: { items: true } });
+
+      expect(sale.discountAmount.toString()).toBe('100');
+      expect(sale.items[0].discountAmount.toString()).toBe('100');
+      // Merchandise value is zero, never negative.
+      expect(sale.subtotal.minus(sale.discountAmount).toString()).toBe('0');
+      // The customer still owes the tax; line_total is unchanged at 20.
+      expect(sale.totalAmount.toString()).toBe('20');
+      expect(sale.items[0].lineTotal.toString()).toBe('20');
+      expect(sale.discountAmount.toString()).toBe(
+        sale.items.reduce((s, i) => s.plus(i.discountAmount), D(0)).toString(),
+      );
+
+      // ...and the CustomerTransaction records the real amount owed.
+      const txn = await admin.customerTransaction.findFirstOrThrow({
+        where: { referenceType: 'Sale', referenceId: saleId, type: 'SALE' },
+      });
+      expect(txn.amount.toString()).toBe('20');
+
+      // Returning it credits exactly zero - never a negative credit that
+      // would charge the customer for handing goods back.
+      const ret = await returnUnits(saleId, saleItemId, 1).expect(201);
+      const credit = await creditFor(ret.body.data.id);
+      expect(credit.toString()).toBe('0');
+      expect(credit.greaterThanOrEqualTo(0)).toBe(true);
+    });
+
+    it('the GL entry for a fully-discounted line stays balanced with no negative reversal', async () => {
+      const { saleId, saleItemId } = await sellOneLine('BD12-GL', 2, 50, 500, 10);
+      const entry = await admin.journalEntry.findFirstOrThrow({
+        where: { sourceType: 'Sale', sourceId: saleId },
+        include: { lines: true },
+      });
+      const debit = entry.lines.reduce((s, l) => s.plus(l.debit), D(0));
+      const credit = entry.lines.reduce((s, l) => s.plus(l.credit), D(0));
+      expect(debit.toString()).toBe(credit.toString());
+      expect(entry.lines.every((l) => l.debit.greaterThanOrEqualTo(0) && l.credit.greaterThanOrEqualTo(0))).toBe(true);
+
+      const ret = await returnUnits(saleId, saleItemId, 2).expect(201);
+      const retEntry = await admin.journalEntry.findFirstOrThrow({
+        where: { sourceType: 'SaleReturn', sourceId: ret.body.data.id },
+        include: { lines: true },
+      });
+      const rd = retEntry.lines.reduce((s, l) => s.plus(l.debit), D(0));
+      const rc = retEntry.lines.reduce((s, l) => s.plus(l.credit), D(0));
+      expect(rd.toString()).toBe(rc.toString());
+      // No revenue reversal line at all - there was no merchandise revenue.
+      expect(retEntry.lines.every((l) => l.debit.greaterThanOrEqualTo(0))).toBe(true);
+    });
+
+    it('loyalty clawback and restoration stay correct and non-negative on a capped line', async () => {
+      await request(app.getHttpServer()).put('/api/v1/settings').set('Authorization', auth()).send({ key: 'loyalty.points_per_currency_unit', value: 2 }).expect(200);
+
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'BD12-LOY', { defaultCost: 1 });
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/opening-stock')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 1 })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          customerId,
+          items: [{ variantId, quantity: 1, unitPrice: 100, discountAmount: 150, taxAmount: 30 }],
+          payments: [{ amount: 30 }],
+        })
+        .expect(201);
+
+      // Basis is zero, so nothing is earned - and nothing can be clawed back.
+      const earn = await admin.customerPoints.findFirst({ where: { referenceId: res.body.data.id, type: 'EARN' } });
+      expect(earn).toBeNull();
+
+      const before = await admin.customerPoints.count({ where: { customerId } });
+      await returnUnits(res.body.data.id, res.body.data.items[0].id, 1).expect(201);
+      // No clawback and no restoration rows - there was nothing to reverse.
+      expect(await admin.customerPoints.count({ where: { customerId } })).toBe(before);
+
+      const rows: Array<{ customer_id: string }> = await admin.$queryRawUnsafe(
+        `SELECT customer_id FROM customer_points GROUP BY customer_id HAVING SUM(points) < 0`,
+      );
+      expect(rows).toEqual([]);
+
+      await request(app.getHttpServer()).put('/api/v1/settings').set('Authorization', auth()).send({ key: 'loyalty.points_per_currency_unit', value: null }).expect(200);
+    });
+
+    it('every existing valid discount is completely unchanged by the cap', async () => {
+      // The cap is the identity for any well-formed line.
+      const { saleId, saleItemId } = await sellOneLine('BD12-IDENTITY', 4, 25, 40);
+      const sale = await admin.sale.findUniqueOrThrow({ where: { id: saleId }, include: { items: true } });
+      expect(sale.subtotal.toString()).toBe('100');
+      expect(sale.discountAmount.toString()).toBe('40');
+      expect(sale.items[0].discountAmount.toString()).toBe('40');
+      expect(sale.totalAmount.toString()).toBe('60');
+
+      const ret = await returnUnits(saleId, saleItemId, 4).expect(201);
+      expect((await creditFor(ret.body.data.id)).toString()).toBe('60');
+    });
+
+    it('no sale line in the database has a discount exceeding its own gross', async () => {
+      const rows: Array<{ id: string }> = await admin.$queryRawUnsafe(`
+        SELECT id FROM sale_items WHERE discount_amount > round(unit_price * quantity, 4)
+      `);
+      expect(rows).toEqual([]);
+    });
   });
 
   it('the GL revenue reversal uses the corrected credit, not the old gross figure', async () => {

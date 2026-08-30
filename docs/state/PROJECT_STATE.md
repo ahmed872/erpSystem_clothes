@@ -1,7 +1,16 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 8D — Promotions (**Complete, awaiting explicit approval to start Phase 8E**)
+Phase 8E — Sales Integration (**Complete, awaiting explicit approval to start Phase 8F**)
+
+Phase 8E closed the Phase 8 loop: the promotion, loyalty and sales paths were verified as an integrated whole, the BD-12 discount invariant was corrected, and **Known Issue #47 is CLOSED** — a sale now captures which physical serial it sold, and warranty registration verifies against that fact rather than a proxy.
+
+Four decisions were locked as approved business policy before implementation: **BD-12** a manual discount is capped at line gross universally; **BD-13** serial identity is mandatory at sale creation for a serial-tracked variant; **BD-14** a returned serial transitions `SOLD → RETURNED` (quarantine, not straight back to sellable); **BD-15** a warranty on a returned unit auto-voids atomically with the return.
+
+**Canonical lock order is now `Customer → Sale → StockBalance → SerialNumber`.** Serial consumption previously ran *before* the stock movement — the opposite order — and was corrected.
+
+### Phase 8D (previously completed)
+Phase 8D — Promotions (**Complete, release-gate approved**)
 
 Phase 8D delivered the Promotion model, engine, eligibility, calculation, best-applicable selection, validity dates, permissions and the minimum `CreateSaleUseCase` integration that makes promotions real. **Three approved types** (Percentage, Fixed Amount, Buy-X-Get-Y), **three targets** (Product, Variant, Category), **best applicable only — never stacked**, validity in the business timezone, and historical sales that never change when a promotion is later edited or deactivated.
 
@@ -229,8 +238,30 @@ BUY_X_GET_Y  freeUnits = floor(quantity / (X + Y)) × Y
 
 **Validity** is stored as half-open `[validFrom, validTo)` instants. Callers supply `YYYY-MM-DD` calendar dates, resolved in `Business.timezone` through the **same helper Phase 7 reporting uses** (extracted to `common/domain/business-timezone.ts` so there is one implementation, not two). An inclusive `validTo` of 31 March becomes the exclusive instant at the start of 1 April local time, so the final day is covered exactly once.
 
+### Phase 8E — Sales Integration, BD-12, and the closure of Known Issue #47
+
+**BD-12 — the manual discount is capped at line gross, universally.** `discountAmount` had no upper bound and the only database guard was `line_total >= 0`, so with tax on the line a discount could legitimately exceed the gross. After Phase 8C's BD-1 correction that turned harmful: `merchandiseValue = gross − discount` went negative, the cumulative return credit went negative, and the customer returning the goods was **silently credited nothing** while the stock came back, with clawback and restoration both clamping to zero. `capManualDiscount` now makes `finalDiscount ≤ lineGross` true on every line — the identity for any well-formed sale, and generalising the rule already approved for promoted lines in BD-11.
+
+**BD-13 — serial capture is mandatory, and #47 is closed.** `CreateSaleUseCase` never passed `serials` to `consumeVariant`, so selling a serial-tracked variant marked no unit `SOLD` and stored no link. A sale line for a serial-tracked variant now **must** name its units, the count must equal the quantity, the units are consumed through `InventoryEngine` exactly as before, and the append-only **`SaleItemSerial`** records which physical unit left on which line. Whether serials are required is decided by the product's own tracking flag, never by the request — a client can neither opt out by omitting the field nor smuggle serials onto a line whose product does not track them.
+
+`RegisterWarrantyUseCase` now verifies the serial was **actually sold on that sale line**. A genuine, in-tenant, same-variant serial that was never on the line is rejected — the case that previously passed every available check.
+
+**BD-14 — returned serials go to quarantine.** A serial-tracked return must name the exact units coming back (a partial return of a multi-serial line is otherwise ambiguous), and they transition `SOLD → RETURNED`, never straight to `IN_STOCK`: a physical item coming back over the counter is not automatically known to be sellable. The intended lifecycle is `SOLD → RETURNED → (future inspection) → IN_STOCK or DAMAGED`; **no inspection workflow was built**. A unit cannot be returned twice, and cannot be returned against a line that never sold it. `SaleReturnItemSerial` records which return brought back which unit.
+
+**BD-15 — warranties auto-void on return.** Any warranty still covering a returned unit transitions to `VOID` atomically with the return. The warranty row is never deleted and its snapshotted dates are never rewritten — only the approved status transition occurs — and a claim against it is rejected.
+
+**Concurrency was genuinely holed and is now closed.** `consumeSerialsForSale` did a read-then-write with no lock, so two simultaneous sales could each see the same unit as `IN_STOCK` and both sell it. Serial rows are now taken with `SELECT … FOR UPDATE` in deterministic `id` order, and consumption runs **after** `applyMovement` so the lock sequence matches the canonical order. `serial_numbers` already carried the `UPDATE` privilege from Phase 3, so no grant change was needed.
+
 ## Pending Features
-Everything from Phase 8E onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+Everything from Phase 8F onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+
+Deliberately out of Phase 8E scope (approved constraints, none of them worked around):
+- **No inspection workflow** — `RETURNED` is the terminal state Phase 8E writes; releasing a unit back to `IN_STOCK` or `DAMAGED` is future work.
+- **No replacement or refund workflow** on the warranty side; warranties remain record-keeping only.
+- **No Accounting or Inventory redesign** — both engines remain the sole authorities and neither was modified.
+- **No new promotion or loyalty rule**; the approved ordering is unchanged.
+- **Known Issue #29 untouched** — the promotion base price is still the caller-supplied `unitPrice`.
+- **No Phase 1-7 refactor** beyond the behaviour-preserving serial reorder required by the mandated lock order.
 
 Deliberately out of Phase 8D scope (approved constraints, none of them worked around):
 - **Threshold / basket-spend and basket-wide promotions** — no promotion in scope is triggered by the composition or total of the basket.
@@ -336,6 +367,10 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 
 4 new global permission codes: `promotions.{view,create,edit,deactivate}` (**106 permissions total now**).
 
+**Phase 8E**: 2 new Prisma models, both append-only link tables: **`SaleItemSerial`** (which physical unit left on which sale line) and **`SaleReturnItemSerial`** (which unit came back on which return line). No new enum, no new permission (106 unchanged), and **no column added to `Sale`, `SaleItem`, `SaleReturn` or `SerialNumber`**.
+
+Link *tables* rather than a `saleItemId` column on `SerialNumber`, deliberately: a serial can be sold, returned and sold again, and a single column would overwrite that history on every resale. `SaleReturnItemSerial` exists for two reasons — traceability (`status = RETURNED` says a unit came back but not which return brought it) and idempotency (returned serials are client-supplied, so a replayed key carrying different units must be rejected, which needs the originals to compare against).
+
 ## Migrations
 **Phase 5**:
 1. `20260829112729_sales_schema` - the 8 tables/5 enums above, plus hand-written `CHECK` constraints: non-zero `amount` on `customer_transactions`; `closed_at >= opened_at` on `shifts`; non-negative subtotal/discount/tax/total on `sales`; positive quantity, non-negative price/discount/tax/line-total/quantity-returned, and **`quantity_returned <= quantity`** on `sale_items`; positive quantity + non-negative price on `sale_return_items`; positive `amount` on `sale_payments`. Plus a **partial unique index** `shifts_one_open_per_user (business_id, opened_by) WHERE status = 'OPEN'` - the database-level guarantee behind the "one open shift per user" invariant, not just an application pre-check.
@@ -369,6 +404,14 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 17. `20260830111403_promotions_schema` — the 2 tables/2 enums above, plus hand-written CHECKs: **`promotions_parameters_match_type`** (exactly one parameter set per type, everything else NULL — without it a row could carry a percentage AND a buy/get pair, and which one won would depend on code order rather than data); `0 < percentage_value <= 100`; `fixed_amount > 0`; `buy_quantity > 0` and `get_quantity > 0`; `valid_to > valid_from`; a non-empty trimmed name; and `discount_applied > 0` on applications, so a stored application always represents real money.
 18. `20260830111500_promotions_rls` — RLS **and FORCE RLS** on both tables with `<table>_tenant_isolation` policies (`USING` + `WITH CHECK`).
 19. `20260830111600_promotions_app_role_grants` — `promotions` gets `SELECT, INSERT, UPDATE` (config is genuinely edited and deactivated in place) and **no DELETE**; `sale_promotion_applications` gets **`SELECT, INSERT` only**, the same strictest grant as `customer_points` and `journal_entries`. Neither table is ever row-locked — promotion resolution is a pure read inside the sale's existing transaction, and with quotas deferred there is no counter to contend on — so neither needs a locking-only UPDATE grant (the Phase 5 `sales` lesson applied up front for the fourth phase running).
+
+**Phase 8E**:
+20. `20260830114626_sale_item_serials` — the `sale_item_serials` table with a tenant-scoped unique `(business_id, sale_item_id, serial_number_id)`; `serial_number_id` is `RESTRICT` so a unit with sale history can never be deleted.
+21. `20260830114700_sale_item_serials_rls` — RLS **and FORCE RLS** with the tenant-isolation policy.
+22. `20260830114800_sale_item_serials_grants` — **`SELECT, INSERT` only**. "This unit left on this sale line" is a permanent fact that stays true even after the unit is returned; the return is recorded by the serial's own status transition and the SaleReturn document, never by erasing the sale record.
+23. `20260830120xxx_sale_return_item_serials` + `20260830121000_sale_return_item_serials_rls_grants` — the return-direction mirror, same append-only posture, same RLS.
+
+No grant was added to `serial_numbers`: it has carried `SELECT, INSERT, UPDATE` since Phase 3, and PostgreSQL requires exactly `UPDATE` for `SELECT … FOR UPDATE`, so the new row locking needed nothing.
 
 Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate status`: both "up to date", **22 migrations total** across all six phases). Verified directly via SQL, not just assumed:
 - `pg_class.relrowsecurity`/`relforcerowsecurity` = true on all 5 new Phase 6 tables.
@@ -404,6 +447,12 @@ Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate stat
 - `erp_app` grants read exactly `INSERT,SELECT,UPDATE` on `promotions` and `INSERT,SELECT` on `sale_promotion_applications`.
 - All 7 hand-written CHECK constraints present, plus the tenant-scoped unique index.
 - Both databases re-seeded: **106 permissions** each, promotion codes backfilled onto existing `BUSINESS_OWNER` roles.
+
+**Phase 8E migration verification** — direct SQL against **both** `erp_dev` and `erp_test`, with `prisma migrate status` reporting "up to date" on each:
+- `relrowsecurity` **and** `relforcerowsecurity` = `true` on `sale_item_serials` and `sale_return_item_serials`.
+- Both `_tenant_isolation` policies present.
+- `erp_app` grants read exactly `INSERT,SELECT` on both — asserted by an e2e test as well as by `information_schema`.
+- Both tenant-scoped unique indexes present. Permission count unchanged at 106.
 
 ## API Endpoints
 All Phase 5 endpoints under `/api/v1/sales`, same `{ data }` / `{ error }` envelope (list endpoints also return `pagination`).
@@ -505,6 +554,8 @@ Validity is supplied as `YYYY-MM-DD` calendar dates, not instants: only the serv
 
 Role-template grants: `BUSINESS_OWNER` all four. `ACCOUNTANT`, `BRANCH_MANAGER`, `CASHIER`, `SALES_EMPLOYEE` get **`promotions.view` only** — a cashier must see why a price dropped but must not author the rule behind it. `INVENTORY_MANAGER` gets none. **Selling with a promotion applied requires no promotion permission at all** — resolution is server-side and gated by the existing `sales.create`.
 
+**Phase 8E added no endpoint and no permission.** Two request fields were added, both client-supplied and both joining their document's idempotency fingerprint: `serials` on a sale item (**required** for a serial-tracked variant, rejected for others, count must equal quantity) and `serials` on a return item (same rules, for the units coming back). Serial capture is part of `sales.create`; serial return is part of `sales.return`.
+
 ## Screens
 None (still backend-only - unchanged from Phases 1-5; still flagging this for your review).
 
@@ -582,6 +633,21 @@ None (still backend-only - unchanged from Phases 1-5; still flagging this for yo
 - **Unit**: no new unit tests — the three calculators and the selection order are exercised end-to-end against real sales, including every boundary case, which is stronger than isolating them. Phase 1-8C's 28 unit tests remain green.
 - Full regression after 8D: **419/419 e2e (38 files) + 28/28 unit**, zero regressions from Phases 1-8C. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
 
+**Phase 8E**: E2E: **24 new tests across 1 new file plus additions to two existing suites**, real PostgreSQL, no mocks. Total suite is now **444 e2e across 39 files**.
+
+`sales-integration-8e.e2e-spec.ts` (18) —
+- **Full stack on one sale (3)** — promotion + manual + redemption composed in the approved order with the promotion computed on the gross (400 gross, 40 manual, 40 promotion, 50 redemption → 130 discount, 270 total) and earning on the final net (540 points); four sequential partial returns telescoping to **exactly** 270 credit, −540 clawback and 5000 restoration, leaving the customer's balance back at the original grant; and **all four configuration values changed afterwards** (both loyalty rates, promotion renamed, promotion deactivated) proving the stored sale, its promotion application and its ledger rows are all unmoved.
+- **Serial capture and the six traceability questions (5)** — a single test answers all six: which serials a line sold, which line sold a serial, whether a serial was returned and on which document, its current status, whether a warranty exists, and whether that warranty was auto-voided — with the *unreturned* sibling unit confirmed still `SOLD` and unlinked to any return. Plus rejection of a foreign-variant serial, a non-existent serial, a count mismatch, a duplicate on one line, and re-selling an already-sold unit; serials rejected on a non-tracked line; a unit returned twice or against a line that never sold it; and a serial-tracked return that omits or miscounts its serials.
+- **Concurrency, real `Promise.all` (4)** — two sales for the **same serial** resolve to exactly one winner with exactly one `SaleItemSerial` row; two returns of the same serial likewise; a sale and a return on the same customer and serials complete with **no deadlock** and a non-negative balance; two concurrent warranty registrations for one serial produce exactly one warranty.
+- **Idempotency across the stack (3)** — replaying a promotion + manual + redemption + serial sale creates no second link, application, REDEEM or EARN row; the same key with a **different serial** is rejected 409; a return replay with different serials is rejected while an identical replay is safe.
+- **Append-only and isolation (2)** — `information_schema` grants read exactly `INSERT, SELECT` on both link tables, a direct-connection DELETE is refused, RLS returns nothing for another tenant, and a global query proves no serial is linked to two different sale lines while `SOLD`.
+
+`sales-return-credit.e2e-spec.ts` (+5, BD-12) — an over-discounted line capped with merchandise value at zero and never negative, `line_total` and the customer transaction both correct, and its return crediting exactly zero rather than a negative amount; the GL balanced with no negative reversal on both the sale and the return; loyalty earning, clawback and restoration all correct and non-negative on a capped line; every valid discount unchanged (the cap is the identity); and a global query proving **no sale line in the database has a discount exceeding its own gross**.
+
+`warranty.e2e-spec.ts` (+1, #47 closure) — a warranty cannot be registered for a serial the sale line did not sell.
+
+- Full regression after 8E: **444/444 e2e (39 files) + 28/28 unit**, zero regressions. Build, `tsc --noEmit` and lint clean.
+
 ## Security Review
 Everything from Phases 1-4 stands unchanged. Phase 5 additions:
 - Every sales-mutating endpoint requires its own specific permission (11 new codes) rather than one blanket `sales.manage` - verified by test at two privilege levels: a Cashier (the intended POS-floor role) allowed to open a shift, sell, and return, but rejected from an out-of-template action; a role with zero sales permissions rejected from every sales route entirely.
@@ -619,6 +685,12 @@ Phase 8D additions:
 - `sale_promotion_applications` has **no UPDATE and no DELETE** grant for `erp_app`, verified from `information_schema` and by a direct-connection rejection test; `promotions` has no DELETE, and a RESTRICT foreign key means a rule referenced by a historical sale could not be removed even if one existed.
 - RLS **and FORCE RLS** proven at the database layer on both tables, including an unfiltered read with no tenant context returning nothing.
 - `Promotion.targetId` is not a foreign key by necessity, so target existence is validated against the caller's own tenant in the application — a promotion can never be created pointing at another business's product, category or variant (404, tested).
+
+Phase 8E additions:
+- **A client cannot control serial requirements.** Whether a line needs serials is decided by the product's own `tracksSerialNumbers` flag, so a caller can neither omit the field to skip capture nor attach serials to a line whose product does not track them.
+- **A previously unguarded race is closed.** `consumeSerialsForSale` read a serial's status and then updated it with no lock, so two simultaneous sales could sell one physical unit twice. Rows are now locked `FOR UPDATE` in deterministic `id` order, proven by a real concurrent-HTTP test.
+- Both new link tables have **no UPDATE and no DELETE** grant for `erp_app`, verified from `information_schema` and by a direct-connection rejection test, with RLS + FORCE RLS proven at the database layer.
+- **A warranty can no longer be attached to a unit the sale did not deliver** — the check is against a stored fact rather than the variant-match proxy it replaced.
 
 ## Business Logic Review
 - Every sales use case validates its references (warehouse/customer/variant belong to the caller's tenant, customer is active, shift matches the warehouse) before writing anything, returning 404/422/409 rather than silently creating cross-tenant, invalid, or shift-less data.
@@ -695,6 +767,12 @@ Phase 8D additions:
 - **Type, target and parameters are immutable on a promotion.** Repurposing a rule in place would make historical applications point at something that no longer resembles what happened, so only name, window and active flag are editable — a different rule is a different promotion.
 - **Return semantics needed no change at all.** `return-credit.ts` computes `merchandiseValue = round4(unitPrice × quantity) − discountAmount`, and a promotion discount lands in `discountAmount`, so the §6.1 locked BXGY return policy was **already implemented** by the Phase 8C BD-1 correction. A promoted BXGY line returns at exactly its historical proportional value; `CreateSaleReturnUseCase` was not modified.
 - **Accounting and inventory are untouched.** A promotion raises `discountAmount`, lowering `netRevenue` and `totalAmount` identically, so the entry balances by construction — no account, no mapping key, no engine change. Free units are physically shipped, so stock consumption and COGS are unchanged and gross profit correctly falls.
+
+Phase 8E additions:
+- **Net merchandise value can never be negative on any line.** BD-12 makes `finalDiscount ≤ lineGross` universal, which in turn guarantees the BD-1 return credit, the loyalty clawback and the restoration are all non-negative. A global query asserts no stored sale line violates it.
+- **Serial history survives everything.** `SaleItemSerial` is never deleted, not even when the unit is returned: the return is recorded by the serial's own status transition and by `SaleReturnItemSerial`, so a unit that is sold, returned and sold again keeps every leg of its history — which a `saleItemId` column on `SerialNumber` could not have done.
+- **A voided warranty is still a complete record.** BD-15 changes only `status`; the snapshotted `startDate`/`endDate`/`durationDays` and every existing claim survive untouched, so a voided warranty remains a full account of what was once promised.
+- **Accounting and Inventory were not modified.** Every serial transition rides the existing `consumeVariant`/`applyMovement` path, and no journal-entry logic changed; the entries for capped and fully-discounted lines were re-verified as balanced.
 
 ## Accounting Engine & Integration Review (Phase 6)
 
@@ -795,6 +873,16 @@ New from Phase 8D:
 69. **A stray parameter on a promotion request is stripped, not rejected.** No schema in this codebase uses `.strict()`, so unknown keys are ignored on every endpoint and promotions follow that convention. The guarantee that matters — that a hybrid rule cannot exist — is enforced by the use-case writing only type-appropriate parameters and independently by `promotions_parameters_match_type`, both asserted.
 70. **The promotion base price is the caller-supplied `unitPrice`** (Known Issue #29 remains deferred, and no second pricing engine was created). This is safe because no in-scope promotion is triggered by a price threshold — basket-spend promotions are deferred — so there is no price a client could enter to unlock a promotion it should not get.
 71. **Promotions are tenant-wide.** No branch scoping, no per-customer targeting, no quotas or usage limits — all explicitly deferred, which is also why promotion resolution needs no counter and therefore introduces no new lock.
+
+**Known Issue #47 is CLOSED (Phase 8E).** Sales capture serial identity at creation, `SaleItemSerial` records it durably, and warranty registration verifies against it. The entry is retained here for history rather than deleted.
+
+New from Phase 8E:
+
+72. **No inspection workflow exists.** `RETURNED` is the terminal state Phase 8E writes; a returned unit is quarantined and cannot be resold until a future workflow releases it to `IN_STOCK` or `DAMAGED`. `RESERVED` remains a dead enum value with no writer.
+73. **BD-13 is a breaking change for existing callers.** Any client selling a serial-tracked product without naming its serials now receives 422. This was approved deliberately, to close #47 genuinely rather than leave a partial fallback. The Phase 8A warranty fixture was updated accordingly and the change is reported in the release gate.
+74. **A serial-tracked line cannot be sold in a UOM other than the base unit with fractional quantity** — the serial count must equal the quantity, which implies whole units. Not a new restriction (serials were always whole units) but now enforced at sale time rather than being silently skippable.
+75. **Warranties registered before Phase 8E have no `SaleItemSerial` link.** The verification is therefore effective for sales made from 8E onward; a historical sale's warranty is unaffected and is neither retro-validated nor invalidated.
+76. **Reporting still cannot break a discount down** into manual, promotional and loyalty components — `Sale.discountAmount` is a single figure and Phase 7 is read-only. Carried forward from 8D, unchanged.
 
 ## Files Created
 Prisma migrations: `apps/api/prisma/migrations/20260829112729_sales_schema/`, `.../20260829112800_sales_rls/`, `.../20260829112900_sales_app_role_grants/`, `.../20260829130000_sales_lock_update_grant/`.
@@ -904,6 +992,20 @@ Tests: `apps/api/test/promotions.e2e-spec.ts`.
 
 **`CreateSaleReturnUseCase`, `InventoryEngine`, `AccountingEngine` and every accounting domain file were NOT modified.** The only Phase 1-8C source touched outside wiring is `create-sale.use-case.ts` (the approved integration point) and the behaviour-preserving timezone extraction.
 
+### Phase 8E Files Created
+Prisma migrations: `apps/api/prisma/migrations/20260830114626_sale_item_serials/`, `.../20260830114700_sale_item_serials_rls/`, `.../20260830114800_sale_item_serials_grants/`, `.../20260830120xxx_sale_return_item_serials/`, `.../20260830121000_sale_return_item_serials_rls_grants/`.
+
+Sales domain: `apps/api/src/modules/sales/domain/line-discount.ts` (the BD-12 cap).
+
+Inventory domain: `apps/api/src/modules/inventory/domain/return-serials.ts` (the BD-14 quarantine transition, row-locked).
+
+Tests: `apps/api/test/sales-integration-8e.e2e-spec.ts`.
+
+### Phase 8E Files Modified
+`apps/api/prisma/schema.prisma` (2 new models + `Business`/`Sale`/`SaleItem`/`SaleReturn`/`SaleReturnItem`/`SerialNumber` back-relations), `packages/shared-validation/src/sales.ts` (`serials` on sale and return items), `apps/api/src/modules/sales/application/sales/create-sale.use-case.ts` (BD-12 cap, BD-13 enforcement, serial pass-through, link rows, fingerprint), `apps/api/src/modules/sales/application/returns/create-sale-return.use-case.ts` (serial validation, quarantine, warranty auto-void, return-serial links, fingerprint), `apps/api/src/modules/inventory/domain/lot-and-serial.ts` (row locking, returns consumed ids), `apps/api/src/modules/inventory/domain/consume-variant.ts` (serial consumption moved after `applyMovement` for the canonical lock order, propagates consumed ids), `apps/api/src/modules/warranty/application/register-warranty.use-case.ts` (#47 closure), `apps/api/test/db-reset.ts`, `apps/api/test/warranty.e2e-spec.ts` (BD-13 fixture + #47 closure tests), `apps/api/test/promotions.e2e-spec.ts` (BD-12 correction), `apps/api/test/sales-return-credit.e2e-spec.ts` (BD-12 regression), `docs/state/PROJECT_STATE.md`.
+
+**`InventoryEngineService` and `AccountingEngineService` were not modified.** Every serial transition rides the existing `consumeVariant`/`applyMovement` path.
+
 ## Next Phase
-**Phase 8E — Sales Integration**: PromotionEngine + Loyalty final combined verification, `CreateSaleUseCase` review, idempotency fingerprint handling, returns integration, historical snapshot protection, accounting verification — and the serial-capture-on-sale work that closes Known Issue #47, which remains an accepted cross-phase dependency and was not worked around in 8D.
-**8E will not start until you explicitly approve this Phase 8D report.**
+**Phase 8F — Full Verification**: concurrency, idempotency, tenant isolation, permissions, historical integrity, accounting and regression across the completed Phase 8 surface. Not started.
+**8F will not start until you explicitly approve this Phase 8E report.**

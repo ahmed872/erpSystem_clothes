@@ -107,6 +107,8 @@ model Business {
   customerPoints            CustomerPoints[]
   promotions                Promotion[]
   salePromotionApplications SalePromotionApplication[]
+  SaleItemSerial            SaleItemSerial[]
+  SaleReturnItemSerial      SaleReturnItemSerial[]
 
   @@map("businesses")
 }
@@ -910,10 +912,12 @@ model SerialNumber {
   createdAt          DateTime           @default(now()) @map("created_at")
   updatedAt          DateTime           @updatedAt @map("updated_at")
 
-  business         Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "serial_numbers_business_fk")
-  variant          ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
-  currentWarehouse Warehouse?     @relation(fields: [currentWarehouseId], references: [id], onDelete: SetNull)
-  warranties       Warranty[]
+  business              Business               @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "serial_numbers_business_fk")
+  variant               ProductVariant         @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  currentWarehouse      Warehouse?             @relation(fields: [currentWarehouseId], references: [id], onDelete: SetNull)
+  warranties            Warranty[]
+  saleItemSerials       SaleItemSerial[]
+  saleReturnItemSerials SaleReturnItemSerial[]
 
   @@unique([businessId, serial])
   @@index([businessId])
@@ -1557,6 +1561,7 @@ model Sale {
   payments              SalePayment[]
   returns               SaleReturn[]
   promotionApplications SalePromotionApplication[]
+  SaleItemSerial        SaleItemSerial[]
 
   @@unique([businessId, saleNumber])
   @@unique([businessId, idempotencyKey])
@@ -1600,6 +1605,7 @@ model SaleItem {
   returnItems           SaleReturnItem[]
   warranties            Warranty[]
   promotionApplications SalePromotionApplication[]
+  SaleItemSerial        SaleItemSerial[]
 
   @@unique([saleId, variantId])
   @@index([businessId])
@@ -1654,10 +1660,11 @@ model SaleReturn {
   createdBy      String?  @map("created_by")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  business  Business         @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_returns_business_fk")
-  sale      Sale             @relation(fields: [saleId], references: [id], onDelete: Restrict)
-  warehouse Warehouse        @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
-  items     SaleReturnItem[]
+  business    Business               @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_returns_business_fk")
+  sale        Sale                   @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  warehouse   Warehouse              @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  items       SaleReturnItem[]
+  itemSerials SaleReturnItemSerial[]
 
   @@unique([businessId, returnNumber])
   @@unique([businessId, idempotencyKey])
@@ -1693,10 +1700,11 @@ model SaleReturnItem {
   condition    SaleReturnCondition @default(SELLABLE)
   createdAt    DateTime            @default(now()) @map("created_at")
 
-  business   Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_return_items_business_fk")
-  saleReturn SaleReturn     @relation(fields: [saleReturnId], references: [id], onDelete: Cascade)
-  saleItem   SaleItem       @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
-  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  business   Business               @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_return_items_business_fk")
+  saleReturn SaleReturn             @relation(fields: [saleReturnId], references: [id], onDelete: Cascade)
+  saleItem   SaleItem               @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
+  variant    ProductVariant         @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  serials    SaleReturnItemSerial[]
 
   @@index([saleReturnId])
   @@index([saleItemId])
@@ -2222,4 +2230,85 @@ model SalePromotionApplication {
   @@index([saleId])
   @@index([saleItemId])
   @@map("sale_promotion_applications")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8E - Serial capture on sale (closes Known Issue #47)
+// ---------------------------------------------------------------------------
+
+/// APPEND-ONLY link recording WHICH physical serial left on WHICH sale
+/// line. Before Phase 8E no such fact existed anywhere: a sale of a
+/// serial-tracked variant marked nothing, so warranty registration could
+/// only check that a serial existed in the tenant and matched the
+/// variant - never that it was the unit actually sold.
+///
+/// A link TABLE rather than a `saleItemId` column on `SerialNumber`,
+/// deliberately: a serial can be sold, returned and sold again, and a
+/// single column would overwrite that history on every resale. This table
+/// answers all six required questions - which serial was sold on a line,
+/// which line sold a serial, whether it was returned, its current status,
+/// whether a warranty exists, and whether that warranty was voided - and
+/// keeps answering them after a resale.
+///
+/// `erp_app` gets SELECT + INSERT only. The row is never updated and
+/// never deleted, not even when the unit is returned: the return is
+/// recorded by the SerialNumber's own status transition and by the
+/// SaleReturn document, while this row remains the permanent record that
+/// the sale happened.
+model SaleItemSerial {
+  id             String   @id @default(uuid())
+  businessId     String   @map("business_id")
+  saleId         String   @map("sale_id")
+  saleItemId     String   @map("sale_item_id")
+  serialNumberId String   @map("serial_number_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_item_serials_business_fk")
+  sale         Sale         @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  saleItem     SaleItem     @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
+  serialNumber SerialNumber @relation(fields: [serialNumberId], references: [id], onDelete: Restrict)
+
+  /// One physical unit can appear at most once on a given sale line.
+  @@unique([businessId, saleItemId, serialNumberId])
+  @@index([businessId])
+  @@index([saleId])
+  @@index([saleItemId])
+  @@index([serialNumberId])
+  @@map("sale_item_serials")
+}
+
+/// APPEND-ONLY record of WHICH physical unit came back on WHICH return
+/// line - the mirror of `SaleItemSerial` for the return direction.
+///
+/// Added in Phase 8E for two reasons. First traceability: `SerialNumber.
+/// status = RETURNED` says a unit came back but not which return brought
+/// it, so a second partial return of the same line would be
+/// indistinguishable from the first. Second idempotency: the returned
+/// serials are client-supplied, so a replayed idempotency key carrying
+/// DIFFERENT serials must be rejected rather than silently handed the
+/// original return - which needs the original serials to compare against.
+///
+/// `erp_app` gets SELECT + INSERT only, and the row is never deleted: it
+/// is the permanent record that this unit came back on this document.
+model SaleReturnItemSerial {
+  id               String   @id @default(uuid())
+  businessId       String   @map("business_id")
+  saleReturnId     String   @map("sale_return_id")
+  saleReturnItemId String   @map("sale_return_item_id")
+  serialNumberId   String   @map("serial_number_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  business       Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_return_item_serials_business_fk")
+  saleReturn     SaleReturn     @relation(fields: [saleReturnId], references: [id], onDelete: Cascade)
+  saleReturnItem SaleReturnItem @relation(fields: [saleReturnItemId], references: [id], onDelete: Cascade)
+  serialNumber   SerialNumber   @relation(fields: [serialNumberId], references: [id], onDelete: Restrict)
+
+  /// A physical unit can come back at most once on a given return line,
+  /// and - because a serial can only transition SOLD -> RETURNED once -
+  /// at most once overall until a future inspection workflow releases it.
+  @@unique([businessId, saleReturnItemId, serialNumberId])
+  @@index([businessId])
+  @@index([saleReturnId])
+  @@index([serialNumberId])
+  @@map("sale_return_item_serials")
 }

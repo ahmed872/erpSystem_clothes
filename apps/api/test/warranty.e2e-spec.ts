@@ -61,7 +61,17 @@ describe('Warranty (e2e, real Postgres)', () => {
       .set('Authorization', auth())
       .send({
         warehouseId: biz.warehouseId,
-        items: [{ variantId: serialVariantId, quantity: 3, unitPrice: 300 }],
+        // Phase 8E / BD-13: serial identity is now MANDATORY at sale
+        // creation for a serial-tracked variant, so the units being sold
+        // are named here. Before 8E this sale recorded no serial at all.
+        items: [
+          {
+            variantId: serialVariantId,
+            quantity: 3,
+            unitPrice: 300,
+            serials: ['WTY-SN-001', 'WTY-SN-002', 'WTY-SN-003'],
+          },
+        ],
         payments: [{ amount: 900 }],
       })
       .expect(201);
@@ -620,17 +630,52 @@ describe('Warranty (e2e, real Postgres)', () => {
   });
 
   // ------------------------------------------------------------------
-  describe('Known Issue #38: Phase 5 sales record no serial linkage', () => {
-    it('documents current behaviour - selling a serial-tracked variant leaves its serials IN_STOCK', async () => {
-      // This is NOT the desired end state. It is asserted so the gap is
-      // visible and so Phase 8B's Sales integration has a regression
-      // anchor showing exactly what changed. Because no SaleItem ->
-      // SerialNumber link exists, warranty registration can only verify
-      // the variant matches, never that this unit was the one sold.
+  describe('Known Issue #47 CLOSED (Phase 8E): the sale records which serial it sold', () => {
+    it('selling a serial-tracked variant marks its serials SOLD and links them to the sale line', async () => {
       const serials = await admin.serialNumber.findMany({
         where: { businessId: biz.businessId, variantId: serialVariantId },
+        orderBy: { serial: 'asc' },
       });
-      expect(serials.every((s) => s.status === 'IN_STOCK')).toBe(true);
+      // Previously these stayed IN_STOCK because the sale path never
+      // passed serials at all. That gap is what made warranty
+      // registration unverifiable.
+      expect(serials.every((s) => s.status === 'SOLD')).toBe(true);
+
+      const links = await admin.saleItemSerial.findMany({ where: { saleItemId } });
+      expect(links.length).toBe(3);
+      expect(links.every((l) => l.saleId === saleId)).toBe(true);
+      expect(new Set(links.map((l) => l.serialNumberId))).toEqual(new Set(serials.map((s) => s.id)));
+    });
+
+    it('a warranty cannot be registered for a serial the sale line did not actually sell', async () => {
+      // A genuine, in-tenant, same-variant serial that simply was not on
+      // this sale line. Before 8E this passed every available check.
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/receipts')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId: serialVariantId, quantity: 1, unitCost: 100, serials: ['WTY-SN-UNSOLD'] })
+        .expect(201);
+      const unsold = await admin.serialNumber.findFirstOrThrow({ where: { serial: 'WTY-SN-UNSOLD' } });
+
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/warranties')
+        .set('Authorization', auth())
+        .send({ saleItemId, serialNumberId: unsold.id })
+        .expect(422);
+      expect(JSON.stringify(res.body)).toMatch(/not sold on this sale line/i);
+    });
+
+    it('a serial-tracked sale without serials is now rejected', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId: serialVariantId, quantity: 1, unitPrice: 300 }],
+          payments: [{ amount: 300 }],
+        })
+        .expect(422);
+      expect(JSON.stringify(res.body)).toMatch(/serial-tracked/i);
     });
   });
 });

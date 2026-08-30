@@ -17,6 +17,7 @@ import { computeSaleCost } from '../../domain/sale-cost';
 import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
 import { buildSaleJournalLines } from '../../../accounting/domain/sale-journal-lines';
 import { round4 } from '../../../../common/domain/money';
+import { capManualDiscount } from '../../domain/line-discount';
 import { lockCustomer } from '../../../loyalty/domain/lock-customer';
 import { getCustomerPointsBalance } from '../../../loyalty/domain/customer-points-balance';
 import { computePointsEarned, resolveLoyaltyEarnRate } from '../../../loyalty/domain/loyalty-earning';
@@ -27,7 +28,14 @@ import { selectBestPromotion, SelectedPromotion } from '../../../promotions/doma
 function saleFingerprint(
   warehouseId: string,
   customerId: string | null,
-  items: { variantId: string; quantity: Prisma.Decimal.Value; unitPrice: Prisma.Decimal.Value; discountAmount: Prisma.Decimal.Value; taxAmount: Prisma.Decimal.Value }[],
+  items: {
+    variantId: string;
+    quantity: Prisma.Decimal.Value;
+    unitPrice: Prisma.Decimal.Value;
+    discountAmount: Prisma.Decimal.Value;
+    taxAmount: Prisma.Decimal.Value;
+    serials?: string[];
+  }[],
   payments: { amount: Prisma.Decimal.Value; method: string }[],
   redeemPoints: Prisma.Decimal.Value | null,
   clientDiscountTotal: Prisma.Decimal.Value,
@@ -52,6 +60,11 @@ function saleFingerprint(
         quantity: new Prisma.Decimal(i.quantity).toString(),
         unitPrice: new Prisma.Decimal(i.unitPrice).toString(),
         taxAmount: new Prisma.Decimal(i.taxAmount).toString(),
+        // Phase 8E: serials are CLIENT-supplied, so replaying the same key
+        // with a different physical unit must be rejected, not silently
+        // accepted. Sorted so the same set in a different order is
+        // recognised as the same request.
+        serials: [...(i.serials ?? [])].sort(),
       }))
       .sort((a, b) => a.variantId.localeCompare(b.variantId)),
     // The client's own discount total, at sale level. This IS exactly
@@ -133,6 +146,20 @@ export class CreateSaleUseCase {
         // payload and rejected 409. `discountApplied` is the EFFECTIVE
         // contribution after the BD-11 cap, which is exactly what makes
         // this subtraction exact.
+        // Rebuilds each line's sold serials from the append-only link
+        // rows, so a replay is compared against what was actually sold.
+        const existingSerialsByItem = new Map<string, string[]>();
+        if (existing) {
+          const links = await tx.saleItemSerial.findMany({
+            where: { businessId: actor.tenantId, saleId: existing.id },
+            include: { serialNumber: { select: { serial: true } } },
+          });
+          for (const link of links) {
+            const list = existingSerialsByItem.get(link.saleItemId) ?? [];
+            list.push(link.serialNumber.serial);
+            existingSerialsByItem.set(link.saleItemId, list);
+          }
+        }
         const existingPromotionDiscount = existing
           ? (
               await tx.salePromotionApplication.findMany({
@@ -146,7 +173,7 @@ export class CreateSaleUseCase {
             saleFingerprint(
               existing.warehouseId,
               existing.customerId,
-              existing.items,
+              existing.items.map((i) => ({ ...i, serials: existingSerialsByItem.get(i.id) ?? [] })),
               existing.payments,
               existingRedeemedPoints(existingEvents),
               // The stored sale discount minus what the server itself
@@ -160,7 +187,15 @@ export class CreateSaleUseCase {
               input.items,
               input.payments,
               input.redeemPoints ?? null,
-              input.items.reduce((sum, i) => sum.plus(i.discountAmount), new Prisma.Decimal(0)),
+              // The CAPPED manual total, because that is what the stored
+              // `Sale.discountAmount` reflects after BD-12. Comparing the
+              // raw request against a capped stored value would reject
+              // every legitimate replay of an over-discounted line.
+              input.items.reduce(
+                (sum, i) =>
+                  sum.plus(capManualDiscount(i.discountAmount, round4(new Prisma.Decimal(i.unitPrice).times(i.quantity)))),
+                new Prisma.Decimal(0),
+              ),
             ),
           );
           return existing;
@@ -210,11 +245,47 @@ export class CreateSaleUseCase {
         where: { id: { in: variantIds }, businessId: actor.tenantId },
         // `product.categoryId` is needed so a CATEGORY-targeted promotion
         // can be matched without a second query per line.
-        include: { product: { select: { id: true, categoryId: true } } },
+        include: { product: { select: { id: true, categoryId: true, tracksSerialNumbers: true } } },
       });
       if (variants.length !== variantIds.length) {
         const found = new Set(variants.map((v) => v.id));
         throw new NotFoundDomainError('ProductVariant', variantIds.filter((id) => !found.has(id)).join(', '));
+      }
+
+      // ---------------------------------------------------------------
+      // Phase 8E / BD-13: serial identity is MANDATORY at sale creation
+      // for a serial-tracked variant. Before this, selling such a product
+      // recorded no serial at all, so nothing in the system knew which
+      // physical unit the customer walked out with - the gap that made
+      // warranty registration unverifiable (Known Issue #47).
+      //
+      // Whether serials are required is decided by the PRODUCT's own
+      // tracking flag, never by the request: a client cannot opt out by
+      // omitting the field, and cannot smuggle serials onto a line whose
+      // product does not track them.
+      // ---------------------------------------------------------------
+      const variantsById = new Map(variants.map((v) => [v.id, v]));
+      for (const item of input.items) {
+        const tracks = variantsById.get(item.variantId)!.product.tracksSerialNumbers;
+        const supplied = item.serials ?? [];
+        if (tracks && supplied.length === 0) {
+          throw new ValidationFailedError(
+            'This product is serial-tracked - the serial number(s) being sold must be supplied for this line',
+            { variantId: item.variantId, quantity: new Prisma.Decimal(item.quantity).toString() },
+          );
+        }
+        if (!tracks && supplied.length > 0) {
+          throw new ValidationFailedError('This product is not serial-tracked - serial numbers cannot be supplied for this line', {
+            variantId: item.variantId,
+          });
+        }
+        if (tracks && !new Prisma.Decimal(item.quantity).equals(supplied.length)) {
+          throw new ValidationFailedError('The number of serials supplied must equal the quantity sold for this line', {
+            variantId: item.variantId,
+            quantity: new Prisma.Decimal(item.quantity).toString(),
+            serialsSupplied: supplied.length,
+          });
+        }
       }
 
       // Each line's gross is rounded to the monetary scale BEFORE being
@@ -225,14 +296,21 @@ export class CreateSaleUseCase {
       // identity, so no pre-existing sale's arithmetic changes; it only
       // bites for fractional quantities at 4-dp prices.
       const lineGross = new Map<string, Prisma.Decimal>();
+      // Approved decision BD-12: the manual discount is capped at the
+      // line gross UNIVERSALLY, so net merchandise value can never go
+      // negative on any line - not only on lines a promotion reached.
+      // For a well-formed line this is the identity.
+      const cappedManual = new Map<string, Prisma.Decimal>();
       let subtotal = new Prisma.Decimal(0);
       let discountAmount = new Prisma.Decimal(0);
       let taxAmount = new Prisma.Decimal(0);
       for (const item of input.items) {
         const gross = round4(new Prisma.Decimal(item.unitPrice).times(item.quantity));
         lineGross.set(item.variantId, gross);
+        const manual = capManualDiscount(item.discountAmount, gross);
+        cappedManual.set(item.variantId, manual);
         subtotal = subtotal.plus(gross);
-        discountAmount = discountAmount.plus(item.discountAmount);
+        discountAmount = discountAmount.plus(manual);
         taxAmount = taxAmount.plus(item.taxAmount);
       }
 
@@ -251,7 +329,6 @@ export class CreateSaleUseCase {
       // At most ONE promotion applies per line (best applicable only);
       // different lines may carry different promotions.
       // ---------------------------------------------------------------
-      const variantById = new Map(variants.map((v) => [v.id, v]));
       const saleInstant = new Date();
       const activePromotions = await resolveActivePromotions(tx, actor.tenantId, saleInstant);
 
@@ -262,7 +339,7 @@ export class CreateSaleUseCase {
 
       if (activePromotions.length > 0) {
         for (const item of input.items) {
-          const variant = variantById.get(item.variantId)!;
+          const variant = variantsById.get(item.variantId)!;
           const gross = lineGross.get(item.variantId)!;
           const best = selectBestPromotion(activePromotions, {
             variantId: item.variantId,
@@ -279,7 +356,7 @@ export class CreateSaleUseCase {
           // on the GROSS, never on the post-manual price, and exceeding
           // the gross is capped rather than rejected - the line's net
           // merchandise value can never go negative.
-          const manual = new Prisma.Decimal(item.discountAmount);
+          const manual = cappedManual.get(item.variantId)!;
           const combined = combineManualAndPromotion(manual, best.discount, gross);
           if (combined.effectivePromotionDiscount.lessThanOrEqualTo(0)) {
             // The manual discount already consumed the whole line, so the
@@ -345,7 +422,7 @@ export class CreateSaleUseCase {
           // already been discounted away.
           eligible: lineGross
             .get(item.variantId)!
-            .minus(item.discountAmount)
+            .minus(cappedManual.get(item.variantId)!)
             .minus(effectivePromotionByVariant.get(item.variantId) ?? 0),
         }));
         const totalEligible = eligibleLines.reduce((sum, l) => sum.plus(l.eligible), new Prisma.Decimal(0));
@@ -403,7 +480,8 @@ export class CreateSaleUseCase {
       // client-supplied order (Phase 5 rule #3/#10).
       const sortedItems = [...input.items].sort((a, b) => a.variantId.localeCompare(b.variantId));
       for (const item of sortedItems) {
-        const lineDiscount = new Prisma.Decimal(item.discountAmount)
+        const lineDiscount = cappedManual
+          .get(item.variantId)!
           .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
           .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
         const lineTotal = lineGross.get(item.variantId)!.minus(lineDiscount).plus(item.taxAmount);
@@ -452,7 +530,7 @@ export class CreateSaleUseCase {
           });
         }
 
-        await consumeVariant(tx, this.engine, this.audit, {
+        const consumption = await consumeVariant(tx, this.engine, this.audit, {
           businessId: actor.tenantId,
           warehouseId: input.warehouseId,
           variantId: item.variantId,
@@ -463,7 +541,20 @@ export class CreateSaleUseCase {
           reason: `Sale ${sale.saleNumber}`,
           createdBy: actor.id,
           allowNegative,
+          // The units consumed go through InventoryEngine exactly as
+          // before - this only tells it WHICH ones.
+          serials: item.serials,
         });
+
+        // Phase 8E: the durable link closing Known Issue #47. Append-only
+        // and written in the SAME transaction as the movement that
+        // consumed the unit, so a serial can never be marked SOLD without
+        // the record of which sale line sold it.
+        for (const serialNumberId of consumption.consumedSerialIds ?? []) {
+          await tx.saleItemSerial.create({
+            data: { businessId: actor.tenantId, saleId: sale.id, saleItemId: createdItem.id, serialNumberId },
+          });
+        }
       }
 
       for (const p of input.payments) {

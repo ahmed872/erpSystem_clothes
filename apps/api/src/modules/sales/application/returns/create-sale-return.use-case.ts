@@ -18,12 +18,24 @@ import { lineReturnCredit, saleCumulativeReturnCredit } from '../../domain/retur
 import { lockCustomer } from '../../../loyalty/domain/lock-customer';
 import { getCustomerPointsBalance } from '../../../loyalty/domain/customer-points-balance';
 import { computeCumulativeClawback, computeCumulativeRestoration } from '../../../loyalty/domain/loyalty-returns';
+import { returnSerialsToQuarantine } from '../../../inventory/domain/return-serials';
 
-function saleReturnFingerprint(saleId: string, items: { saleItemId: string; quantity: Prisma.Decimal.Value; condition: string }[]) {
+function saleReturnFingerprint(
+  saleId: string,
+  items: { saleItemId: string; quantity: Prisma.Decimal.Value; condition: string; serials?: string[] }[],
+) {
   return {
     saleId,
     items: items
-      .map((i) => ({ saleItemId: i.saleItemId, quantity: new Prisma.Decimal(i.quantity).toString(), condition: i.condition }))
+      .map((i) => ({
+        saleItemId: i.saleItemId,
+        quantity: new Prisma.Decimal(i.quantity).toString(),
+        condition: i.condition,
+        // Phase 8E: which physical units are coming back is part of the
+        // request, so replaying a key with different serials must be
+        // rejected rather than silently accepted.
+        serials: [...(i.serials ?? [])].sort(),
+      }))
       .sort((a, b) => a.saleItemId.localeCompare(b.saleItemId)),
   };
 }
@@ -69,11 +81,18 @@ export class CreateSaleReturnUseCase {
       if (input.idempotencyKey) {
         const existing = await tx.saleReturn.findFirst({
           where: { businessId: actor.tenantId, idempotencyKey: input.idempotencyKey },
-          include: { items: true },
+          include: { items: { include: { serials: { include: { serialNumber: { select: { serial: true } } } } } } },
         });
         if (existing) {
           assertIdempotentReplayMatches(
-            saleReturnFingerprint(existing.saleId, existing.items),
+            saleReturnFingerprint(
+              existing.saleId,
+              // The serials actually returned are rebuilt from the
+              // append-only link rows, so a replay carrying DIFFERENT
+              // physical units is rejected rather than silently handed
+              // the original return.
+              existing.items.map((i) => ({ ...i, serials: i.serials.map((x) => x.serialNumber.serial) })),
+            ),
             saleReturnFingerprint(saleId, input.items),
           );
           return existing;
@@ -115,6 +134,31 @@ export class CreateSaleReturnUseCase {
         if (saleItem.variant.product.type === 'BUNDLE') {
           throw new ValidationFailedError('Bundle sale items cannot be returned - return the individual components instead', {
             saleItemId: saleItem.id,
+          });
+        }
+
+        // Phase 8E / BD-14: a serial-tracked line must name the exact
+        // units coming back. A partial return of a multi-serial line is
+        // otherwise ambiguous about which physical item the customer
+        // handed over, and the warranty auto-void below needs to know.
+        const tracksSerials = saleItem.variant.product.tracksSerialNumbers;
+        const suppliedSerials = line.serials ?? [];
+        if (tracksSerials && suppliedSerials.length === 0) {
+          throw new ValidationFailedError(
+            'This product is serial-tracked - the serial number(s) being returned must be supplied for this line',
+            { saleItemId: saleItem.id },
+          );
+        }
+        if (!tracksSerials && suppliedSerials.length > 0) {
+          throw new ValidationFailedError('This product is not serial-tracked - serial numbers cannot be supplied for this line', {
+            saleItemId: saleItem.id,
+          });
+        }
+        if (tracksSerials && !new Prisma.Decimal(line.quantity).equals(suppliedSerials.length)) {
+          throw new ValidationFailedError('The number of serials supplied must equal the quantity being returned for this line', {
+            saleItemId: saleItem.id,
+            quantity: new Prisma.Decimal(line.quantity).toString(),
+            serialsSupplied: suppliedSerials.length,
           });
         }
 
@@ -192,7 +236,7 @@ export class CreateSaleReturnUseCase {
           damageWriteOff = damageWriteOff.plus(new Prisma.Decimal(line.quantity).times(damageResult.movement.unitCostAtMovement));
         }
 
-        await tx.saleReturnItem.create({
+        const createdReturnItem = await tx.saleReturnItem.create({
           data: {
             businessId: actor.tenantId,
             saleReturnId: saleReturn.id,
@@ -203,6 +247,58 @@ export class CreateSaleReturnUseCase {
             condition: line.condition,
           },
         });
+
+        // BD-14: SOLD -> RETURNED (quarantine), AFTER the stock movements
+        // above so the lock sequence stays
+        // Customer -> Sale -> StockBalance -> SerialNumber.
+        if (saleItem.variant.product.tracksSerialNumbers) {
+          const returnedSerialIds = await returnSerialsToQuarantine(
+            tx,
+            actor.tenantId,
+            saleItem.id,
+            line.serials ?? [],
+          );
+
+          // BD-15: any warranty still covering a returned unit is voided
+          // automatically, atomically with this return. The warranty row
+          // is never deleted and its snapshotted dates are never
+          // rewritten - only the approved status transition occurs, so a
+          // voided warranty remains a full historical record of what was
+          // once promised.
+          for (const serialNumberId of returnedSerialIds) {
+            await tx.saleReturnItemSerial.create({
+              data: {
+                businessId: actor.tenantId,
+                saleReturnId: saleReturn.id,
+                saleReturnItemId: createdReturnItem.id,
+                serialNumberId,
+              },
+            });
+          }
+
+          if (returnedSerialIds.length > 0) {
+            const voided = await tx.warranty.updateMany({
+              where: {
+                businessId: actor.tenantId,
+                saleItemId: saleItem.id,
+                serialNumberId: { in: returnedSerialIds },
+                status: { not: 'VOID' },
+              },
+              data: { status: 'VOID', notes: `Voided automatically: unit returned on ${saleReturn.returnNumber}` },
+            });
+            if (voided.count > 0) {
+              await this.audit.record(tx, {
+                businessId: actor.tenantId,
+                userId: actor.id,
+                action: 'UPDATE',
+                entityType: 'Warranty',
+                entityId: saleItem.id,
+                after: { status: 'VOID', voidedCount: voided.count },
+                reason: `Warranty voided automatically by return ${saleReturn.returnNumber}`,
+              });
+            }
+          }
+        }
 
         await tx.saleItem.update({
           where: { id: saleItem.id },

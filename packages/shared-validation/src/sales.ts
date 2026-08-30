@@ -37,6 +37,12 @@ const saleItemInputSchema = z.object({
   unitPrice: nonNegativeMoneySchema,
   discountAmount: nonNegativeMoneySchema.default(0),
   taxAmount: nonNegativeMoneySchema.default(0),
+  /// Phase 8E: the exact physical units being sold. REQUIRED for a
+  /// serial-tracked variant (approved decision BD-13) and rejected for a
+  /// variant that is not serial-tracked - the server decides which,
+  /// because only it knows the product's tracking flag. The count must
+  /// equal `quantity`.
+  serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
 });
 
 const salePaymentInputSchema = z.object({
@@ -84,6 +90,13 @@ export const createSaleReturnSchema = z.object({
         saleItemId: z.string().uuid(),
         quantity: positiveQuantitySchema,
         condition: z.enum(['SELLABLE', 'DAMAGED']).default('SELLABLE'),
+        /// Phase 8E / BD-14: for a serial-tracked line the return must
+        /// name the EXACT physical units coming back - a partial return
+        /// of a multi-serial line is otherwise ambiguous about which unit
+        /// left the customer's hands. Required for serial-tracked lines
+        /// and rejected for others; the server decides which, from the
+        /// product's own tracking flag.
+        serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
       }),
     )
     .min(1)

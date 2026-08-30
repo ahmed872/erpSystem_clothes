@@ -29,18 +29,15 @@ import { computeWarrantyEndDate, resolveWarrantyDurationDays } from '../domain/r
  * time, never client-supplied. The warranty period starts when the
  * customer took the goods.
  *
- * KNOWN LIMITATION (Known Issue #38, deliberately NOT worked around):
- * Phase 5 `CreateSaleUseCase` calls `consumeVariant` WITHOUT serials, so
- * selling a serial-tracked variant marks no SerialNumber as SOLD and
- * records no SaleItem -> SerialNumber link anywhere. There is therefore
- * no stored fact saying which physical unit left on which sale line, and
- * this use-case CANNOT verify that the supplied serial is the one that
- * was actually sold on this line. The strongest check the current data
- * model supports is the variant match below. Requiring
- * `status = 'SOLD'` was considered and rejected: it would reject every
- * legitimate registration in the system, since no sale ever sets it.
- * Closing this needs the Sales integration explicitly deferred to
- * Phase 8B - it is not invented here.
+ * KNOWN ISSUE #47 IS CLOSED (Phase 8E). Sales now capture serial identity
+ * at creation - mandatory for a serial-tracked variant - and record it in
+ * the append-only `SaleItemSerial` link. This use-case therefore verifies
+ * the real fact rather than a proxy: the supplied serial must be one this
+ * SALE LINE actually sold.
+ *
+ * The old fallback (serial exists in the tenant and matches the variant)
+ * is no longer sufficient on its own and is no longer relied upon, but it
+ * is still applied as a defence-in-depth check before the link lookup.
  *
  * Duplicate protection is the (businessId, saleItemId, serialNumberId)
  * unique index - a DB-level guarantee, not an application pre-check
@@ -84,6 +81,21 @@ export class RegisterWarrantyUseCase {
           serialVariantId: serialNumber.variantId,
           saleItemVariantId: saleItem.variantId,
         });
+      }
+
+      // Known Issue #47 closure: the serial must be one this sale line
+      // actually sold. `SaleItemSerial` is append-only and written in the
+      // same transaction as the SALE movement that consumed the unit, so
+      // its absence means this unit genuinely did not leave on this line.
+      const soldOnThisLine = await tx.saleItemSerial.findFirst({
+        where: { businessId: actor.tenantId, saleItemId: saleItem.id, serialNumberId: serialNumber.id },
+        select: { id: true },
+      });
+      if (!soldOnThisLine) {
+        throw new ValidationFailedError(
+          'This serial number was not sold on this sale line - a warranty can only cover a unit the sale actually delivered',
+          { saleItemId: saleItem.id, serialNumberId: serialNumber.id },
+        );
       }
 
       const existing = await tx.warranty.findFirst({
