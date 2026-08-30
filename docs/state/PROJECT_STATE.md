@@ -409,7 +409,7 @@ Link *tables* rather than a `saleItemId` column on `SerialNumber`, deliberately:
 20. `20260830114626_sale_item_serials` — the `sale_item_serials` table with a tenant-scoped unique `(business_id, sale_item_id, serial_number_id)`; `serial_number_id` is `RESTRICT` so a unit with sale history can never be deleted.
 21. `20260830114700_sale_item_serials_rls` — RLS **and FORCE RLS** with the tenant-isolation policy.
 22. `20260830114800_sale_item_serials_grants` — **`SELECT, INSERT` only**. "This unit left on this sale line" is a permanent fact that stays true even after the unit is returned; the return is recorded by the serial's own status transition and the SaleReturn document, never by erasing the sale record.
-23. `20260830120xxx_sale_return_item_serials` + `20260830121000_sale_return_item_serials_rls_grants` — the return-direction mirror, same append-only posture, same RLS.
+23. `20260830115323_sale_return_item_serials` + `20260830121000_sale_return_item_serials_rls_grants` — the return-direction mirror, same append-only posture, same RLS.
 
 No grant was added to `serial_numbers`: it has carried `SELECT, INSERT, UPDATE` since Phase 3, and PostgreSQL requires exactly `UPDATE` for `SELECT … FOR UPDATE`, so the new row locking needed nothing.
 
@@ -993,7 +993,7 @@ Tests: `apps/api/test/promotions.e2e-spec.ts`.
 **`CreateSaleReturnUseCase`, `InventoryEngine`, `AccountingEngine` and every accounting domain file were NOT modified.** The only Phase 1-8C source touched outside wiring is `create-sale.use-case.ts` (the approved integration point) and the behaviour-preserving timezone extraction.
 
 ### Phase 8E Files Created
-Prisma migrations: `apps/api/prisma/migrations/20260830114626_sale_item_serials/`, `.../20260830114700_sale_item_serials_rls/`, `.../20260830114800_sale_item_serials_grants/`, `.../20260830120xxx_sale_return_item_serials/`, `.../20260830121000_sale_return_item_serials_rls_grants/`.
+Prisma migrations: `apps/api/prisma/migrations/20260830114626_sale_item_serials/`, `.../20260830114700_sale_item_serials_rls/`, `.../20260830114800_sale_item_serials_grants/`, `.../20260830115323_sale_return_item_serials/`, `.../20260830121000_sale_return_item_serials_rls_grants/`.
 
 Sales domain: `apps/api/src/modules/sales/domain/line-discount.ts` (the BD-12 cap).
 
