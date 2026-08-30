@@ -1,7 +1,20 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 8E — Sales Integration (**Complete, awaiting explicit approval to start Phase 8F**)
+Phase 8F — Full Verification (**Complete, awaiting explicit approval to start Phase 8G**)
+
+Phase 8F was a verification and hardening audit only — **no feature was added and no architecture changed**. It verified the whole Phase 8 surface (8A Warranty, 8B Loyalty Ledger, 8C Redemption, 8D Promotions, 8E Sales Integration) as one integrated system, using four independent methods: direct PostgreSQL structural queries, code inspection, `EXPLAIN` plans, and new end-to-end tests.
+
+**Structural results.** All 53 tenant-owned tables carry RLS **and** FORCE RLS with exactly one policy each, every one having both `USING` and `WITH CHECK`; every join table without a `business_id` carries a transitive policy. Only `permissions` (a global catalogue, `SELECT`-only) and `_prisma_migrations` (no grant at all) sit outside, both by design — **there is no unrestricted path**. No append-only table holds `UPDATE` or `DELETE`.
+
+**Architecture results, proven by exhaustive grep rather than assertion.** Zero writes to `stock_movements`/`stock_balances` outside `InventoryEngine`; zero writes to `journal_entries`/`journal_entry_lines` outside `AccountingEngine`; `customer_points` has five call sites and all five are `create`; `sale_promotion_applications`, `sale_item_serials` and `sale_return_item_serials` have **no** update or delete call anywhere; the reporting module contains zero write calls; `tx.sale.update` does not exist anywhere, and `tx.saleItem.update` exists exactly once, for `quantityReturned`. Every live-configuration read (`resolveActivePromotions`, both loyalty rates, warranty duration) occurs **only at creation time** — the return path reads none, which is the structural proof that historical sales never recompute.
+
+**Nine new verification tests** covered the gaps the per-phase suites left: a cross-tenant INSERT sweep over every Phase 8 table, trial-balance integrity after the fully integrated flow, calculation determinism under repetition, a consolidated atomicity sweep across every rejection path, and historical immunity to product price and cost changes.
+
+**Four documentation errors were found and corrected** (details in Known Issues). **No product defect was found.**
+
+### Phase 8E (previously completed)
+Phase 8E — Sales Integration (**Complete, release-gate approved**)
 
 Phase 8E closed the Phase 8 loop: the promotion, loyalty and sales paths were verified as an integrated whole, the BD-12 discount invariant was corrected, and **Known Issue #47 is CLOSED** — a sale now captures which physical serial it sold, and warranty registration verifies against that fact rather than a proxy.
 
@@ -41,7 +54,7 @@ Phase 8A — Warranty (**Complete, release-gate approved**)
 
 Phase 8A delivered the Warranty module ONLY, exactly as approved: warranty registration against a sold serial-tracked unit, a business-default duration with a per-registration override, a **snapshotted** duration/coverage window, an ACTIVE/EXPIRED/CLAIMED/VOID lifecycle, and OPEN→RESOLVED|REJECTED claims. **Record-keeping only** — `WarrantyModule` imports neither `InventoryEngineModule` nor `AccountingEngineModule`, so no warranty action can move stock, replace a unit, or post to the ledger; that is structural, not a convention. **No Loyalty. No Promotions. No Sales integration. No Accounting change. No Inventory change.** Phases 1-7 source is untouched apart from wiring the new module.
 
-One real gap in the existing system was found while implementing 8A and is recorded as **Known Issue #47** rather than worked around: Phase 5 sales record no `SaleItem → SerialNumber` link, so warranty registration can verify the variant but not that the supplied serial is the unit that actually left on that line.
+One real gap in the existing system was found while implementing 8A and was recorded as **Known Issue #47** rather than worked around: Phase 5 sales recorded no `SaleItem → SerialNumber` link, so warranty registration could verify the variant but not that the supplied serial was the unit that actually left on that line. **Phase 8E closed this** — see the Phase 8E section.
 
 ### Phase 7 (previously completed)
 Phase 7 — Reports & Dashboard (**Complete, release-gate approved**)
@@ -290,7 +303,7 @@ Deliberately out of Phase 8B scope (approved constraints, none of them worked ar
 
 Deliberately out of Phase 8A scope (approved constraints, none of them worked around):
 - **Loyalty** (`CustomerPoints`, earn/redeem/clawback) and **Promotions** — Phase 8B/8C onward, untouched.
-- **Sales integration** — `CreateSaleUseCase` was not modified; no warranty is auto-created at sale time and no serial is captured on a sale line (Known Issue #47).
+- **Sales integration** — `CreateSaleUseCase` was not modified *by 8A*; no warranty is auto-created at sale time, and at that time no serial was captured on a sale line (Known Issue #47, **since closed by Phase 8E** — serial capture now exists; warranty auto-creation at sale time still does not).
 - **Accounting** — no warranty provision/liability account, no posting of any kind. `AccountingEngineService` is not injected anywhere in the module.
 - **Inventory** — no replacement unit, no automatic stock adjustment, no serial status change. `InventoryEngineService` is not injected anywhere in the module.
 - No background job to expire warranties (expiry is derived on read instead).
@@ -587,7 +600,7 @@ None (still backend-only - unchanged from Phases 1-5; still flagging this for yo
 - **Tenant isolation (5)** — business B cannot read A's warranty by id (404), never sees A's rows in its own list, cannot claim/resolve/void/list-claims against A's warranty (404 on all four), and cannot register a warranty against A's sale line (404); finally **RLS is proven at the database layer**, not merely in application code: a raw query on the `erp_app` runtime connection with `app.current_tenant_id` set to B returns **zero rows** for A's warranty.
 - **Permissions (4)** — an unauthenticated caller gets 401 on both read and write routes; an `ACCOUNTANT` may list but is 403 on register, claim and void; a `SALES_EMPLOYEE` may list but is **403 on claim**; a `CASHIER` performs a genuine write (registers a real claim, 201) proving the POS-floor grant works, not just that a read succeeds.
 - **Listing (2)** — status/serial filters and pagination all reconcile, every row carries `effectiveStatus`, and an out-of-range `limit` is rejected 422.
-- **Known Issue #47 (1)** — asserts current behaviour explicitly (a sold serial-tracked variant's serials remain `IN_STOCK`) so the gap is **visible** and Phase 8B's Sales integration has a regression anchor showing exactly what changed.
+- **Known Issue #47 (1)** — asserted the then-current behaviour explicitly (a sold serial-tracked variant's serials remained `IN_STOCK`) so the gap was **visible** and the later Sales integration had a regression anchor. **This test no longer exists: Phase 8E replaced it with closure assertions** proving serials are now marked `SOLD` and linked to the sale line.
 - **Unit**: no new unit tests — the two domain helpers (`resolveWarrantyDurationDays`, `effectiveWarrantyStatus`/`isWarrantyCoverageActive`) are exercised end-to-end through both their success and failure paths, including the missing-configuration path, which is stronger than isolating them. Phase 1-7's 28 unit tests remain green.
 - Full regression after 8A: **306/306 e2e (34 files) + 28/28 unit**, zero regressions from Phases 1-7. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
 
@@ -647,6 +660,9 @@ None (still backend-only - unchanged from Phases 1-5; still flagging this for yo
 `warranty.e2e-spec.ts` (+1, #47 closure) — a warranty cannot be registered for a serial the sale line did not sell.
 
 - Full regression after 8E: **444/444 e2e (39 files) + 28/28 unit**, zero regressions. Build, `tsc --noEmit` and lint clean.
+
+**Phase 8F**: E2E: **9 new verification tests, 1 new file** (`phase8-verification.e2e-spec.ts`) — a cross-tenant INSERT sweep proving `WITH CHECK` rejects a forged row on every Phase 8 table (plus an explicit test that a cross-tenant `INSERT…SELECT` inserts *nothing*, because RLS filters the source rows too — a different but equally safe outcome, verified rather than assumed); a zero-row read sweep over ten tables both cross-tenant and with no tenant context; trial balance balanced after a promotion + loyalty + serial sale and its return, cross-checked by a query asserting every journal entry balances individually; determinism proven by computing the same promoted, discounted sale three times and by resolving overlapping promotions three times to the same winner; a consolidated atomicity sweep asserting **ten** table counts unchanged across seven rejection paths plus zero-value redemption; and historical immunity to `defaultCost`/`defaultSellingPrice` changes covering the sale, its COGS movements and its later return credit.
+- Full regression after 8F: **453/453 e2e (40 files) + 28/28 unit**, zero regressions. Build, `tsc --noEmit`, lint clean; both databases report "up to date" and `prisma migrate diff --exit-code` reports **no schema drift**.
 
 ## Security Review
 Everything from Phases 1-4 stands unchanged. Phase 5 additions:
@@ -835,7 +851,7 @@ New from Phase 7:
 
 New from Phase 8A:
 
-47. **Phase 5 sales record no `SaleItem → SerialNumber` link — so a warranty cannot be proven to cover the unit that was actually sold.** Found while implementing 8A, deliberately **not** worked around. `CreateSaleUseCase` calls `consumeVariant` **without** serials, so `consumeSerialsForSale` returns early: selling a serial-tracked variant marks no `SerialNumber` as `SOLD` and stores no link anywhere saying which physical unit left on which sale line. `RegisterWarrantyUseCase` therefore validates the strongest thing the current data model supports — the serial exists in the tenant and belongs to the **same variant** as the sale line — but cannot verify it is the unit that was sold. Requiring `status = 'SOLD'` was considered and **rejected**: no sale ever sets it, so that check would reject every legitimate registration in the system while appearing correct (the same failure shape as Known Issue #37's dead `STOCK_COUNT` value). Current behaviour is asserted by a test so the gap is visible and Phase 8B has a regression anchor. **Closing this requires the Sales integration explicitly deferred to Phase 8B** — capturing serials on a sale line — and was not invented here.
+47. **[CLOSED IN PHASE 8E]** **Phase 5 sales record no `SaleItem → SerialNumber` link — so a warranty cannot be proven to cover the unit that was actually sold.** *(Historical entry, describing the state from 8A until 8E closed it; see the closure note below and the Phase 8E section.)* Found while implementing 8A, deliberately **not** worked around. `CreateSaleUseCase` calls `consumeVariant` **without** serials, so `consumeSerialsForSale` returns early: selling a serial-tracked variant marks no `SerialNumber` as `SOLD` and stores no link anywhere saying which physical unit left on which sale line. `RegisterWarrantyUseCase` therefore validates the strongest thing the current data model supports — the serial exists in the tenant and belongs to the **same variant** as the sale line — but cannot verify it is the unit that was sold. Requiring `status = 'SOLD'` was considered and **rejected**: no sale ever sets it, so that check would reject every legitimate registration in the system while appearing correct (the same failure shape as Known Issue #37's dead `STOCK_COUNT` value). Current behaviour is asserted by a test so the gap is visible and Phase 8B has a regression anchor. **Closing this requires the Sales integration explicitly deferred to Phase 8B** — capturing serials on a sale line — and was not invented here.
 48. **No background expiry job** — nothing flips a stored `ACTIVE` warranty to `EXPIRED` when its period elapses. Expiry is derived on read as `effectiveStatus`, and both the stored and derived values are returned so the distinction is never hidden. Approved 8A scope adds no job runner. A consequence worth stating: a query filtering on the stored `status = 'ACTIVE'` will include elapsed warranties; callers must use `effectiveStatus`, which every read path returns.
 - **Consequence for reporting**: no `/reports/*` endpoint surfaces warranty data at all — Phase 7's layer was not extended, so there is no report where this stored-vs-derived distinction could be misread.
 49. **`durationDays` has no business maximum** — only the technical 36500-day (100-year) timestamp-overflow bound, enforced identically in the zod schema and the `warranties_duration_days_technical_bound` CHECK, and documented as technical in both. Phase 0 defines no maximum warranty length and inventing one was explicitly forbidden. If a business maximum is ever specified, it belongs as a `Setting`, not as a change to this bound.
@@ -883,6 +899,18 @@ New from Phase 8E:
 74. **A serial-tracked line cannot be sold in a UOM other than the base unit with fractional quantity** — the serial count must equal the quantity, which implies whole units. Not a new restriction (serials were always whole units) but now enforced at sale time rather than being silently skippable.
 75. **Warranties registered before Phase 8E have no `SaleItemSerial` link.** The verification is therefore effective for sales made from 8E onward; a historical sale's warranty is unaffected and is neither retro-validated nor invalidated.
 76. **Reporting still cannot break a discount down** into manual, promotional and loyalty components — `Sale.discountAmount` is a single figure and Phase 7 is read-only. Carried forward from 8D, unchanged.
+
+Found and corrected during the Phase 8F audit — **all four were DOCUMENTATION ERRORS in this file, not product defects**:
+
+77. **Known Issue #47's own entry read in the present tense** with no closure marker, while the "CLOSED" banner sat forty lines further down. A reader reaching the entry first would have concluded serial linkage was still missing. Marked `[CLOSED IN PHASE 8E]` on the entry itself.
+78. **The Phase 8A test list described a test that no longer exists** — the `#47` test that asserted a sold serial-tracked variant's serials remain `IN_STOCK`. Phase 8E replaced it with closure assertions. The entry now says so explicitly.
+79. **The Phase 8A narrative described the serial gap in the present tense**, without noting the later closure. Corrected to past tense with a pointer to Phase 8E.
+80. **The Phase 8A scope list stated "no serial is captured on a sale line"** as a standing fact rather than as 8A's own boundary. Corrected to scope it to 8A and note that serial capture now exists while warranty auto-creation at sale time still does not.
+
+Also verified during 8F and recorded as an **accepted scaling characteristic, not a defect**:
+
+81. **`resolveActivePromotions` reads all active promotions for the tenant on every sale**, bounded by the tenant's promotion count rather than by the sale's lines. It is an indexed, tenant-scoped read of a configuration table (not a ledger), and the engine needs all candidates to select the best-applicable one, so it is deliberately not paginated. `EXPLAIN` confirms an index scan with the tenant predicate leading. Narrowing it by the sale's target ids would be a speculative optimisation and was not made.
+82. **The derived loyalty balance is a `SUM` over the customer's whole ledger**, which grows with their event count. This is inherent to the approved append-only, no-stored-balance design; the `(business_id, customer_id)` index covers it and `EXPLAIN` confirms an index scan.
 
 ## Files Created
 Prisma migrations: `apps/api/prisma/migrations/20260829112729_sales_schema/`, `.../20260829112800_sales_rls/`, `.../20260829112900_sales_app_role_grants/`, `.../20260829130000_sales_lock_update_grant/`.
@@ -1006,6 +1034,12 @@ Tests: `apps/api/test/sales-integration-8e.e2e-spec.ts`.
 
 **`InventoryEngineService` and `AccountingEngineService` were not modified.** Every serial transition rides the existing `consumeVariant`/`applyMovement` path.
 
+### Phase 8F Files Created
+Tests: `apps/api/test/phase8-verification.e2e-spec.ts`.
+
+### Phase 8F Files Modified
+`docs/state/PROJECT_STATE.md` only — four stale entries corrected (see Known Issues). **No source file, schema, migration, permission or configuration was changed**: 8F was verification and documentation correction, nothing else.
+
 ## Next Phase
-**Phase 8F — Full Verification**: concurrency, idempotency, tenant isolation, permissions, historical integrity, accounting and regression across the completed Phase 8 surface. Not started.
-**8F will not start until you explicitly approve this Phase 8E report.**
+**Phase 8G — Release Gate**: complete verification, documentation, PROJECT_STATE update, known issues, final release-gate report. Not started.
+**8G will not start until you explicitly approve this Phase 8F report.**
