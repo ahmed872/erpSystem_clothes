@@ -1,7 +1,16 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 8B — Loyalty Ledger (**Complete, awaiting explicit approval to start Phase 8C**)
+Phase 8C — Loyalty Redemption (**Complete, awaiting explicit approval to start Phase 8D**)
+
+Phase 8C wired the complete loyalty sale lifecycle — **Sale → EARN / REDEEM → Return → CLAWBACK / RESTORATION** — into the existing transactional paths, and landed the mandated **BD-1 return-credit correction** it depends on. Redemption resolves server-side inside `CreateSaleUseCase`'s own transaction, becomes line discounts (never a payment tender), and participates in the Sale's idempotency. Nothing is committed without the sale: every rejection rolls back the whole transaction, proven by delta-count tests.
+
+**No Promotions, no PromotionEngine, no Warranty change, no Tax Engine, no loyalty expiry, no GL liability, no Phase 6 accounting redesign, no workaround for Known Issue #47.**
+
+**Three latent defects were found during 8C testing and fixed** (details in Known Issues #59–#61): two were reproduced on the pre-8C code and are therefore corrections, not regressions.
+
+### Phase 8B (previously completed)
+Phase 8B — Loyalty Ledger (**Complete, release-gate approved**)
 
 Phase 8B delivered the loyalty **ledger foundation ONLY**, exactly as approved: an append-only `CustomerPoints` table, a balance that is always `SUM(points)` derived on read, the BD-3 earning rule, permissions, and a manual adjustment endpoint. **No Redemption (8C). No Promotions (8D). No Sales integration (8E).** `CreateSaleUseCase` and `CreateSaleReturnUseCase` were not touched. **No GL change** — `LoyaltyModule` imports neither `InventoryEngineModule` nor `AccountingEngineModule`, so points cannot reach the ledger even by mistake, matching the approved decision that loyalty points are **not** a General Ledger liability in Phase 8. **No expiry and no scheduler.** Phases 1-8A source is untouched apart from wiring the new module.
 
@@ -154,8 +163,47 @@ All in one DB transaction - any failure anywhere rolls back everything, verified
 
 **Manual adjustment** (`POST /sales/customers/:id/points/adjust`) is the one human-entered write and the only ledger writer that exists in 8B — EARN, REDEEM and RETURN_CLAWBACK rows come from a Sale or SaleReturn and are 8C/8E's approved scope. Its `idempotencyKey` and `reason` are both **required** (unlike Sales' optional keys): there is no source document behind a manual adjustment, so a double submission would otherwise be indistinguishable from two deliberate identical grants, and a point grant with no stated cause is an entry an audit cannot explain later. The DB-level `(business_id, idempotency_key)` unique index is the real guarantee; `assertIdempotentReplayMatches` rejects the same key reused with a **different** payload rather than returning a stale row.
 
+### Phase 8C — Loyalty Redemption, Earning Integration, and the BD-1 Correction
+
+**One definition of return credit, three consumers.** `sales/domain/return-credit.ts` is the single source for "what a returned unit is worth", used by the refund, the loyalty clawback and the redemption restoration alike. Phase 5 credited `quantity × unitPrice` and ignored `discountAmount` entirely, so a Buy-2-Get-1 line the customer paid 200 for refunded 300. The corrected form uses the line's **historical merchandise value** (`round4(unitPrice × quantity) − discountAmount`, tax excluded — the stored `lineTotal` *includes* tax and must never be used) apportioned by **cumulative** returned quantity:
+
+```
+cumulativeCredit(q) = round4(merchandiseValue × q / quantity)
+thisReturnCredit    = cumulativeCredit(after) − cumulativeCredit(before)
+```
+
+Cumulative deltas rather than per-return proportions, because the naive form drifts: three single-unit returns of that same line would each refund `round4(200/3) = 66.6667`, totalling **200.0001**. The delta form yields `66.6667 + 66.6666 + 66.6667 = 200.0000` exactly, and the test asserts that exact sequence.
+
+**Monetary rounding policy (BD-6), the first in the codebase.** `round4` — 4 dp HALF-UP — applied at exactly three points: the redemption value, each line's allocated share, and each line's cumulative return credit. Introduced at the scale the columns already store, so no pre-existing value changes. HALF-UP for money, never floor; floor remains the rule for *points* (BD-3), because a customer should never be credited a point they have not earned, but flooring a refund would shortchange them.
+
+**Redemption.** `V = round4(K × ρ)` where `ρ` is **currency per point** (`Setting['loyalty.currency_per_point']`), deliberately not named as the mirror of the earning rate since the two are independent. Bounded by `V ≤ Σ eligible` (BD-7: no other cap, no minimum cash requirement, no cap Setting — redemption may take merchandise net revenue to **zero**). Allocated across lines by **largest-remainder with a per-line cap**, ordered by `variantId` (the same canonical order used for lock acquisition; `SaleItem.id` does not exist yet at allocation time). Sums exactly to `V` and never breaches a line's eligible value — both by construction, since `V ≤ T` makes each exact share at most its own cap and the remaining capacity always covers the outstanding shortfall. The result is folded into `SaleItem.discountAmount`, so **`Sale.discountAmount = SUM(SaleItem.discountAmount)` still holds** and Phase 6's `netRevenue` keeps working untouched.
+
+**Earning is computed after redemption** (BD-3): `B = subtotal − discountAmount` (now including the redemption), `P = floor(B × r)`. Verified by test with tax present, proving tax is excluded and the redemption reduces the basis.
+
+**Clawback (§6.2) and restoration (BD-8), both cumulative.** Driven by the *same* return credit `C`:
+
+```
+retained     = max(B − C, 0);  totalOwed = P − floor(retained × r)
+cumRestored  = round4(K × C / B)        (points and value alike)
+```
+
+each return recording the delta from what is already recorded. On the worked example (3 units, 100 each, 100 discount, 5000 points redeemed at 0.01, earning rate 2), three single-unit returns produce clawbacks of **−167, −167, −166 = −500 exactly** and restorations of **1666.666, 1666.668, 1666.666 = 5000 exactly**. The naive per-return form would restore 5000.0001. Both sequences are asserted literally.
+
+**Negative balances remain impossible.** The check runs on the balance the return actually *leaves behind* — after both the restoration and the clawback — because they are two effects of one atomic return; checking the clawback alone would reject returns that are in fact funded by their own restoration (tested both ways). A failure rejects the **entire** return: no refund, no movement, no journal entry, no ledger row.
+
+**Historical integrity.** Every input is a snapshot — the EARN/REDEEM rows' own `points`/`basisAmount`/`rateSnapshot` plus the Sale's own `subtotal`/`discountAmount`. A test changes **both** business rates dramatically before returning and confirms the clawback and restoration still use the original 2 and 0.01. Original rows are re-read after the return and confirmed byte-for-byte unchanged.
+
+**Canonical lock order is now Customer → Sale → StockBalance.** `CreateSaleReturnUseCase` takes the customer lock *before* `lockSale`, because `CreateSaleUseCase` locks the customer before its own stock locks — the opposite order would let a concurrent sale and return deadlock on customer-vs-stock. A `Promise.all` sale-vs-return race test exercises it.
+
 ## Pending Features
-Everything from Phase 8C onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+Everything from Phase 8D onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+
+Deliberately out of Phase 8C scope (approved constraints, none of them worked around):
+- **Promotions / PromotionEngine** (8D) — no `Promotion` model, no `SalePromotionApplication`.
+- **Warranty, Tax Engine, loyalty expiry, GL loyalty liability, Phase 6 accounting redesign, bundle promotion behaviour** — all untouched.
+- **Known Issue #47** — no serial capture on sale lines and no workaround; still an 8E dependency.
+- No redemption **endpoint**: redemption is a `redeemPoints` field on `POST /sales`, so it is atomic with the sale and inside the sale's idempotency by construction.
+- No new permission — redemption at the till is gated by the existing `sales.create`.
 
 Deliberately out of Phase 8B scope (approved constraints, none of them worked around):
 - **Redemption** (8C) — no redemption endpoint, no conversion rate, no proportional BD-2 allocation. `REDEEM` rows are unreachable in 8B.
@@ -237,6 +285,8 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 
 2 new global permission codes: `loyalty.view`, `loyalty.adjust` (**102 permissions total now**).
 
+**Phase 8C**: no new model and no new table. One new `CustomerPointsType` value (`REDEMPTION_RESTORATION`), one extended CHECK, one partial unique index. **No column was added to `Sale`, `SaleItem` or `SaleReturn`** — restoration is driven off the sale-level ratio `C/B` precisely so no per-line loyalty split needs storing, and `redeemPoints` is recorded by the REDEEM ledger row rather than duplicated onto the Sale. No new permission code (102 total, unchanged).
+
 ## Migrations
 **Phase 5**:
 1. `20260829112729_sales_schema` - the 8 tables/5 enums above, plus hand-written `CHECK` constraints: non-zero `amount` on `customer_transactions`; `closed_at >= opened_at` on `shifts`; non-negative subtotal/discount/tax/total on `sales`; positive quantity, non-negative price/discount/tax/line-total/quantity-returned, and **`quantity_returned <= quantity`** on `sale_items`; positive quantity + non-negative price on `sale_return_items`; positive `amount` on `sale_payments`. Plus a **partial unique index** `shifts_one_open_per_user (business_id, opened_by) WHERE status = 'OPEN'` - the database-level guarantee behind the "one open shift per user" invariant, not just an application pre-check.
@@ -262,6 +312,10 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 13. `20260829220900_loyalty_ledger_rls` — RLS **and FORCE RLS** with the `customer_points_tenant_isolation` policy (`USING` + `WITH CHECK`), identical default-deny pattern to every prior phase.
 14. `20260829221000_loyalty_ledger_app_role_grants` — `erp_app` gets **`SELECT, INSERT` only**: no UPDATE, no DELETE, at all. This is the strictest grant in the system alongside Phase 6's `journal_entries`, and it is what makes append-only a **database** guarantee rather than an application convention. No locking-only UPDATE grant was needed either (the Phase 5 `sales` lesson applied up front for the third phase running): the serialization point for a balance is the **`customers`** row — which already carries the UPDATE grant from Phase 5 — because a row lock on existing ledger rows cannot block the INSERT of a new one, which is exactly the race that matters.
 
+**Phase 8C**:
+15. `20260829232515_loyalty_redemption_restoration` — adds the `REDEMPTION_RESTORATION` enum value.
+16. `20260829232600_loyalty_redemption_constraints` — **deliberately a separate migration**: PostgreSQL forbids *using* a newly added enum value in the transaction that added it, and Prisma runs each migration file in its own transaction, so splitting them is what makes the CHECK below legal. Extends `customer_points_sign_matches_type` with `REDEMPTION_RESTORATION AND points > 0` (the new value would otherwise be the only type whose sign the database did not police), and adds the partial unique index **`customer_points_one_event_per_source`** on `(business_id, reference_type, reference_id, type) WHERE reference_type IS NOT NULL`. That index is the real duplicate-event backstop for machine-generated rows: `Sale.idempotencyKey` is OPTIONAL, so a sale created without one produces ledger rows with a NULL key, and PostgreSQL permits unlimited NULLs in a UNIQUE index. It guarantees **one Sale → at most one EARN and one REDEEM; one SaleReturn → at most one RETURN_CLAWBACK and one REDEMPTION_RESTORATION**, the same role `journal_entries (business_id, source_type, source_id)` plays for double-posting.
+
 Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate status`: both "up to date", **22 migrations total** across all six phases). Verified directly via SQL, not just assumed:
 - `pg_class.relrowsecurity`/`relforcerowsecurity` = true on all 5 new Phase 6 tables.
 - `information_schema.role_table_grants` for `erp_app` matches the design exactly: `accounts`/`fiscal_periods` → `INSERT,SELECT,UPDATE`; `accounting_mapping_rules`/`journal_entries`/`journal_entry_lines` → `INSERT,SELECT`.
@@ -283,6 +337,12 @@ Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate stat
 - `information_schema.role_table_grants` for `erp_app` = exactly `INSERT, SELECT` — **no UPDATE, no DELETE** (also asserted by an e2e test, and by a direct-connection UPDATE/DELETE rejection test that confirms the row is unchanged afterwards).
 - All 4 hand-written CHECK constraints present in `pg_constraint` on both databases.
 - Both databases re-seeded: **102 permissions** each, loyalty codes backfilled onto existing `BUSINESS_OWNER` roles.
+
+**Phase 8C migration verification** — direct SQL against **both** `erp_dev` and `erp_test` (**31 migrations total**, none pending on either):
+- `pg_enum` lists all five `CustomerPointsType` values including `REDEMPTION_RESTORATION`.
+- `customer_points_one_event_per_source` present in `pg_indexes`.
+- All four CHECK constraints present, with the sign constraint covering the new value.
+- Grants unchanged and still exactly `INSERT, SELECT` — **8C added no privilege**; RLS and FORCE RLS both still `true`.
 
 ## API Endpoints
 All Phase 5 endpoints under `/api/v1/sales`, same `{ data }` / `{ error }` envelope (list endpoints also return `pagination`).
@@ -368,6 +428,8 @@ The parent customer is always resolved inside the caller's tenant first, so anot
 
 Role-template grants: `BUSINESS_OWNER` both. `ACCOUNTANT` **both** — a point correction is a value decision of the same kind as the customer-ledger corrections that role already owns. `BRANCH_MANAGER`, `CASHIER` and `SALES_EMPLOYEE` get **`loyalty.view` only** — a cashier must be able to tell a customer their balance at the till but must not be able to hand out points by hand. `INVENTORY_MANAGER` gets neither.
 
+**Phase 8C added no endpoint and no permission.** Redemption is a `redeemPoints` field on the existing `POST /sales`, which is what makes it atomic with sale creation and part of the sale's own idempotency — a separate redemption endpoint would have required a committed redemption before the sale existed, which the approved design forbids. Clawback and restoration are automatic consequences of the existing `POST /sales/:id/returns`. Redemption at the till is gated by the existing `sales.create`; no `loyalty.*` permission is required to redeem, and `loyalty.adjust` remains Owner/Accountant-only.
+
 ## Screens
 None (still backend-only - unchanged from Phases 1-5; still flagging this for your review).
 
@@ -417,6 +479,20 @@ None (still backend-only - unchanged from Phases 1-5; still flagging this for yo
 - **Unit**: no new unit tests — `computePointsEarned` and `resolveLoyaltyEarnRate` are exercised directly inside the e2e suite against a real `Setting` row and a real ledger row, covering both the success and the no-programme paths, which is stronger than isolating them. Phase 1-8A's 28 unit tests remain green.
 - Full regression after 8B: **344/344 e2e (35 files) + 28/28 unit**, zero regressions from Phases 1-8A. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
 
+**Phase 8C**: E2E: **40 new tests, 2 new files**, real NestJS app + real PostgreSQL, no mocks.
+
+`sales-return-credit.e2e-spec.ts` (11) — **all six mandated BD-1 regressions**: a manual discount, a percentage-style discount, a fixed discount and Buy-X-Get-Y each proven un-over-refundable (the BXGY case refunds exactly 200, never 300); sequential partial returns asserted to produce the exact `66.6667 / 66.6666 / 66.6667` sequence summing to exactly 200, with a fourth return still bounded 409; concurrent returns bounded by the historical line value. Plus: tax proven excluded (a line whose stored `lineTotal` is 180 credits 150); an undiscounted line unchanged from Phase 5 behaviour; integer-quantity subtotals bit-identical after the rounding alignment; a fractional-quantity line (2.5 × 3.3333) returning exactly its merchandise value across three partial returns; and the **GL revenue reversal proven to use the corrected 200, not the old gross 300**.
+
+`loyalty-redemption.e2e-spec.ts` (29) —
+- **Redemption calculation, rounding, snapshot (4)** — rate conversion folded into line discounts with `Sale.discountAmount = SUM(SaleItem.discountAmount)` asserted; 4 dp HALF-UP rounding; a three-line allocation summing to exactly 100.00 with every line inside its own cap; a later rate change proven not to alter an existing REDEEM row or its sale.
+- **Earning after redemption (3)** — earns on the NET amount after redemption and excluding tax (`floor(250 × 2) = 500` on a 300-gross sale with 50 redeemed and 10 tax); floor proven against round-up (`99 × 0.5 → 49`) with **no row at all** when the result is zero; a business with no earning rate still sells, earning nothing.
+- **Rejections, each with ZERO TRACE (6)** — zero-value redemption **422**; insufficient balance **409**; redemption with no configured rate **422**; redemption on a walk-in **422**; redemption exceeding merchandise value **422**. Each asserts sale, movement, payment, journal-entry, ledger-row and customer-transaction counts are all unchanged. Plus 100% redemption to zero merchandise posting a **balanced** entry.
+- **Concurrency and idempotency (4)** — two concurrent redemptions resolve to exactly one 201 and one 409 with one REDEEM row and a non-negative balance; an idempotent replay returns the same sale with **no second REDEEM or EARN row**; the same key with a different `redeemPoints` is rejected 409; the partial unique index proven to reject a second EARN for one sale at the database layer.
+- **Clawback and restoration (7)** — a full return claws back exactly −500 and restores exactly 5000; **sequential partial returns asserted to the literal sequences `[-167, -167, -166]` and `[1666.666, 1666.668, 1666.666]`**, summing to exactly −500 and 5000; original EARN/REDEEM rows re-read and confirmed unchanged; **both business rates changed dramatically before the return** and the original snapshots still used; a clawback that would go negative rejecting the **entire** return with every count unchanged; a return whose own restoration funds its clawback allowed; a `Promise.all` sale-vs-return race completing with no deadlock.
+- **Accounting untouched (2)** — no loyalty account, mapping or journal line exists anywhere; a redeemed sale posts revenue **net** of the redemption (250 on a 300 sale) and balances.
+- **Tenant isolation and permissions (3)** — business B cannot redeem business A's customer's points (404, balance untouched); a CASHIER can redeem at the till through `sales.create` alone yet still cannot adjust points by hand (403); no customer anywhere holds a negative derived balance.
+- Full regression after 8C: **384/384 e2e (37 files) + 28/28 unit**, zero regressions from Phases 1-8B. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
+
 ## Security Review
 Everything from Phases 1-4 stands unchanged. Phase 5 additions:
 - Every sales-mutating endpoint requires its own specific permission (11 new codes) rather than one blanket `sales.manage` - verified by test at two privilege levels: a Cashier (the intended POS-floor role) allowed to open a shift, sell, and return, but rejected from an out-of-template action; a role with zero sales permissions rejected from every sales route entirely.
@@ -441,6 +517,12 @@ Phase 8B additions:
 - `customer_points` has **no UPDATE and no DELETE** grant for `erp_app` — the strictest grant in the system alongside `journal_entries` — verified both by reading `information_schema` and by a direct-connection UPDATE/DELETE rejection test that re-reads the row afterwards to confirm it is unchanged.
 - RLS **and FORCE RLS** proven at the database layer: a raw read on the restricted connection with another tenant's `app.current_tenant_id` returns zero rows, an unfiltered read with no tenant context returns nothing, and a cross-tenant INSERT is refused by `WITH CHECK`.
 - The manual adjustment endpoint requires **both** an idempotency key and a stated reason, so the one write with no source document behind it cannot be silently double-submitted and cannot produce an entry an audit is unable to explain.
+
+Phase 8C additions:
+- **Redemption adds no attack surface and no permission**: it is a field on an endpoint the caller already needs `sales.create` for, and every value that matters is resolved server-side. The client supplies only how many points to spend; the rate, the monetary value, the per-line allocation and the resulting discounts are all computed inside the transaction and can never be supplied or influenced by the request.
+- The **idempotency fingerprint hashes the client request only** — never the server-resolved redemption value or the allocated line discounts. A stored sale's line `discountAmount` now includes the server's own allocation, so the fingerprint compares the client's discount at sale level (exactly reconstructible as `Sale.discountAmount − REDEEM.basisAmount`) rather than per line.
+- **8C added no database privilege at all.** `customer_points` grants remain exactly `INSERT, SELECT`; RLS and FORCE RLS unchanged. Cross-tenant redemption is refused at the customer lookup (404) and would be refused by RLS regardless.
+- Points remain outside the GL entirely — asserted by a test that finds no loyalty-named account and no loyalty-described journal line anywhere.
 
 ## Business Logic Review
 - Every sales use case validates its references (warehouse/customer/variant belong to the caller's tenant, customer is active, shift matches the warehouse) before writing anything, returning 404/422/409 rather than silently creating cross-tenant, invalid, or shift-less data.
@@ -502,6 +584,14 @@ Phase 8B additions:
 - **Earned points are immune to configuration change.** `basisAmount` and `rateSnapshot` freeze the BD-3 arithmetic onto the row, so a later rate change cannot alter, re-derive or invalidate points already earned — proven by moving the business rate to 99 after the fact and confirming the row still reproduces its own value from its own snapshot with no current configuration consulted. `customer_points_snapshot_complete` makes that pair all-or-nothing at the database layer.
 - **Sign integrity is structural**: `customer_points_sign_matches_type` makes a REDEEM that raises a balance, or an EARN that lowers one, unrepresentable — so a future code path cannot corrupt the meaning of the ledger even if its application logic is wrong.
 - **Concurrency**: the balance is re-read under a `SELECT … FOR UPDATE` lock on the **Customer** row before any deduction, so the overdraw race is closed at the serialization point that actually governs new inserts — proven by a real concurrent-HTTP test, not asserted from code reading.
+
+Phase 8C additions:
+- **One definition of return credit**, shared by the refund, the clawback and the restoration, so no two can disagree about how much of a sale came back. The old `quantity × unitPrice` form is gone.
+- **Every loyalty figure is a cumulative delta**, never a per-return proportion, so any sequence of partial returns telescopes to exactly the original amount. Asserted on the literal sequences, not merely on the totals.
+- **Snapshots are the only inputs.** Clawback and restoration read the EARN/REDEEM rows' own `points`/`basisAmount`/`rateSnapshot` and the Sale's own immutable `subtotal`/`discountAmount`; current loyalty settings are never consulted. Proven by changing both rates dramatically before returning.
+- **Nothing historical is mutated.** Restoration and clawback are new compensating INSERTs; the original rows are re-read after the return and confirmed byte-for-byte unchanged. `erp_app` still has no UPDATE or DELETE on `customer_points`, so no other outcome is even possible.
+- **Sale immutability is preserved**: `CreateSaleUseCase` still only ever inserts, and the BD-1 correction changes only how a return's credit is *computed* — no existing `Sale`, `SaleItem`, `StockMovement` or `JournalEntry` row is rewritten, and no posted accounting entry is amended.
+- **The redemption is recorded once and only once.** `customer_points_one_event_per_source` makes one EARN and one REDEEM per Sale a database guarantee, independent of the Sale's optional idempotency key.
 
 ## Accounting Engine & Integration Review (Phase 6)
 
@@ -581,6 +671,19 @@ New from Phase 8B:
 57. **A manual `ADJUSTMENT` has no `basisAmount`/`rateSnapshot`** — deliberately: a human correction is not derived from a merchandise amount at a rate, and populating those fields would make the row look like a computed `EARN` it is not. The all-or-nothing CHECK accepts both-null.
 58. **The earning rate is business-wide** — there is no per-customer tier, per-branch rate, or category-specific multiplier. Customer-specific pricing/tiers are explicitly deferred by the approved decisions.
 
+New from Phase 8C — **three latent defects found by 8C's own tests and FIXED**, all three verified as pre-existing rather than introduced:
+
+59. **A sub-scale residual amount produced a journal line that stored as `0.0000` and crashed the sale (FIXED).** `buildSaleJournalLines` tested `.greaterThan(0)` at full Decimal precision but writes to `Decimal(18,4)`. A remainder below half a ten-thousandth — a POS client tendering a float-computed total, say `7 × 13.37` — passed the test, stored as zero, violated `journal_entry_lines_debit_xor_credit`, and failed the whole sale with a 500. **Reproduced identically on the pre-8C code**, so this is a correction, not a regression. Fixed by rounding every journal-line amount to the monetary scale and deriving `remaining` from the ROUNDED tenders, so `SUM(tenders) + remaining = totalAmount` still holds exactly at the stored scale and the entry stays balanced by construction. The same fix was applied to `buildSaleReturnJournalLines`, where `returnInCost = quantity × unitCostAtMovement` multiplies two 4-dp values and can carry 8 dp.
+60. **A customer sale totalling exactly zero crashed on the `customer_transactions` non-zero CHECK (FIXED).** Reachable before 8C via a 100% manual discount; BD-7's approval of full redemption makes it routine. Fixed by skipping the zero-amount `CustomerTransaction` — the customer owes nothing and the ledger correctly records nothing — mirroring the guard `CreateSaleReturnUseCase` already had.
+61. **`accounting-concurrency.e2e-spec.ts` asserted a timing-dependent HTTP status split (FIXED).** It required exactly one 201 and one failure from two concurrent same-key sales, but **both interleavings are correct**: a true race resolved by the unique constraint, or a second request whose idempotency pre-check runs after the first commits and correctly replays. Measured failing roughly **one run in three on the pre-8C baseline**. Rewritten to assert the invariant it exists for — exactly one Sale carries the key, every 201 refers to that same Sale (a second 201 with a different id would be a real duplicate-creation bug), exactly one JournalEntry — which is strictly stronger than the old assertion, then verified stable over six consecutive runs.
+
+Also new from Phase 8C:
+
+62. **The idempotency fingerprint compares the client's discount at SALE level, not per line.** A stored line's `discountAmount` now includes the server's redemption allocation, and the allocation is one-way, so the per-line client split is not reconstructible while the total is (`Sale.discountAmount − REDEEM.basisAmount`). A replay changing any line's variant, quantity, price or tax, the redeemed points, or the total discount is still rejected; the one thing that would pass is redistributing an identical total discount across identical lines, which changes no monetary outcome of the sale.
+63. **A bundle line's loyalty discount can never be clawed back or restored**, because bundle lines cannot be returned at all (Known Issue #26). Pre-existing consequence, now with a loyalty dimension.
+64. **`REDEMPTION_RESTORATION` rows carry a `basisAmount` that is itself a cumulative delta**, so the values across a sale's returns sum exactly to the original redemption value. The points are the authoritative quantity; the monetary field is descriptive.
+65. **Redemption is not available on walk-in sales** — points belong to a customer, and `CustomerPoints.customerId` is non-nullable. Rejected 422 rather than silently ignored.
+
 ## Files Created
 Prisma migrations: `apps/api/prisma/migrations/20260829112729_sales_schema/`, `.../20260829112800_sales_rls/`, `.../20260829112900_sales_app_role_grants/`, `.../20260829130000_sales_lock_update_grant/`.
 
@@ -657,6 +760,22 @@ Tests: `apps/api/test/loyalty-ledger.e2e-spec.ts`.
 
 **No Phase 1-8A business logic was modified.** The only changes outside the new module are those four wiring/registration touches — no Sales, Inventory, Accounting, Reporting or Warranty use-case was edited, and `LoyaltyModule`'s dependency graph structurally excludes both engines.
 
+### Phase 8C Files Created
+Prisma migrations: `apps/api/prisma/migrations/20260829232515_loyalty_redemption_restoration/`, `.../20260829232600_loyalty_redemption_constraints/`.
+
+Shared common: `apps/api/src/common/domain/money.ts` (`round4` HALF-UP, `floor4`, `MONEY_SCALE`, `MONEY_STEP` — the codebase's first rounding policy).
+
+Sales domain: `apps/api/src/modules/sales/domain/return-credit.ts` (the single BD-1 definition).
+
+Loyalty domain: `apps/api/src/modules/loyalty/domain/loyalty-redemption.ts` (rate, value, capped largest-remainder allocation), `.../loyalty-returns.ts` (cumulative clawback and restoration).
+
+Tests: `apps/api/test/sales-return-credit.e2e-spec.ts`, `apps/api/test/loyalty-redemption.e2e-spec.ts`.
+
+### Phase 8C Files Modified
+`apps/api/prisma/schema.prisma` (one enum value), `packages/shared-validation/src/sales.ts` (`redeemPoints`), `apps/api/src/modules/sales/application/sales/create-sale.use-case.ts` (customer lock, subtotal alignment, redemption resolution/allocation, REDEEM + EARN rows, fingerprint, zero-total guard), `apps/api/src/modules/sales/application/returns/create-sale-return.use-case.ts` (lock order, BD-1 credit, restoration, clawback, net balance assertion), `apps/api/src/modules/accounting/domain/sale-journal-lines.ts` and `.../sale-return-journal-lines.ts` (monetary-scale rounding — Known Issue #59), `apps/api/test/accounting-concurrency.e2e-spec.ts` (Known Issue #61), `docs/state/PROJECT_STATE.md`.
+
+**No new table, no new column, no new permission, no new database privilege.** The two accounting-domain files were touched only to make them respect the scale of the columns they write to — not a Phase 6 redesign, and required by the defect in #59.
+
 ## Next Phase
-**Phase 8C — Loyalty Redemption**: redemption, locking, idempotency, concurrency, sale integration, return clawback, tests. None of it has been started — there is no redemption endpoint, no conversion-rate setting, no BD-2 allocation code, no §6.2 clawback implementation, and no modification to `CreateSaleUseCase` or `CreateSaleReturnUseCase` anywhere in the tree. Known Issue #47 (serial capture in Sales) remains an accepted cross-phase dependency for **8E** and must not be worked around in 8C.
-**8C will not start until you explicitly approve this Phase 8B report.**
+**Phase 8D — Promotions**: `Promotion` model, rules, eligibility, calculation, best-applicable selection, validity dates, permissions, tests. Nothing started — no `Promotion` or `SalePromotionApplication` model exists, and `CreateSaleUseCase` resolves no promotion. Known Issue #47 (serial capture in Sales) remains an accepted cross-phase dependency for **8E** and must not be worked around in 8D.
+**8D will not start until you explicitly approve this Phase 8C report.**

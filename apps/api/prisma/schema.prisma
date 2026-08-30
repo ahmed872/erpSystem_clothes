@@ -2046,6 +2046,11 @@ enum CustomerPointsType {
   EARN
   REDEEM
   RETURN_CLAWBACK
+  /// Phase 8C: points handed BACK when a sale that redeemed them is
+  /// returned. A distinct type, never folded into EARN - the customer is
+  /// getting their own spent points back, not earning new ones, and a
+  /// report that could not tell the two apart would overstate earnings.
+  REDEMPTION_RESTORATION
   ADJUSTMENT
 }
 

@@ -41,22 +41,34 @@ describe('Accounting: concurrency, idempotency, and period controls (e2e, real P
       request(app.getHttpServer()).post('/api/v1/sales').set('Authorization', auth()).send(body),
       request(app.getHttpServer()).post('/api/v1/sales').set('Authorization', auth()).send(body),
     ]);
-    // TRUE concurrency (both requests start before either commits): the
-    // application-level idempotency pre-check cannot see the other's
-    // still-uncommitted row, so exactly ONE request wins the DB's unique
-    // constraint and the other fails (mapped to a non-201 response) -
-    // the exact same shape Phase 5's own "DUPLICATE IDEMPOTENCY"
-    // concurrency test already proved for Sale itself; this test proves
-    // it extends to the accounting posting too.
+    // Two interleavings are BOTH correct here, and which one occurs is a
+    // genuine race the test must not pin down:
+    //   (a) both requests start before either commits - the idempotency
+    //       pre-check sees nothing, both attempt the INSERT, and the DB's
+    //       unique constraint lets exactly one through (1x201 + 1 failure);
+    //   (b) the second request's pre-check runs after the first commits -
+    //       it finds the existing Sale and returns it as an idempotent
+    //       replay (2x201, the SAME sale id).
+    // Asserting a specific status split made this test flaky: it was
+    // observed failing roughly one run in three on the pre-Phase-8C code
+    // as well, so the flakiness is inherent to the assertion, not to any
+    // implementation change.
+    //
+    // What must hold in BOTH interleavings is the actual invariant this
+    // test exists for, and it is asserted unconditionally below: exactly
+    // ONE Sale carries the key, every 201 refers to that same Sale (a
+    // second 201 with a DIFFERENT id would be a real duplicate-creation
+    // bug, not a replay), and exactly ONE JournalEntry was posted.
     const succeeded = results.filter((r) => r.status === 201);
-    const failed = results.filter((r) => r.status !== 201);
-    expect(succeeded.length).toBe(1);
-    expect(failed.length).toBe(1);
+    expect(succeeded.length).toBeGreaterThanOrEqual(1);
 
-    const saleId = succeeded[0].body.data.id;
     const salesWithKey = await admin.sale.findMany({ where: { businessId: biz.businessId, idempotencyKey } });
     expect(salesWithKey.length).toBe(1);
-    expect(salesWithKey[0].id).toBe(saleId);
+
+    const saleId = salesWithKey[0].id;
+    for (const r of succeeded) {
+      expect(r.body.data.id).toBe(saleId);
+    }
 
     const entries = await admin.journalEntry.findMany({ where: { businessId: biz.businessId, sourceType: 'Sale', sourceId: saleId } });
     expect(entries.length).toBe(1);

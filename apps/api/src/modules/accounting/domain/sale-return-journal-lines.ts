@@ -2,6 +2,7 @@ import { AccountingMappingKey, Prisma } from '@prisma/client';
 import { TenantTx } from '../../../common/prisma/prisma.service';
 import { PostEntryLineInput } from '../../../engines/accounting/accounting-engine.service';
 import { resolveMappedAccounts } from './resolve-mapped-account';
+import { round4 } from '../../../common/domain/money';
 
 export interface SaleReturnJournalInput {
   customerId: string | null;
@@ -41,26 +42,35 @@ export interface SaleReturnJournalInput {
  * but does NOT reduce Sales Revenue in the GL.
  */
 export async function buildSaleReturnJournalLines(tx: TenantTx, businessId: string, input: SaleReturnJournalInput): Promise<PostEntryLineInput[]> {
+  // Rounded to the monetary scale before being tested or posted - see
+  // buildSaleJournalLines for why a sub-scale residual would otherwise
+  // store as 0.0000 and violate the double-entry CHECK. `returnInCost`
+  // in particular is `quantity x unitCostAtMovement`, two 4-dp values
+  // whose product can carry 8 dp.
+  const returnInCost = round4(input.returnInCost);
+  const damageWriteOff = round4(input.damageWriteOff);
+  const totalCredit = round4(input.totalCredit);
+
   const neededKeys: AccountingMappingKey[] = [];
-  if (input.returnInCost.greaterThan(0)) neededKeys.push('INVENTORY_ASSET', 'COGS');
-  if (input.damageWriteOff.greaterThan(0)) neededKeys.push('INVENTORY_SHRINKAGE');
-  const postRevenueReversal = Boolean(input.customerId) && input.totalCredit.greaterThan(0);
+  if (returnInCost.greaterThan(0)) neededKeys.push('INVENTORY_ASSET', 'COGS');
+  if (damageWriteOff.greaterThan(0)) neededKeys.push('INVENTORY_SHRINKAGE');
+  const postRevenueReversal = Boolean(input.customerId) && totalCredit.greaterThan(0);
   if (postRevenueReversal) neededKeys.push('SALES_REVENUE', 'ACCOUNTS_RECEIVABLE');
 
   const accounts = await resolveMappedAccounts(tx, businessId, neededKeys);
   const lines: PostEntryLineInput[] = [];
 
-  if (input.returnInCost.greaterThan(0)) {
-    lines.push({ accountId: accounts.get('INVENTORY_ASSET')!, debit: input.returnInCost, description: 'Returned goods back into inventory' });
-    lines.push({ accountId: accounts.get('COGS')!, credit: input.returnInCost, description: 'Reverse cost of goods sold' });
+  if (returnInCost.greaterThan(0)) {
+    lines.push({ accountId: accounts.get('INVENTORY_ASSET')!, debit: returnInCost, description: 'Returned goods back into inventory' });
+    lines.push({ accountId: accounts.get('COGS')!, credit: returnInCost, description: 'Reverse cost of goods sold' });
   }
-  if (input.damageWriteOff.greaterThan(0)) {
-    lines.push({ accountId: accounts.get('INVENTORY_SHRINKAGE')!, debit: input.damageWriteOff, description: 'Returned goods written off as damaged' });
-    lines.push({ accountId: accounts.get('INVENTORY_ASSET')!, credit: input.damageWriteOff, description: 'Damaged return write-off' });
+  if (damageWriteOff.greaterThan(0)) {
+    lines.push({ accountId: accounts.get('INVENTORY_SHRINKAGE')!, debit: damageWriteOff, description: 'Returned goods written off as damaged' });
+    lines.push({ accountId: accounts.get('INVENTORY_ASSET')!, credit: damageWriteOff, description: 'Damaged return write-off' });
   }
   if (postRevenueReversal) {
-    lines.push({ accountId: accounts.get('SALES_REVENUE')!, debit: input.totalCredit, description: 'Reverse sales revenue' });
-    lines.push({ accountId: accounts.get('ACCOUNTS_RECEIVABLE')!, credit: input.totalCredit, description: 'Customer credit for return' });
+    lines.push({ accountId: accounts.get('SALES_REVENUE')!, debit: totalCredit, description: 'Reverse sales revenue' });
+    lines.push({ accountId: accounts.get('ACCOUNTS_RECEIVABLE')!, credit: totalCredit, description: 'Customer credit for return' });
   }
 
   return lines;

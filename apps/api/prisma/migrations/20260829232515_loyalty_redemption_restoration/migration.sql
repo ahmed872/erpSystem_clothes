@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "CustomerPointsType" ADD VALUE 'REDEMPTION_RESTORATION';

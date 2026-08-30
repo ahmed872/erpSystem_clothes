@@ -53,6 +53,12 @@ export const createSaleSchema = z.object({
   notes: notesSchema.optional(),
   idempotencyKey: z.string().trim().min(1).max(120).optional(),
   items: z.array(saleItemInputSchema).min(1).max(500),
+  /// Phase 8C: loyalty points to spend on this sale. Resolved
+  /// server-side inside CreateSaleUseCase's own transaction and turned
+  /// into line discounts - never a separate payment tender and never a
+  /// client-supplied discount. Requires `customerId`: points belong to a
+  /// customer, so a walk-in sale has none to spend.
+  redeemPoints: nonNegativeMoneySchema.optional(),
   /// Payment(s) tendered at the moment of sale. May be empty ONLY for a
   /// credit sale against an identified customer (see the invariant on
   /// the Sale model) - a walk-in sale (no customerId) must be paid in
