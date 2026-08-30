@@ -10,6 +10,7 @@ export * from './accounting';
 export * from './reporting';
 export * from './warranty';
 export * from './loyalty';
+export * from './promotions';
 
 export const registerBusinessSchema = z.object({
   businessName: nameSchema,

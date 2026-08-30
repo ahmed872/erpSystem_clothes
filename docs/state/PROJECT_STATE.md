@@ -1,7 +1,16 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 8C — Loyalty Redemption (**Complete + RELEASE-GATE APPROVED. Phase 8D not started, awaiting explicit instruction.**)
+Phase 8D — Promotions (**Complete, awaiting explicit approval to start Phase 8E**)
+
+Phase 8D delivered the Promotion model, engine, eligibility, calculation, best-applicable selection, validity dates, permissions and the minimum `CreateSaleUseCase` integration that makes promotions real. **Three approved types** (Percentage, Fixed Amount, Buy-X-Get-Y), **three targets** (Product, Variant, Category), **best applicable only — never stacked**, validity in the business timezone, and historical sales that never change when a promotion is later edited or deactivated.
+
+Two decisions were locked as **approved business policy** before any code was written: **BD-10 — BXGY is evaluated PER LINE ONLY**, with no aggregation or allocation across variants, products or category lines; and **BD-11 — a manual discount and a promotion are ADDITIVE, capped at line gross**, `finalDiscount = min(manualDiscount + promotionDiscount, lineGross)`.
+
+**No threshold/basket-spend or basket-wide promotions, no stacking, no quotas or usage limits, no customer-specific pricing, no branch-scoped promotions, no bundle-promotion expansion, no Tax Engine, no Phase 6 accounting refactor, no Known Issue #47 or #29 work.** `CreateSaleReturnUseCase`, `InventoryEngine` and `AccountingEngine` were not modified at all.
+
+### Phase 8C (previously completed)
+Phase 8C — Loyalty Redemption (**Complete + RELEASE-GATE APPROVED**)
 
 **Release-gate approval explicitly accepted the three pre-existing defects found and fixed during 8C** (#59 journal residual precision, #60 zero-value customer transaction, #61 timing-dependent concurrency assertion), and approved as implemented and tested: the loyalty lifecycle, redemption, earning, the BD-1 return correction, clawback, restoration, idempotency, concurrency, accounting interaction, and historical-integrity behaviour.
 
@@ -197,8 +206,40 @@ each return recording the delta from what is already recorded. On the worked exa
 
 **Canonical lock order is now Customer → Sale → StockBalance.** `CreateSaleReturnUseCase` takes the customer lock *before* `lockSale`, because `CreateSaleUseCase` locks the customer before its own stock locks — the opposite order would let a concurrent sale and return deadlock on customer-vs-stock. A `Promise.all` sale-vs-return race test exercises it.
 
+### Phase 8D — Promotions
+
+**Three calculators, each bounded above by the line gross by construction**, so a promotion alone can never drive a line negative:
+
+```
+PERCENTAGE   discount = round4(lineGross × percentageValue / 100)        (0 < pct <= 100)
+FIXED_AMOUNT discount = min(round4(fixedAmount × quantity), lineGross)   (fixedAmount is PER UNIT)
+BUY_X_GET_Y  freeUnits = floor(quantity / (X + Y)) × Y
+             discount  = round4(freeUnits × unitPrice)
+```
+
+`Y` is **inside** the set — "Buy 2 Get 1" needs 3 units on the line. The rule **repeats** for every whole multiple (6 units of a 2+1 yield 2 free) and there is **no partial fulfilment** (5 units yield 1 free, not 1.67).
+
+**BD-10 — per line only.** Quantities are never aggregated across lines, so a category "Buy 1 Get 1" spread over two separate one-unit lines yields **zero** free units, while the same promotion does apply to a line that completes a set on its own. Both are asserted by test. Because `SaleItem @@unique([saleId, variantId])` makes a line exactly one variant at one price, "which unit is free" is arithmetically vacuous and no cheapest-free or cross-line allocation rule is needed anywhere.
+
+**BD-11 — additive, capped.** The promotion is computed on the line **gross**, never on the post-manual price; the combined discount is capped at the gross rather than rejected, so the net merchandise value can never go negative. Both approved examples are asserted: 30 manual + 20 promotion on a 100 line → **50**; 90 + 30 → **100**. The cap applies **only to a line a promotion actually reached** — where no promotion applies the client's manual discount is left exactly as supplied, so Phase 5 behaviour on over-discounted lines is untouched.
+
+**Best applicable only, deterministically.** Evaluation is per line; the largest discount wins, ties breaking by **most specific target (VARIANT > PRODUCT > CATEGORY) → earliest `validFrom` → lowest promotion id**. Only the first criterion decides money; the rest merely decide which of two equally valuable promotions is recorded. Different lines of one sale may legitimately carry different promotions; a single line carries at most one, enforced by the tenant-scoped unique `(businessId, saleItemId, promotionId)`. A manual discount never enters the competition — it is not a promotion.
+
+**Historical integrity.** `SalePromotionApplication` is append-only provenance carrying the promotion's name and type **at the time of sale** plus a `ruleSnapshot` with every parameter the calculation used, so the original arithmetic reproduces without reading the live rule. A test renames a promotion, moves its window into 2091 and deactivates it, then confirms the completed sale's `discountAmount`, line discount and snapshot are all unmoved. Type, target and parameters are **not editable** — a different rule is a different promotion — and promotions are deactivated, never deleted.
+
+**Validity** is stored as half-open `[validFrom, validTo)` instants. Callers supply `YYYY-MM-DD` calendar dates, resolved in `Business.timezone` through the **same helper Phase 7 reporting uses** (extracted to `common/domain/business-timezone.ts` so there is one implementation, not two). An inclusive `validTo` of 31 March becomes the exclusive instant at the start of 1 April local time, so the final day is covered exactly once.
+
 ## Pending Features
-Everything from Phase 8D onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+Everything from Phase 8E onward (Advanced/Promotions/Loyalty, Security & Reliability hardening, Production).
+
+Deliberately out of Phase 8D scope (approved constraints, none of them worked around):
+- **Threshold / basket-spend and basket-wide promotions** — no promotion in scope is triggered by the composition or total of the basket.
+- **Promotion stacking** — best applicable only, one promotion per line.
+- **Quotas, usage limits, first-N-customer quotas, per-customer limits, global counters** — with none of these, promotion resolution needs no counter and therefore no lock.
+- **Customer-specific pricing, `Customer.priceListId`, pricing tiers, branch-scoped promotions** — promotions are tenant-wide.
+- **Bundle-promotion expansion, Tax Engine, Phase 6 accounting refactor, Known Issue #47, Known Issue #29.**
+- **No promotion-application endpoint** — resolution is server-side inside `CreateSaleUseCase` only, so a client can never supply promotional pricing.
+- **`CreateSaleReturnUseCase` was not modified** — see Return Semantics below.
 
 Deliberately out of Phase 8C scope (approved constraints, none of them worked around):
 - **Promotions / PromotionEngine** (8D) — no `Promotion` model, no `SalePromotionApplication`.
@@ -289,6 +330,12 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 
 **Phase 8C**: no new model and no new table. One new `CustomerPointsType` value (`REDEMPTION_RESTORATION`), one extended CHECK, one partial unique index. **No column was added to `Sale`, `SaleItem` or `SaleReturn`** — restoration is driven off the sale-level ratio `C/B` precisely so no per-line loyalty split needs storing, and `redeemPoints` is recorded by the REDEEM ledger row rather than duplicated onto the Sale. No new permission code (102 total, unchanged).
 
+**Phase 8D**: 2 new Prisma models: `Promotion` (mutable config) and `SalePromotionApplication` (append-only provenance). New enums: `PromotionType` (`PERCENTAGE`/`FIXED_AMOUNT`/`BUY_X_GET_Y` — exactly the three approved), `PromotionTargetType` (`PRODUCT`/`VARIANT`/`CATEGORY`). Both tables carry their own `businessId`. Tenant-scoped unique `(business_id, sale_item_id, promotion_id)`. **No column added to `Sale`, `SaleItem` or `SaleReturn`.**
+
+`Promotion.targetId` is deliberately **not** a foreign key: one column cannot reference three different tables, and three nullable FKs would let a row target two things at once. Existence is validated in the application against the caller's own tenant before the row is written, and a cross-tenant target returns 404 (tested).
+
+4 new global permission codes: `promotions.{view,create,edit,deactivate}` (**106 permissions total now**).
+
 ## Migrations
 **Phase 5**:
 1. `20260829112729_sales_schema` - the 8 tables/5 enums above, plus hand-written `CHECK` constraints: non-zero `amount` on `customer_transactions`; `closed_at >= opened_at` on `shifts`; non-negative subtotal/discount/tax/total on `sales`; positive quantity, non-negative price/discount/tax/line-total/quantity-returned, and **`quantity_returned <= quantity`** on `sale_items`; positive quantity + non-negative price on `sale_return_items`; positive `amount` on `sale_payments`. Plus a **partial unique index** `shifts_one_open_per_user (business_id, opened_by) WHERE status = 'OPEN'` - the database-level guarantee behind the "one open shift per user" invariant, not just an application pre-check.
@@ -318,6 +365,11 @@ Everything from Phase 0-4 stands unchanged. New Phase 5 decisions, each explaine
 15. `20260829232515_loyalty_redemption_restoration` — adds the `REDEMPTION_RESTORATION` enum value.
 16. `20260829232600_loyalty_redemption_constraints` — **deliberately a separate migration**: PostgreSQL forbids *using* a newly added enum value in the transaction that added it, and Prisma runs each migration file in its own transaction, so splitting them is what makes the CHECK below legal. Extends `customer_points_sign_matches_type` with `REDEMPTION_RESTORATION AND points > 0` (the new value would otherwise be the only type whose sign the database did not police), and adds the partial unique index **`customer_points_one_event_per_source`** on `(business_id, reference_type, reference_id, type) WHERE reference_type IS NOT NULL`. That index is the real duplicate-event backstop for machine-generated rows: `Sale.idempotencyKey` is OPTIONAL, so a sale created without one produces ledger rows with a NULL key, and PostgreSQL permits unlimited NULLs in a UNIQUE index. It guarantees **one Sale → at most one EARN and one REDEEM; one SaleReturn → at most one RETURN_CLAWBACK and one REDEMPTION_RESTORATION**, the same role `journal_entries (business_id, source_type, source_id)` plays for double-posting.
 
+**Phase 8D**:
+17. `20260830111403_promotions_schema` — the 2 tables/2 enums above, plus hand-written CHECKs: **`promotions_parameters_match_type`** (exactly one parameter set per type, everything else NULL — without it a row could carry a percentage AND a buy/get pair, and which one won would depend on code order rather than data); `0 < percentage_value <= 100`; `fixed_amount > 0`; `buy_quantity > 0` and `get_quantity > 0`; `valid_to > valid_from`; a non-empty trimmed name; and `discount_applied > 0` on applications, so a stored application always represents real money.
+18. `20260830111500_promotions_rls` — RLS **and FORCE RLS** on both tables with `<table>_tenant_isolation` policies (`USING` + `WITH CHECK`).
+19. `20260830111600_promotions_app_role_grants` — `promotions` gets `SELECT, INSERT, UPDATE` (config is genuinely edited and deactivated in place) and **no DELETE**; `sale_promotion_applications` gets **`SELECT, INSERT` only**, the same strictest grant as `customer_points` and `journal_entries`. Neither table is ever row-locked — promotion resolution is a pure read inside the sale's existing transaction, and with quotas deferred there is no counter to contend on — so neither needs a locking-only UPDATE grant (the Phase 5 `sales` lesson applied up front for the fourth phase running).
+
 Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate status`: both "up to date", **22 migrations total** across all six phases). Verified directly via SQL, not just assumed:
 - `pg_class.relrowsecurity`/`relforcerowsecurity` = true on all 5 new Phase 6 tables.
 - `information_schema.role_table_grants` for `erp_app` matches the design exactly: `accounts`/`fiscal_periods` → `INSERT,SELECT,UPDATE`; `accounting_mapping_rules`/`journal_entries`/`journal_entry_lines` → `INSERT,SELECT`.
@@ -345,6 +397,13 @@ Applied and verified against both `erp_dev` and `erp_test` (`prisma migrate stat
 - `customer_points_one_event_per_source` present in `pg_indexes`.
 - All four CHECK constraints present, with the sign constraint covering the new value.
 - Grants unchanged and still exactly `INSERT, SELECT` — **8C added no privilege**; RLS and FORCE RLS both still `true`.
+
+**Phase 8D migration verification** — direct SQL against **both** `erp_dev` and `erp_test` (**34 migrations total**, none pending on either):
+- `relrowsecurity` **and** `relforcerowsecurity` = `true` on `promotions` and `sale_promotion_applications`.
+- Both `_tenant_isolation` policies present in `pg_policies`.
+- `erp_app` grants read exactly `INSERT,SELECT,UPDATE` on `promotions` and `INSERT,SELECT` on `sale_promotion_applications`.
+- All 7 hand-written CHECK constraints present, plus the tenant-scoped unique index.
+- Both databases re-seeded: **106 permissions** each, promotion codes backfilled onto existing `BUSINESS_OWNER` roles.
 
 ## API Endpoints
 All Phase 5 endpoints under `/api/v1/sales`, same `{ data }` / `{ error }` envelope (list endpoints also return `pagination`).
@@ -432,6 +491,20 @@ Role-template grants: `BUSINESS_OWNER` both. `ACCOUNTANT` **both** — a point c
 
 **Phase 8C added no endpoint and no permission.** Redemption is a `redeemPoints` field on the existing `POST /sales`, which is what makes it atomic with sale creation and part of the sale's own idempotency — a separate redemption endpoint would have required a committed redemption before the sale existed, which the approved design forbids. Clawback and restoration are automatic consequences of the existing `POST /sales/:id/returns`. Redemption at the till is gated by the existing `sales.create`; no `loyalty.*` permission is required to redeem, and `loyalty.adjust` remains Owner/Accountant-only.
 
+All new Phase 8D endpoints under `/api/v1/promotions`, same `{ data }` / `{ error }` envelope (the list endpoint also returns `pagination`). **Configuration only — there is deliberately no route that applies a promotion to a sale**, so a client can never supply promotional pricing:
+
+| Method | Path | Permission |
+|---|---|---|
+| GET | `/promotions` | `promotions.view` |
+| GET | `/promotions/:id` | `promotions.view` |
+| POST | `/promotions` | `promotions.create` |
+| PATCH | `/promotions/:id` | `promotions.edit` (name / window / active flag only) |
+| DELETE | `/promotions/:id` | `promotions.deactivate` (deactivate, never delete) |
+
+Validity is supplied as `YYYY-MM-DD` calendar dates, not instants: only the server knows the business timezone, so accepting an instant would let a caller in another zone silently shift when a promotion starts and ends. List filters: `type`, `targetType`, `isActive`, `page`/`limit` (max 200). Validated against `packages/shared-validation/src/promotions.ts`, whose discriminated union makes a wrong type/parameter combination unrepresentable at the boundary.
+
+Role-template grants: `BUSINESS_OWNER` all four. `ACCOUNTANT`, `BRANCH_MANAGER`, `CASHIER`, `SALES_EMPLOYEE` get **`promotions.view` only** — a cashier must see why a price dropped but must not author the rule behind it. `INVENTORY_MANAGER` gets none. **Selling with a promotion applied requires no promotion permission at all** — resolution is server-side and gated by the existing `sales.create`.
+
 ## Screens
 None (still backend-only - unchanged from Phases 1-5; still flagging this for your review).
 
@@ -495,6 +568,20 @@ None (still backend-only - unchanged from Phases 1-5; still flagging this for yo
 - **Tenant isolation and permissions (3)** — business B cannot redeem business A's customer's points (404, balance untouched); a CASHIER can redeem at the till through `sales.create` alone yet still cannot adjust points by hand (403); no customer anywhere holds a negative derived balance.
 - Full regression after 8C: **384/384 e2e (37 files) + 28/28 unit**, zero regressions from Phases 1-8B. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
 
+**Phase 8D**: E2E: **35 new tests, 1 new file** (`promotions.e2e-spec.ts`), real NestJS app + real PostgreSQL, no mocks.
+- **CRUD, validation, targets (6)** — each of the three approved types created and anything else rejected 422 (including a `BASKET` target, which is deferred); percentage at 0 and 101, zero fixed amount, zero X or Y, blank name and an inverted window all rejected; **a hybrid rule proven impossible** two ways (a stray `buyQuantity` on a PERCENTAGE is stripped and stored NULL, and a raw-SQL hybrid insert is rejected by `promotions_parameters_match_type`); a cross-tenant or non-existent target 404s; edit limited to name/window/active with type and parameters unchanged; deactivate-not-delete with a second deactivate rejected 409 and the row still present; list filters and an out-of-range limit.
+- **Calculation on real sales (3)** — percentage landing in `SaleItem.discountAmount` with the sale total following; **fixed amount proven PER UNIT** (5 × 4 units = 20, not a flat 5) and capped at the gross with a 500-per-unit rule on a 100 line yielding exactly 100; BXGY across qty 3 → 100, 6 → 200, 5 → 100 and 2 → nothing, with the application row present or absent to match.
+- **BD-10, per line only (2)** — a category "Buy 1 Get 1" over two one-unit lines yields **zero** discount and **zero** application rows; the same promotion applied to a sale where one line carries 2 units discounts **only that line**.
+- **BD-11, additive and capped (4)** — both approved examples (30+20 → 50; 90+30 → 100) with the sale total, the line discount and non-negative merchandise all asserted; the promotion proven computed on the **gross** (20% of 100 = 20, not 20% of the post-manual 70); the capped case recording `discountApplied = 10` with `ruleSnapshot.computedDiscount = 30` and `cappedAtLineGross = true`; a manual discount already covering the whole line writing **no** application row; and a line with no promotion keeping its manual discount **uncapped**, proving Phase 5 behaviour is untouched.
+- **Best applicable and determinism (4)** — the larger of two competing promotions wins with exactly one application row; an exact tie broken by target specificity (VARIANT over CATEGORY); different lines of one sale carrying different promotions with `Sale.discountAmount = SUM(SaleItem.discountAmount)` preserved; the unique index rejecting a second application of one promotion to one line.
+- **Validity (3)** — an expired and a not-yet-started promotion both ignored; a deactivated promotion ignored; the stored window proven half-open **and resolved in the business timezone** (an inclusive 31 March stored as the exclusive instant at the start of 1 April local time).
+- **Historical integrity (3)** — a promotion renamed, re-dated into 2091 and deactivated after the sale, with the sale's discount, line discount, snapshot `percentageValue` and frozen `promotionName` all confirmed unmoved; provenance proven append-only by a direct-connection UPDATE and DELETE rejection with the row re-read unchanged; a promotion referenced by a sale proven undeletable.
+- **Loyalty interaction (3)** — redemption eligibility proven to **exclude** the promoted amount and earning to be net of both (gross 300 − 60 promotion − 50 redemption → basis 190, earning 380); redemption rejected when it would exceed the merchandise left after the promotion, with the whole sale rolled back; **and the 8C fingerprint correction proven by replaying a promoted sale**, with a genuinely different manual discount still rejected 409.
+- **Returns, accounting, inventory (3)** — a promoted BXGY line returned one unit at a time producing exactly the BD-1 cumulative sequence `66.6667 / 66.6666 / 66.6667 = 200`, never 300, **with no change to the return code**; the GL posting revenue net of the promotion and balancing, with no promotion-named account anywhere; a promotion proven to move **no** stock — all three units including the free one leave the shelf.
+- **Tenant isolation and permissions (4)** — business B cannot read, edit, deactivate or list business A's promotions (404 on each); A's promotion never discounts B's sale; RLS proven at the database layer with both a cross-tenant read and an unfiltered no-context read returning zero rows; and the **full six-role matrix** — four roles read 200 but are 403 on create, edit and deactivate, Inventory Manager is 403 on read, unauthenticated is 401.
+- **Unit**: no new unit tests — the three calculators and the selection order are exercised end-to-end against real sales, including every boundary case, which is stronger than isolating them. Phase 1-8C's 28 unit tests remain green.
+- Full regression after 8D: **419/419 e2e (38 files) + 28/28 unit**, zero regressions from Phases 1-8C. `npm run build`, `tsc --noEmit` and `npm run lint` all clean.
+
 ## Security Review
 Everything from Phases 1-4 stands unchanged. Phase 5 additions:
 - Every sales-mutating endpoint requires its own specific permission (11 new codes) rather than one blanket `sales.manage` - verified by test at two privilege levels: a Cashier (the intended POS-floor role) allowed to open a shift, sell, and return, but rejected from an out-of-template action; a role with zero sales permissions rejected from every sales route entirely.
@@ -525,6 +612,13 @@ Phase 8C additions:
 - The **idempotency fingerprint hashes the client request only** — never the server-resolved redemption value or the allocated line discounts. A stored sale's line `discountAmount` now includes the server's own allocation, so the fingerprint compares the client's discount at sale level (exactly reconstructible as `Sale.discountAmount − REDEEM.basisAmount`) rather than per line.
 - **8C added no database privilege at all.** `customer_points` grants remain exactly `INSERT, SELECT`; RLS and FORCE RLS unchanged. Cross-tenant redemption is refused at the customer lookup (404) and would be refused by RLS regardless.
 - Points remain outside the GL entirely — asserted by a test that finds no loyalty-named account and no loyalty-described journal line anywhere.
+
+Phase 8D additions:
+- **A client can never supply promotional pricing.** There is no endpoint that applies a promotion; resolution happens server-side inside `CreateSaleUseCase`'s own transaction. The client supplies only its own manual `discountAmount`, and every promotional amount is computed from rules stored in that tenant.
+- Authoring a discount rule is a pricing decision, so `create`/`edit`/`deactivate` are **Owner-only** by default while every POS-facing role gets `view` — verified across the full six-role matrix, not sampled.
+- `sale_promotion_applications` has **no UPDATE and no DELETE** grant for `erp_app`, verified from `information_schema` and by a direct-connection rejection test; `promotions` has no DELETE, and a RESTRICT foreign key means a rule referenced by a historical sale could not be removed even if one existed.
+- RLS **and FORCE RLS** proven at the database layer on both tables, including an unfiltered read with no tenant context returning nothing.
+- `Promotion.targetId` is not a foreign key by necessity, so target existence is validated against the caller's own tenant in the application — a promotion can never be created pointing at another business's product, category or variant (404, tested).
 
 ## Business Logic Review
 - Every sales use case validates its references (warehouse/customer/variant belong to the caller's tenant, customer is active, shift matches the warehouse) before writing anything, returning 404/422/409 rather than silently creating cross-tenant, invalid, or shift-less data.
@@ -594,6 +688,13 @@ Phase 8C additions:
 - **Nothing historical is mutated.** Restoration and clawback are new compensating INSERTs; the original rows are re-read after the return and confirmed byte-for-byte unchanged. `erp_app` still has no UPDATE or DELETE on `customer_points`, so no other outcome is even possible.
 - **Sale immutability is preserved**: `CreateSaleUseCase` still only ever inserts, and the BD-1 correction changes only how a return's credit is *computed* — no existing `Sale`, `SaleItem`, `StockMovement` or `JournalEntry` row is rewritten, and no posted accounting entry is amended.
 - **The redemption is recorded once and only once.** `customer_points_one_event_per_source` makes one EARN and one REDEEM per Sale a database guarantee, independent of the Sale's optional idempotency key.
+
+Phase 8D additions:
+- **Historical sales never recompute from live promotion configuration.** What a completed sale received is frozen in its own `SaleItem.discountAmount`, and `SalePromotionApplication` freezes the promotion's name, type and every rule parameter at the time of sale. Renaming, re-dating or deactivating the rule afterwards provably changes nothing.
+- **Provenance is append-only at the database layer**, not by convention: `SELECT, INSERT` only, so a historical application can never be rewritten to agree with a rule that has since changed.
+- **Type, target and parameters are immutable on a promotion.** Repurposing a rule in place would make historical applications point at something that no longer resembles what happened, so only name, window and active flag are editable — a different rule is a different promotion.
+- **Return semantics needed no change at all.** `return-credit.ts` computes `merchandiseValue = round4(unitPrice × quantity) − discountAmount`, and a promotion discount lands in `discountAmount`, so the §6.1 locked BXGY return policy was **already implemented** by the Phase 8C BD-1 correction. A promoted BXGY line returns at exactly its historical proportional value; `CreateSaleReturnUseCase` was not modified.
+- **Accounting and inventory are untouched.** A promotion raises `discountAmount`, lowering `netRevenue` and `totalAmount` identically, so the entry balances by construction — no account, no mapping key, no engine change. Free units are physically shipped, so stock consumption and COGS are unchanged and gross profit correctly falls.
 
 ## Accounting Engine & Integration Review (Phase 6)
 
@@ -685,6 +786,15 @@ Also new from Phase 8C:
 63. **A bundle line's loyalty discount can never be clawed back or restored**, because bundle lines cannot be returned at all (Known Issue #26). Pre-existing consequence, now with a loyalty dimension.
 64. **`REDEMPTION_RESTORATION` rows carry a `basisAmount` that is itself a cumulative delta**, so the values across a sale's returns sum exactly to the original redemption value. The points are the authoritative quantity; the monetary field is descriptive.
 65. **Redemption is not available on walk-in sales** — points belong to a customer, and `CustomerPoints.customerId` is non-nullable. Rejected 422 rather than silently ignored.
+
+New from Phase 8D:
+
+66. **A promotion CAN apply to a bundle line, and that discount can never be returned.** A Bundle is a `Product`, so the approved PRODUCT and CATEGORY targets reach it, and applying a line-level discount is not "bundle expansion". But bundle lines cannot be returned at all (Known Issue #26), so a promotion discount on one can never be returned, clawed back or restored — the same shape as #63 for loyalty. Pre-existing consequence, now with a promotion dimension.
+67. **Category targeting does not walk child categories.** `Category` is self-referencing, but the approved policy names "Category" as a target without defining descendant inheritance, so a promotion targets exactly the category assigned to the product. Walking the tree would have been inventing scope.
+68. **A category BXGY spread thinly across lines yields nothing** — the direct and deliberate consequence of BD-10. A "Buy 1 Get 1" over two separate one-unit lines is not a mistake in the engine; it is the approved per-line semantics, asserted by test so the behaviour is visible rather than surprising.
+69. **A stray parameter on a promotion request is stripped, not rejected.** No schema in this codebase uses `.strict()`, so unknown keys are ignored on every endpoint and promotions follow that convention. The guarantee that matters — that a hybrid rule cannot exist — is enforced by the use-case writing only type-appropriate parameters and independently by `promotions_parameters_match_type`, both asserted.
+70. **The promotion base price is the caller-supplied `unitPrice`** (Known Issue #29 remains deferred, and no second pricing engine was created). This is safe because no in-scope promotion is triggered by a price threshold — basket-spend promotions are deferred — so there is no price a client could enter to unlock a promotion it should not get.
+71. **Promotions are tenant-wide.** No branch scoping, no per-customer targeting, no quotas or usage limits — all explicitly deferred, which is also why promotion resolution needs no counter and therefore introduces no new lock.
 
 ## Files Created
 Prisma migrations: `apps/api/prisma/migrations/20260829112729_sales_schema/`, `.../20260829112800_sales_rls/`, `.../20260829112900_sales_app_role_grants/`, `.../20260829130000_sales_lock_update_grant/`.
@@ -778,6 +888,22 @@ Tests: `apps/api/test/sales-return-credit.e2e-spec.ts`, `apps/api/test/loyalty-r
 
 **No new table, no new column, no new permission, no new database privilege.** The two accounting-domain files were touched only to make them respect the scale of the columns they write to — not a Phase 6 redesign, and required by the defect in #59.
 
+### Phase 8D Files Created
+Prisma migrations: `apps/api/prisma/migrations/20260830111403_promotions_schema/`, `.../20260830111500_promotions_rls/`, `.../20260830111600_promotions_app_role_grants/`.
+
+Shared common: `apps/api/src/common/domain/business-timezone.ts` (extracted from Phase 7's `reporting/domain/date-range.ts` so promotions and reports resolve calendar dates through **one** implementation, plus a new `calendarDateToInstant`).
+
+Shared validation: `packages/shared-validation/src/promotions.ts`.
+
+Promotions module (`apps/api/src/modules/promotions/`): `promotions.module.ts`; `domain/{promotion-calculation,select-best-promotion,resolve-promotions,resolve-promotion-window}.ts`; `application/{create-promotion,update-promotion,deactivate-promotion,list-promotions,get-promotion}.use-case.ts`; `presentation/promotions.controller.ts`.
+
+Tests: `apps/api/test/promotions.e2e-spec.ts`.
+
+### Phase 8D Files Modified
+`apps/api/prisma/schema.prisma` (2 new models/2 enums + `Business`/`Sale`/`SaleItem` back-relations), `apps/api/prisma/seed.ts` (4 new permission descriptions), `apps/api/src/app.module.ts` (wire `PromotionsModule`), `apps/api/test/db-reset.ts` (truncate the 2 new tables), `packages/shared-types/src/permissions.ts` (4 new codes + role-template grants), `packages/shared-validation/src/index.ts` (re-export `promotions.ts`), `apps/api/src/modules/reporting/domain/date-range.ts` (now imports the extracted timezone helpers instead of defining its own — behaviour identical, still covered by Phase 7's own tests), `apps/api/src/modules/sales/application/sales/create-sale.use-case.ts` (promotion resolution, BD-11 combination, provenance rows, and the 8C fingerprint correction), `docs/state/PROJECT_STATE.md`.
+
+**`CreateSaleReturnUseCase`, `InventoryEngine`, `AccountingEngine` and every accounting domain file were NOT modified.** The only Phase 1-8C source touched outside wiring is `create-sale.use-case.ts` (the approved integration point) and the behaviour-preserving timezone extraction.
+
 ## Next Phase
-**Phase 8D — Promotions**: `Promotion` model, rules, eligibility, calculation, best-applicable selection, validity dates, permissions, tests. Nothing started — no `Promotion` or `SalePromotionApplication` model exists, and `CreateSaleUseCase` resolves no promotion. Known Issue #47 (serial capture in Sales) remains an accepted cross-phase dependency for **8E** and must not be worked around in 8D.
-**Phase 8C is release-gate approved; 8D will not start until you explicitly instruct it.**
+**Phase 8E — Sales Integration**: PromotionEngine + Loyalty final combined verification, `CreateSaleUseCase` review, idempotency fingerprint handling, returns integration, historical snapshot protection, accounting verification — and the serial-capture-on-sale work that closes Known Issue #47, which remains an accepted cross-phase dependency and was not worked around in 8D.
+**8E will not start until you explicitly approve this Phase 8D report.**

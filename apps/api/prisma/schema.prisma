@@ -102,9 +102,11 @@ model Business {
   journalEntries         JournalEntry[]
   journalEntryLines      JournalEntryLine[]
 
-  warranties     Warranty[]
-  warrantyClaims WarrantyClaim[]
-  customerPoints CustomerPoints[]
+  warranties                Warranty[]
+  warrantyClaims            WarrantyClaim[]
+  customerPoints            CustomerPoints[]
+  promotions                Promotion[]
+  salePromotionApplications SalePromotionApplication[]
 
   @@map("businesses")
 }
@@ -1546,14 +1548,15 @@ model Sale {
   createdAt      DateTime   @default(now()) @map("created_at")
   updatedAt      DateTime   @updatedAt @map("updated_at")
 
-  business  Business      @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sales_business_fk")
-  branch    Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
-  warehouse Warehouse     @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
-  customer  Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  shift     Shift         @relation(fields: [shiftId], references: [id], onDelete: Restrict)
-  items     SaleItem[]
-  payments  SalePayment[]
-  returns   SaleReturn[]
+  business              Business                   @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sales_business_fk")
+  branch                Branch                     @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  warehouse             Warehouse                  @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  customer              Customer?                  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  shift                 Shift                      @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  items                 SaleItem[]
+  payments              SalePayment[]
+  returns               SaleReturn[]
+  promotionApplications SalePromotionApplication[]
 
   @@unique([businessId, saleNumber])
   @@unique([businessId, idempotencyKey])
@@ -1591,11 +1594,12 @@ model SaleItem {
   quantityReturned Decimal  @default(0) @map("quantity_returned") @db.Decimal(18, 4)
   createdAt        DateTime @default(now()) @map("created_at")
 
-  business    Business         @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_items_business_fk")
-  sale        Sale             @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  variant     ProductVariant   @relation(fields: [variantId], references: [id], onDelete: Restrict)
-  returnItems SaleReturnItem[]
-  warranties  Warranty[]
+  business              Business                   @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_items_business_fk")
+  sale                  Sale                       @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  variant               ProductVariant             @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  returnItems           SaleReturnItem[]
+  warranties            Warranty[]
+  promotionApplications SalePromotionApplication[]
 
   @@unique([saleId, variantId])
   @@index([businessId])
@@ -2105,4 +2109,117 @@ model CustomerPoints {
   @@index([referenceType, referenceId])
   @@index([type])
   @@map("customer_points")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8D - Promotions
+// ---------------------------------------------------------------------------
+
+enum PromotionType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  BUY_X_GET_Y
+}
+
+/// What a promotion is attached to. Deliberately only these three
+/// (approved policy): basket-wide and threshold/basket-spend promotions
+/// are explicitly deferred, so there is no target that depends on the
+/// composition or total of the basket.
+enum PromotionTargetType {
+  PRODUCT
+  VARIANT
+  CATEGORY
+}
+
+/// A promotion RULE. This is mutable CONFIGURATION and is never a source
+/// for recomputing a historical Sale: once a sale is committed, what it
+/// received is frozen in its own `SaleItem.discountAmount` snapshot and
+/// described by an append-only `SalePromotionApplication`. Editing or
+/// deactivating a row here can only affect FUTURE sales.
+model Promotion {
+  id         String              @id @default(uuid())
+  businessId String              @map("business_id")
+  name       String
+  type       PromotionType
+  targetType PromotionTargetType @map("target_type")
+  /// The Product / ProductVariant / Category id this promotion applies
+  /// to, interpreted according to `targetType`. Deliberately NOT a
+  /// foreign key: one column cannot reference three different tables, and
+  /// splitting it into three nullable FKs would let a row target two
+  /// things at once. Existence is validated in the application against
+  /// the caller's own tenant before the row is written.
+  targetId   String              @map("target_id")
+
+  /// Exactly one parameter set is populated, enforced by CHECK
+  /// constraints per type - a PERCENTAGE row cannot carry a
+  /// `buyQuantity`, and a BUY_X_GET_Y row cannot carry a
+  /// `percentageValue`.
+  percentageValue Decimal? @map("percentage_value") @db.Decimal(9, 4)
+  /// PER UNIT, not per line (approved semantics).
+  fixedAmount     Decimal? @map("fixed_amount") @db.Decimal(18, 4)
+  buyQuantity     Int?     @map("buy_quantity")
+  getQuantity     Int?     @map("get_quantity")
+
+  /// Half-open [validFrom, validTo) instants. Calendar dates supplied by
+  /// a caller are resolved into these using the BUSINESS timezone, the
+  /// same convention Phase 7 reporting already uses, so a boundary
+  /// instant belongs to exactly one side.
+  validFrom DateTime @map("valid_from")
+  validTo   DateTime @map("valid_to")
+  isActive  Boolean  @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  createdBy String?  @map("created_by")
+  updatedBy String?  @map("updated_by")
+
+  business     Business                   @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "promotions_business_fk")
+  applications SalePromotionApplication[]
+
+  @@index([businessId])
+  @@index([businessId, targetType, targetId])
+  @@index([businessId, validFrom, validTo])
+  @@map("promotions")
+}
+
+/// APPEND-ONLY provenance: which promotion reduced which sale line, by
+/// how much, under what rule. `erp_app` gets SELECT+INSERT only, so a
+/// historical application can never be rewritten to match a promotion
+/// that has since changed.
+///
+/// `ruleSnapshot` carries every parameter the calculation used, so the
+/// original arithmetic can be reproduced WITHOUT reading the live
+/// `Promotion` row - including `computedDiscount` and `cappedAtLineGross`
+/// for the case where a manual discount plus this promotion exceeded the
+/// line's gross (approved decision BD-11) and the promotion's effective
+/// contribution was therefore smaller than what it computed.
+model SalePromotionApplication {
+  id              String        @id @default(uuid())
+  businessId      String        @map("business_id")
+  saleId          String        @map("sale_id")
+  saleItemId      String        @map("sale_item_id")
+  promotionId     String        @map("promotion_id")
+  promotionType   PromotionType @map("promotion_type")
+  /// Name AT THE TIME OF SALE - renaming a promotion later must not
+  /// rewrite what a historical receipt said.
+  promotionName   String        @map("promotion_name")
+  ruleSnapshot    Json          @map("rule_snapshot")
+  /// The EFFECTIVE contribution to this line's discount, after the BD-11
+  /// cap. `ruleSnapshot.computedDiscount` holds what the rule produced
+  /// before capping.
+  discountApplied Decimal       @map("discount_applied") @db.Decimal(18, 4)
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  business  Business  @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_promotion_applications_business_fk")
+  sale      Sale      @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  saleItem  SaleItem  @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Restrict)
+
+  /// One promotion can contribute to one sale line at most once - the
+  /// database backstop behind "best applicable promotion ONLY".
+  @@unique([businessId, saleItemId, promotionId])
+  @@index([businessId])
+  @@index([saleId])
+  @@index([saleItemId])
+  @@map("sale_promotion_applications")
 }

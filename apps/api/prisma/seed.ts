@@ -105,6 +105,10 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'warranty.claim': 'Register and resolve warranty claims',
   'loyalty.view': "View a customer's loyalty point balance and ledger history",
   'loyalty.adjust': 'Manually add or remove loyalty points for a customer',
+  'promotions.view': 'View promotions and the promotions applied to sales',
+  'promotions.create': 'Create a promotion rule',
+  'promotions.edit': 'Edit a promotion rule',
+  'promotions.deactivate': 'Deactivate a promotion (promotions are never deleted)',
 };
 
 /**

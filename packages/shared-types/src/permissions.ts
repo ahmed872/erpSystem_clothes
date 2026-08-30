@@ -139,6 +139,14 @@ export const PERMISSION_CODES = [
   // decision with no source document behind it.
   'loyalty.view',
   'loyalty.adjust',
+  // Promotions (Phase 8D) - authoring a discount rule is a pricing
+  // decision, so create/edit/deactivate are Owner-only by default. Every
+  // POS-facing role gets `promotions.view` so a cashier can see WHY a
+  // price dropped without being able to author the rule.
+  'promotions.view',
+  'promotions.create',
+  'promotions.edit',
+  'promotions.deactivate',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -209,6 +217,10 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // Loyalty (Phase 8B): read-only. Adjusting points by hand is not a
     // branch-level decision - it is deliberately Owner/Accountant only.
     'loyalty.view',
+    // Promotions (Phase 8D): read-only. Promotions are tenant-wide in
+    // Phase 8 (branch-scoped promotions are deferred), so authoring one
+    // is not a branch-level act.
+    'promotions.view',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -255,6 +267,9 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // kind as the customer-ledger corrections this role already owns.
     'loyalty.view',
     'loyalty.adjust',
+    // Promotions (Phase 8D): read-only oversight - an Accountant needs to
+    // explain a discounted sale, not to author discount rules.
+    'promotions.view',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',
@@ -338,6 +353,11 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // Loyalty (Phase 8B): a cashier must be able to tell a customer their
     // point balance at the till, but NOT hand out points by hand.
     'loyalty.view',
+    // Promotions (Phase 8D): read-only - explain the price at the till,
+    // never author the rule behind it. Selling WITH a promotion applied
+    // needs no promotion permission at all: resolution is server-side
+    // inside CreateSaleUseCase and is gated by `sales.create`.
+    'promotions.view',
   ],
   SALES_EMPLOYEE: [
     'branches.view',
@@ -362,5 +382,7 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'warranty.register',
     // Loyalty (Phase 8B): read-only, same reasoning as the Cashier.
     'loyalty.view',
+    // Promotions (Phase 8D): read-only, same reasoning as the Cashier.
+    'promotions.view',
   ],
 };

@@ -18,6 +18,7 @@ export async function resetDatabase(): Promise<void> {
         "purchase_receipt_items", "purchase_receipts", "purchase_items", "purchases",
         "supplier_transactions", "suppliers",
         "warranty_claims", "warranties",
+        "sale_promotion_applications", "promotions",
         "sale_return_items", "sale_returns", "sale_payments", "sale_items", "sales",
         "shifts", "customer_transactions", "customer_points", "customers",
         "journal_entry_lines", "journal_entries", "accounting_mapping_rules", "fiscal_periods", "accounts",

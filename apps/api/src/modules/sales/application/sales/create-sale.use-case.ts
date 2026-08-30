@@ -21,6 +21,8 @@ import { lockCustomer } from '../../../loyalty/domain/lock-customer';
 import { getCustomerPointsBalance } from '../../../loyalty/domain/customer-points-balance';
 import { computePointsEarned, resolveLoyaltyEarnRate } from '../../../loyalty/domain/loyalty-earning';
 import { allocateRedemption, computeRedemptionValue, resolveLoyaltyRedeemRate } from '../../../loyalty/domain/loyalty-redemption';
+import { resolveActivePromotions, combineManualAndPromotion } from '../../../promotions/domain/resolve-promotions';
+import { selectBestPromotion, SelectedPromotion } from '../../../promotions/domain/select-best-promotion';
 
 function saleFingerprint(
   warehouseId: string,
@@ -124,6 +126,21 @@ export class CreateSaleUseCase {
               where: { businessId: actor.tenantId, referenceType: 'Sale', referenceId: existing.id, type: 'REDEEM' },
             })
           : [];
+        // Phase 8D: promotions ALSO contribute to `Sale.discountAmount`,
+        // so the client's own requested discount is what remains after
+        // BOTH server contributions are removed. Without this, every
+        // replay of a promoted sale would be misread as a mismatched
+        // payload and rejected 409. `discountApplied` is the EFFECTIVE
+        // contribution after the BD-11 cap, which is exactly what makes
+        // this subtraction exact.
+        const existingPromotionDiscount = existing
+          ? (
+              await tx.salePromotionApplication.findMany({
+                where: { businessId: actor.tenantId, saleId: existing.id },
+                select: { discountApplied: true },
+              })
+            ).reduce((sum, a) => sum.plus(a.discountApplied), new Prisma.Decimal(0))
+          : new Prisma.Decimal(0);
         if (existing) {
           assertIdempotentReplayMatches(
             saleFingerprint(
@@ -133,8 +150,9 @@ export class CreateSaleUseCase {
               existing.payments,
               existingRedeemedPoints(existingEvents),
               // The stored sale discount minus what the server itself
-              // contributed = what the client asked for.
-              existing.discountAmount.minus(existingEvents[0]?.basisAmount ?? 0),
+              // contributed (loyalty redemption + promotions) = what the
+              // client asked for.
+              existing.discountAmount.minus(existingEvents[0]?.basisAmount ?? 0).minus(existingPromotionDiscount),
             ),
             saleFingerprint(
               input.warehouseId,
@@ -188,7 +206,12 @@ export class CreateSaleUseCase {
       if (new Set(variantIds).size !== variantIds.length) {
         throw new ValidationFailedError('Duplicate variantId in sale items');
       }
-      const variants = await tx.productVariant.findMany({ where: { id: { in: variantIds }, businessId: actor.tenantId } });
+      const variants = await tx.productVariant.findMany({
+        where: { id: { in: variantIds }, businessId: actor.tenantId },
+        // `product.categoryId` is needed so a CATEGORY-targeted promotion
+        // can be matched without a second query per line.
+        include: { product: { select: { id: true, categoryId: true } } },
+      });
       if (variants.length !== variantIds.length) {
         const found = new Set(variants.map((v) => v.id));
         throw new NotFoundDomainError('ProductVariant', variantIds.filter((id) => !found.has(id)).join(', '));
@@ -211,6 +234,66 @@ export class CreateSaleUseCase {
         subtotal = subtotal.plus(gross);
         discountAmount = discountAmount.plus(item.discountAmount);
         taxAmount = taxAmount.plus(item.taxAmount);
+      }
+
+      // ---------------------------------------------------------------
+      // Phase 8D: PROMOTIONS, resolved server-side inside this same
+      // transaction and BEFORE loyalty (the approved ordering:
+      // promotion -> redemption -> earning).
+      //
+      // The client never supplies promotional pricing: it supplies only
+      // its own manual `discountAmount`, and everything below is computed
+      // from the promotion rules stored in this tenant.
+      //
+      // Evaluation is PER LINE (approved decision BD-10) - quantities are
+      // never aggregated across variants, products or category lines, so
+      // a category "Buy 1 Get 1" over two one-unit lines yields nothing.
+      // At most ONE promotion applies per line (best applicable only);
+      // different lines may carry different promotions.
+      // ---------------------------------------------------------------
+      const variantById = new Map(variants.map((v) => [v.id, v]));
+      const saleInstant = new Date();
+      const activePromotions = await resolveActivePromotions(tx, actor.tenantId, saleInstant);
+
+      const promotionByVariant = new Map<string, SelectedPromotion>();
+      const effectivePromotionByVariant = new Map<string, Prisma.Decimal>();
+      const cappedByVariant = new Map<string, boolean>();
+      const manualDiscountByVariant = new Map<string, Prisma.Decimal>();
+
+      if (activePromotions.length > 0) {
+        for (const item of input.items) {
+          const variant = variantById.get(item.variantId)!;
+          const gross = lineGross.get(item.variantId)!;
+          const best = selectBestPromotion(activePromotions, {
+            variantId: item.variantId,
+            productId: variant.product.id,
+            categoryId: variant.product.categoryId,
+            quantity: new Prisma.Decimal(item.quantity),
+            unitPrice: new Prisma.Decimal(item.unitPrice),
+            lineGross: gross,
+          });
+          if (!best) continue;
+
+          // Approved decision BD-11: a manual discount and a promotion are
+          // ADDITIVE, capped at the line gross. The promotion is computed
+          // on the GROSS, never on the post-manual price, and exceeding
+          // the gross is capped rather than rejected - the line's net
+          // merchandise value can never go negative.
+          const manual = new Prisma.Decimal(item.discountAmount);
+          const combined = combineManualAndPromotion(manual, best.discount, gross);
+          if (combined.effectivePromotionDiscount.lessThanOrEqualTo(0)) {
+            // The manual discount already consumed the whole line, so the
+            // promotion contributed nothing. No provenance row is written
+            // for money that was never given.
+            continue;
+          }
+
+          promotionByVariant.set(item.variantId, best);
+          effectivePromotionByVariant.set(item.variantId, combined.effectivePromotionDiscount);
+          cappedByVariant.set(item.variantId, combined.cappedAtLineGross);
+          manualDiscountByVariant.set(item.variantId, manual);
+          discountAmount = discountAmount.plus(combined.effectivePromotionDiscount);
+        }
       }
 
       // ---------------------------------------------------------------
@@ -257,7 +340,13 @@ export class CreateSaleUseCase {
 
         const eligibleLines = input.items.map((item) => ({
           variantId: item.variantId,
-          eligible: lineGross.get(item.variantId)!.minus(item.discountAmount),
+          // Net of BOTH the manual discount and any promotion already
+          // applied - you cannot redeem points against value that has
+          // already been discounted away.
+          eligible: lineGross
+            .get(item.variantId)!
+            .minus(item.discountAmount)
+            .minus(effectivePromotionByVariant.get(item.variantId) ?? 0),
         }));
         const totalEligible = eligibleLines.reduce((sum, l) => sum.plus(l.eligible), new Prisma.Decimal(0));
         if (redemptionValue.greaterThan(totalEligible)) {
@@ -314,12 +403,12 @@ export class CreateSaleUseCase {
       // client-supplied order (Phase 5 rule #3/#10).
       const sortedItems = [...input.items].sort((a, b) => a.variantId.localeCompare(b.variantId));
       for (const item of sortedItems) {
-        const lineDiscount = new Prisma.Decimal(item.discountAmount).plus(
-          loyaltyDiscountByVariant.get(item.variantId) ?? 0,
-        );
+        const lineDiscount = new Prisma.Decimal(item.discountAmount)
+          .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
+          .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
         const lineTotal = lineGross.get(item.variantId)!.minus(lineDiscount).plus(item.taxAmount);
 
-        await tx.saleItem.create({
+        const createdItem = await tx.saleItem.create({
           data: {
             businessId: actor.tenantId,
             saleId: sale.id,
@@ -331,6 +420,37 @@ export class CreateSaleUseCase {
             lineTotal,
           },
         });
+
+        // Phase 8D: append-only promotion provenance, written in the SAME
+        // transaction as the line it describes. `discountApplied` is the
+        // EFFECTIVE contribution after the BD-11 cap - what the promotion
+        // actually took off this line - while `ruleSnapshot` carries what
+        // the rule COMPUTED plus every parameter it used, so the original
+        // arithmetic can be reproduced without ever reading the live
+        // Promotion row. The promotion's name and type are frozen here
+        // too: renaming a rule later must not rewrite a historical
+        // receipt.
+        const applied = promotionByVariant.get(item.variantId);
+        if (applied) {
+          await tx.salePromotionApplication.create({
+            data: {
+              businessId: actor.tenantId,
+              saleId: sale.id,
+              saleItemId: createdItem.id,
+              promotionId: applied.rule.id,
+              promotionType: applied.rule.type,
+              promotionName: applied.rule.name,
+              ruleSnapshot: {
+                ...applied.ruleSnapshot,
+                promotionName: applied.rule.name,
+                manualDiscountAtSale: (manualDiscountByVariant.get(item.variantId) ?? new Prisma.Decimal(0)).toString(),
+                effectiveDiscount: effectivePromotionByVariant.get(item.variantId)!.toString(),
+                cappedAtLineGross: cappedByVariant.get(item.variantId) ?? false,
+              } as Prisma.InputJsonValue,
+              discountApplied: effectivePromotionByVariant.get(item.variantId)!,
+            },
+          });
+        }
 
         await consumeVariant(tx, this.engine, this.audit, {
           businessId: actor.tenantId,
