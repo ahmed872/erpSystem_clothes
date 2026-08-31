@@ -18,6 +18,7 @@ import { ListRolesUseCase } from './application/roles/list-roles.use-case';
 import { UpdateRoleUseCase } from './application/roles/update-role.use-case';
 import { DeleteRoleUseCase } from './application/roles/delete-role.use-case';
 import { ListPermissionsUseCase } from './application/permissions/list-permissions.use-case';
+import { GetMyEffectivePermissionsUseCase } from './application/permissions/get-my-permissions.use-case';
 
 @Module({
   imports: [JwtModule.register({})],
@@ -37,6 +38,7 @@ import { ListPermissionsUseCase } from './application/permissions/list-permissio
     UpdateRoleUseCase,
     DeleteRoleUseCase,
     ListPermissionsUseCase,
+    GetMyEffectivePermissionsUseCase,
   ],
   exports: [AuthTokenService],
 })

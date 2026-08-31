@@ -17,6 +17,7 @@ import { CloseShiftUseCase } from '../application/shifts/close-shift.use-case';
 import { ReconcileShiftUseCase } from '../application/shifts/reconcile-shift.use-case';
 import { GetActiveShiftUseCase } from '../application/shifts/get-active-shift.use-case';
 import { ListShiftsUseCase } from '../application/shifts/list-shifts.use-case';
+import { ListPosWarehousesUseCase } from '../application/shifts/list-pos-warehouses.use-case';
 import { CashMovementsService } from '../../finance/application/cash/cash-movements.service';
 
 /**
@@ -36,6 +37,7 @@ export class ShiftsController {
     private readonly reconcileShift: ReconcileShiftUseCase,
     private readonly getActiveShift: GetActiveShiftUseCase,
     private readonly listShifts: ListShiftsUseCase,
+    private readonly listPosWarehouses: ListPosWarehousesUseCase,
     private readonly cashMovements: CashMovementsService,
   ) {}
 
@@ -49,6 +51,18 @@ export class ShiftsController {
   @Get('active')
   async active(@CurrentUser() user: RequestUser) {
     return { data: await this.getActiveShift.execute(user) };
+  }
+
+  /**
+   * Phase 12 BLOCKING-B - see ListPosWarehousesUseCase. Gated on
+   * `shifts.open`, the same permission `open()` below requires, because
+   * this exists to answer the exact question that endpoint needs answered:
+   * which warehouseId may this caller open a shift against.
+   */
+  @RequirePermissions('shifts.open')
+  @Get('available-warehouses')
+  async availableWarehouses(@CurrentUser() user: RequestUser) {
+    return { data: await this.listPosWarehouses.execute(user) };
   }
 
   @RequirePermissions('shifts.open')

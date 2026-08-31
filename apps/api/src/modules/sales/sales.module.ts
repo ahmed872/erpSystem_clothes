@@ -12,6 +12,7 @@ import { CloseShiftUseCase } from './application/shifts/close-shift.use-case';
 import { GetActiveShiftUseCase } from './application/shifts/get-active-shift.use-case';
 import { ListShiftsUseCase } from './application/shifts/list-shifts.use-case';
 import { ReconcileShiftUseCase } from './application/shifts/reconcile-shift.use-case';
+import { ListPosWarehousesUseCase } from './application/shifts/list-pos-warehouses.use-case';
 import { CreateSaleUseCase } from './application/sales/create-sale.use-case';
 import { GetSaleUseCase } from './application/sales/get-sale.use-case';
 import { ListSalesUseCase } from './application/sales/list-sales.use-case';
@@ -42,6 +43,7 @@ import { FinanceModule } from '../finance/finance.module';
     GetActiveShiftUseCase,
     ListShiftsUseCase,
     ReconcileShiftUseCase,
+    ListPosWarehousesUseCase,
     CreateSaleUseCase,
     GetSaleUseCase,
     ListSalesUseCase,
