@@ -103,12 +103,18 @@ export class CreateSaleReturnUseCase {
     input: CreateSaleReturnInput,
     /**
      * Phase 10 (Exchanges): SERVER-SET, never reachable from a request.
-     * When true this return is one half of an exchange, so its entire
-     * credit is parked in the exchange clearing account instead of being
-     * handed back as money or left on a ledger, and the replacement sale
+     * When true this return is one half of an exchange, so the part of its
+     * credit not handed back as money is parked in the exchange clearing
+     * account rather than left on a ledger, and the replacement sale
      * created immediately afterwards debits the same account by the same
      * figure. A client that could set this could settle a return with
      * nothing at all, which is why it is a parameter and not a field.
+     *
+     * Phase 10.2: an exchange MAY now carry a refund - the money going back
+     * when the replacement is worth less than the goods returned. The
+     * AMOUNT is validated by `CreateSaleUseCase`, which is the only place
+     * that knows the replacement's total; a wrong figure rolls the whole
+     * exchange back.
      */
     settledByExchange = false,
   ) {
@@ -136,21 +142,28 @@ export class CreateSaleReturnUseCase {
           saleReturnFingerprint(saleId, input.items, input.refund),
         );
 
-        // The credit figure is rebuilt from what was STORED - the refund
-        // tender on the row and the customer-ledger credit it wrote -
-        // never recomputed from today's configuration (non-negotiable #8).
+        // The credit figure is rebuilt from what was STORED, never
+        // recomputed from today's configuration (non-negotiable #8). Every
+        // unit of a return's credit went to exactly one of three places, so
+        // reading all three back reconstitutes it exactly:
         //
-        // On an EXCHANGE half both are zero by design: the credit went to
-        // the clearing account, and `CreateExchangeUseCase` reads the real
-        // figure back from the replacement sale's own EXCHANGE_CREDIT
-        // payment row, which is where that fact is actually stored.
+        //   the refund tender on this row
+        // + the customer-ledger credit it wrote
+        // + the exchange credit the replacement sale consumed
         const ledgerRow = await tx.customerTransaction.findFirst({
           where: { businessId: actor.tenantId, referenceType: 'SaleReturn', referenceId: existing.id, type: 'SALE_RETURN' },
           select: { amount: true },
         });
+        const pairedSale = await tx.sale.findFirst({
+          where: { businessId: actor.tenantId, exchangeForReturnId: existing.id },
+          select: { payments: { where: { method: 'EXCHANGE_CREDIT' }, select: { amount: true } } },
+        });
         const storedRefund = existing.refundAmount ?? new Prisma.Decimal(0);
         const storedLedger = ledgerRow ? ledgerRow.amount.negated() : new Prisma.Decimal(0);
-        return Object.assign(existing, { totalRefundable: round4(storedRefund.plus(storedLedger)) });
+        const storedExchange = (pairedSale?.payments ?? []).reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
+        return Object.assign(existing, {
+          totalRefundable: round4(storedRefund.plus(storedLedger).plus(storedExchange)),
+        });
       }
     }
 
@@ -556,22 +569,16 @@ export class CreateSaleReturnUseCase {
       });
     }
 
-    // Phase 10 (Exchanges): the exchange half carries no refund of its
-    // own - the credit is settled by the replacement sale - so a caller
-    // supplying one would be describing money that does not move.
-    if (settledByExchange && refundAmount.greaterThan(0)) {
-      throw new ValidationFailedError('The returned half of an exchange is settled by the replacement sale, not by a refund');
-    }
-
     // A walk-in has no ledger for a remainder to sit on, so the refund
     // must settle the whole credit. This is FORCED BY THE DATA MODEL,
     // not an invented policy - it is the same shape as the existing rule
     // that a walk-in SALE must be paid in full. Without it, the
     // difference would simply vanish.
     //
-    // An exchange settles the credit through the replacement sale rather
-    // than a tender, so the rule is satisfied by construction and the
-    // check does not apply.
+    // An exchange settles the whole credit by construction - part onto the
+    // replacement, the remainder back as money, and the split is proved
+    // exact by `CreateSaleUseCase` before the transaction commits - so the
+    // rule is satisfied and the check does not apply.
     if (!settledByExchange && !sale.customerId && totalRefundable.greaterThan(0) && !refundAmount.equals(totalRefundable)) {
       throw new ValidationFailedError(
         'A walk-in return must be refunded in full - there is no customer account for the balance to sit on',
@@ -604,9 +611,9 @@ export class CreateSaleReturnUseCase {
     }
 
     // The customer's ledger takes only what was NOT handed back in cash -
-    // and, on an exchange, nothing at all: the whole credit is spent on
-    // the replacement, so posting it to the ledger as well would credit
-    // the customer twice for one set of goods.
+    // and, on an exchange, nothing at all: every unit of the credit is
+    // either spent on the replacement or refunded, so posting any of it to
+    // the ledger would credit the customer twice for one set of goods.
     const ledgerCredit = settledByExchange ? new Prisma.Decimal(0) : round4(totalRefundable.minus(refundAmount));
     if (sale.customerId && ledgerCredit.greaterThan(0)) {
       await tx.customerTransaction.create({
@@ -632,15 +639,12 @@ export class CreateSaleReturnUseCase {
       taxReversal: totalTaxReversal,
       returnInCost,
       damageWriteOff,
-      refund: settledByExchange
-        ? // The exchange half's entire credit goes to the clearing
-          // account, expressed as an EXCHANGE_CREDIT "tender". The
-          // replacement sale debits the same account by the same figure,
-          // so the pair nets to exactly zero.
-          { method: 'EXCHANGE_CREDIT' as const, amount: totalRefundable }
-        : input.refund && refundAmount.greaterThan(0)
-          ? { method: input.refund.method, amount: refundAmount }
-          : null,
+      refund: input.refund && refundAmount.greaterThan(0) ? { method: input.refund.method, amount: refundAmount } : null,
+      // Phase 10.2: the part of the credit the replacement consumes. On an
+      // upward or even exchange that is the whole credit; on a downward one
+      // it is the credit less the money handed back. The replacement debits
+      // the same figure, so the pair nets to exactly zero either way.
+      exchangeCredit: settledByExchange ? round4(totalRefundable.minus(refundAmount)) : undefined,
     });
     if (returnJournalLines.length > 0) {
       await this.accounting.postEntry(tx, {

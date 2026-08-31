@@ -1,7 +1,33 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 10 — Release Gate (**Complete. PHASE 10 IS CLOSED. Phase 11 NOT started.**)
+Phase 10.2 — Downward Exchanges (**Complete. Phase 11 NOT started.**)
+
+Phase 10.1 was a decision gate that found the Phase 10 exchange refusal rested on a **wrong premise**, and Phase 10.2 implemented the correction. `SaleReturn.refundMethod`/`refundAmount` mean *the real tender handed back*; the exchange-credit portion is not a refund and already lives on the sale as an `EXCHANGE_CREDIT` payment. A downward exchange therefore needs ONE refund figure with ONE method — exactly what the row carries.
+
+Upward, even and downward exchanges are now one path, differing only in two values:
+
+    requiredRefund = max(0, returnCredit - replacementTotal)
+    creditApplied  = returnCredit - requiredRefund
+
+so both settlement identities hold in every direction, and are enforced:
+
+    returnCredit     = creditApplied + refund
+    replacementTotal = creditApplied + tender
+
+**The refund amount is not trusted.** The client names the METHOD, because only the till knows how money physically went back; the AMOUNT is proved against the two totals by `CreateSaleUseCase` — the only place that knows the replacement's — and a wrong figure rolls the whole exchange back naming the one that would have worked.
+
+**No schema change, no migration, no new business rule.** Every rule is inherited: BD-23 for the refund tender, BD-1 for the credit and the loyalty reversal, BD-18 for the tax, BD-3 for the earning; promotions, serials and idempotency untouched.
+
+**Verification:** 597/597 e2e across 49 files · 28/28 unit · build, typecheck and lint clean · 54 migrations, no drift, both databases up to date. A SQL sweep across 20 exchange pairs (11 of them downward) confirms the clearing account at exactly 0.0000, zero unbalanced entries, and **zero violations of `C = creditApplied + R`** checked against the journal itself.
+
+**Behavioural correction reported:** the Phase 10 test asserting a downward exchange was refused is directly contradicted by the approved 10.2 policy. It is replaced by a test that proves the refund is *not trusted* — a wrong, excessive or omitted amount is refused — and it keeps the atomicity assertion the old test carried, now against the refund-validation path. Nothing was weakened.
+
+**Narrowing against 10.1 §17:** that section noted an account customer *may* leave the surplus on their ledger. The approved 10.2 spec (`C = creditApplied + refundAmount`, with no ledger term) supersedes it: an exchange settles completely, and a customer wanting store credit uses a plain return, which supports it. This keeps the Phase 10 guarantee that an exchange leaves nothing on the ledger, and its passing test, intact.
+
+---
+
+## Phase 10 — Release Gate (**Complete. PHASE 10 IS CLOSED.**)
 
 Phase 10 turned the engine of Phases 1–8 into a shop that can actually open its doors: a till with a cash drawer, tax the business configures rather than the client asserts, serials that survive every path a physical unit takes, exchanges, parked baskets, receipts, expenses, and password management.
 
@@ -1203,6 +1229,8 @@ None.
 `docs/state/PROJECT_STATE.md` only. **No source file, schema, migration, seed, permission, validation schema or test was changed** — 8G was documentation and final verification, nothing else, and the only repository modification was verified to be this file before any edit was made.
 
 ## Next Phase
+**PHASE 10.2 IS CLOSED**, and with it the last material contract ambiguity Phase 10 left open. The exchange endpoint now covers every direction.
+
 **PHASE 10 IS CLOSED.** 10A Cash/Till, 10B Tax, 10C Refund Tender, 10D Serial Lifecycle, 10E Return Disposition, Exchanges, Hold/Resume, 10F Receipts, 10G Passwords, 10H Expenses and 10I Contract Freeze are all complete and verified.
 
 Phase 8 is closed (8A–8G). Phase 9 was a contract-and-roadmap gate, not an implementation phase, and produced the approved decisions BD-17 … BD-25 plus the resolutions of BLOCKING-1 (tax-inclusive pricing) and BLOCKING-2 (soft hold) that Phase 10 implements.

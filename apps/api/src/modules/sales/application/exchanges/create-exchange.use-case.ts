@@ -45,15 +45,30 @@ import { CreateSaleUseCase } from '../sales/create-sale.use-case';
  * first already holds is free, so composing them cannot deadlock where
  * either alone would not.
  *
- * DELIBERATE BOUNDARY: A DOWNWARD EXCHANGE IS REFUSED. Swapping for
- * something CHEAPER is a return plus a separate sale — the difference is
- * real money going back to the customer, and the return document already
- * models that event exactly, with its own refund tender. Expressing it
- * here would need a two-part refund (part clearing, part cash) that the
- * append-only `sale_returns` row cannot carry, and inventing that shape
- * now would be widening the scope rather than implementing it. The
- * rejection, raised by CreateSaleUseCase, names both figures and says
- * what to do instead.
+ * ALL THREE DIRECTIONS ARE ONE PATH (Phase 10.2). Upward, even and
+ * downward exchanges differ only in the value of two figures, never in the
+ * code that runs:
+ *
+ *     requiredRefund = max(0, returnCredit - replacementTotal)
+ *     creditApplied  = returnCredit - requiredRefund
+ *
+ * Upward and even exchanges require a refund of zero and the customer
+ * tenders any difference; a downward one refunds precisely the surplus and
+ * the customer tenders nothing. The two settlement identities that follow
+ * are what keep the money honest, and both are enforced:
+ *
+ *     returnCredit    = creditApplied + refund      (the return half)
+ *     replacementTotal = creditApplied + tender     (the sale half)
+ *
+ * so `returnCredit + tender = replacementTotal + refund` — money in equals
+ * money out, with nothing left over to go missing.
+ *
+ * THE REFUND AMOUNT IS NOT TRUSTED. The client names the METHOD, because
+ * only the till knows whether the difference went back as cash or to a
+ * card. The AMOUNT is proved against the two totals by
+ * `CreateSaleUseCase`, the only place that knows the replacement's, and a
+ * wrong figure rolls the whole exchange back naming the one that would
+ * have worked.
  */
 @Injectable()
 export class CreateExchangeUseCase {
@@ -86,6 +101,13 @@ export class CreateExchangeUseCase {
           idempotencyKey: input.idempotencyKey ? `${input.idempotencyKey}:return` : undefined,
           reason: input.reason,
           items: input.returnItems,
+          // Phase 10.2: the money going back, when the replacement is worth
+          // less than the goods returned. Recorded on the return itself -
+          // it is a real tender handed to the customer, which is exactly
+          // what `SaleReturn.refundMethod`/`refundAmount` mean - and its
+          // amount is proved by the replacement below before this
+          // transaction can commit.
+          refund: input.refund,
         },
         true,
       );
@@ -110,7 +132,11 @@ export class CreateExchangeUseCase {
           payments: input.payments,
           redeemPoints: input.redeemPoints,
         },
-        { returnId: saleReturn.id, credit: new Prisma.Decimal(saleReturn.totalRefundable) },
+        {
+          returnId: saleReturn.id,
+          returnCredit: new Prisma.Decimal(saleReturn.totalRefundable),
+          refundAmount: new Prisma.Decimal(input.refund?.amount ?? 0),
+        },
       );
 
       // The credit is read back from the replacement's own
@@ -123,15 +149,21 @@ export class CreateExchangeUseCase {
         .filter((p) => p.method === 'EXCHANGE_CREDIT')
         .reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
 
+      // Likewise the refund: read from the return row that stores it, not
+      // from the request that asked for it.
+      const refunded = saleReturn.refundAmount ?? new Prisma.Decimal(0);
+
       return {
         saleReturn,
         sale: replacement,
-        // What the two halves settled between them, and what the customer
-        // still had to tender on top. Surfaced because a receipt has to
-        // show both, and deriving them client-side from two documents is
-        // exactly the kind of arithmetic that drifts.
+        // The three figures a receipt has to show: what the returned goods
+        // paid for, what the customer still had to tender, and what went
+        // back to them as money. Exactly one of the last two can be
+        // non-zero. Deriving them client-side from two documents is
+        // precisely the kind of arithmetic that drifts.
         exchangeCredit: credit.toString(),
         amountDue: new Prisma.Decimal(replacement.totalAmount).minus(credit).toString(),
+        refunded: refunded.toString(),
       };
     });
   }

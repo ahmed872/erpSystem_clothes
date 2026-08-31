@@ -167,6 +167,24 @@ export const createExchangeSchema = z.object({
   /// than the goods handed back. EXCHANGE_CREDIT is not among the methods
   /// a client may name: only the server can produce it.
   payments: z.array(salePaymentInputSchema).max(20).default([]),
+  /// Phase 10.2 — the money going back when the replacement is worth LESS
+  /// than the goods handed back.
+  ///
+  /// The AMOUNT is not trusted. The server computes what the exchange
+  /// permits - exactly `returnCredit - replacementTotal`, or zero when the
+  /// replacement is worth at least as much - and rejects anything else,
+  /// naming the figure that would have worked. What the client genuinely
+  /// contributes is the METHOD: only the till knows whether the difference
+  /// went back as cash, to a card, or to a wallet.
+  ///
+  /// Omit it for an upward or even exchange, where nothing goes back.
+  refund: z
+    .object({
+      method: z.enum(['CASH', 'CARD', 'WALLET', 'OTHER']),
+      amount: positiveMoneySchema,
+      reference: z.string().trim().max(200).optional(),
+    })
+    .optional(),
   /// Phase 8C: the replacement may spend loyalty points like any sale.
   redeemPoints: nonNegativeMoneySchema.optional(),
 });

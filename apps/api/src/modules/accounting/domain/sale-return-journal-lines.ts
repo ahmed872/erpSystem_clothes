@@ -36,6 +36,17 @@ export interface SaleReturnJournalInput {
    * only the tax actually retained.
    */
   taxReversal: Prisma.Decimal;
+  /**
+   * Phase 10.2 (Exchanges) — the portion of the credit that settles a
+   * replacement sale instead of going back as money or onto a ledger.
+   *
+   * Credited to EXCHANGE_CLEARING, which the replacement debits by the
+   * same figure, so the pair nets to exactly zero. Kept as its own input
+   * rather than dressed up as a tender because it is not one: no money
+   * moves, and a downward exchange credits BOTH this account and a real
+   * tender in the same entry - a shape a single `refund` cannot express.
+   */
+  exchangeCredit?: Prisma.Decimal;
 }
 
 const SALE_TENDER_KEY: Record<SalePaymentMethod, AccountingMappingKey> = {
@@ -43,10 +54,11 @@ const SALE_TENDER_KEY: Record<SalePaymentMethod, AccountingMappingKey> = {
   CARD: 'TENDER_CARD',
   WALLET: 'TENDER_WALLET',
   OTHER: 'TENDER_OTHER',
-  // Phase 10 (Exchanges): the value of the goods coming back is parked in
-  // a clearing account rather than handed over as money. The replacement
-  // sale debits the same account by the same figure, so the pair nets to
-  // exactly zero and no tender leaves the business.
+  // Phase 10.2: unreachable on this side - a return's refund method comes
+  // from a schema that admits only real tenders, and the exchange portion
+  // now arrives as its own `exchangeCredit` input. Mapped correctly anyway,
+  // because an exhaustive Record that lies about one case is worse than one
+  // that carries a case nothing reaches.
   EXCHANGE_CREDIT: 'EXCHANGE_CLEARING',
 };
 
@@ -97,16 +109,23 @@ export async function buildSaleReturnJournalLines(tx: TenantTx, businessId: stri
   // What the customer gets back: merchandise plus the tax they paid on it.
   const totalRefundable = round4(totalCredit.plus(taxReversal));
   const refundAmount = input.refund ? round4(input.refund.amount) : new Prisma.Decimal(0);
-  const ledgerCredit = round4(totalRefundable.minus(refundAmount));
+  const exchangeCredit = input.exchangeCredit ? round4(input.exchangeCredit) : new Prisma.Decimal(0);
+  // Every unit of the credit lands in exactly one of three places: spent
+  // on a replacement, handed back as money, or left on the customer's
+  // ledger. Nothing is unaccounted for, which is what makes the entry
+  // balance without a plug.
+  const ledgerCredit = round4(totalRefundable.minus(refundAmount).minus(exchangeCredit));
 
   // Revenue now reverses whenever the value went SOMEWHERE real - either
   // onto a customer's ledger or back out as a tender. A walk-in return with
   // a recorded refund therefore reverses revenue for the first time.
-  const postRevenueReversal = totalRefundable.greaterThan(0) && (Boolean(input.customerId) || refundAmount.greaterThan(0));
+  const postRevenueReversal =
+    totalRefundable.greaterThan(0) && (Boolean(input.customerId) || refundAmount.greaterThan(0) || exchangeCredit.greaterThan(0));
   if (postRevenueReversal) {
     neededKeys.push('SALES_REVENUE');
     if (taxReversal.greaterThan(0)) neededKeys.push('TAX_PAYABLE');
     if (refundAmount.greaterThan(0)) neededKeys.push(SALE_TENDER_KEY[input.refund!.method]);
+    if (exchangeCredit.greaterThan(0)) neededKeys.push('EXCHANGE_CLEARING');
     if (ledgerCredit.greaterThan(0)) neededKeys.push('ACCOUNTS_RECEIVABLE');
   }
 
@@ -131,6 +150,13 @@ export async function buildSaleReturnJournalLines(tx: TenantTx, businessId: stri
         accountId: accounts.get(SALE_TENDER_KEY[input.refund!.method])!,
         credit: refundAmount,
         description: `Refund tendered: ${input.refund!.method}`,
+      });
+    }
+    if (exchangeCredit.greaterThan(0)) {
+      lines.push({
+        accountId: accounts.get('EXCHANGE_CLEARING')!,
+        credit: exchangeCredit,
+        description: 'Credit applied to the replacement sale',
       });
     }
     if (ledgerCredit.greaterThan(0)) {

@@ -149,13 +149,19 @@ export class CreateSaleUseCase {
     input: CreateSaleInput,
     /**
      * Phase 10 (Exchanges): SERVER-SET, never reachable from a request.
-     * The credit of the return this sale replaces, tendered against it as
-     * an EXCHANGE_CREDIT payment. A client that could set this could pay
-     * for anything with nothing, which is why it is a parameter and not a
-     * request field - and why `salePaymentInputSchema` does not admit the
-     * EXCHANGE_CREDIT method at all.
+     *
+     * `returnCredit` is what the return half computed; `refundAmount` is
+     * what the client asked to hand back as money. This use-case is the
+     * ONLY place that knows the replacement's total, so it is the only
+     * place that can prove the split is the one the exchange permits - and
+     * it does, below, before a single payment row is written.
+     *
+     * A client that could set these could pay for anything with nothing,
+     * which is why they are parameters rather than request fields - and why
+     * `salePaymentInputSchema` does not admit the EXCHANGE_CREDIT method at
+     * all.
      */
-    exchange?: { returnId: string; credit: Prisma.Decimal },
+    exchange?: { returnId: string; returnCredit: Prisma.Decimal; refundAmount: Prisma.Decimal },
   ) {
     if (input.idempotencyKey) {
       const existing = await tx.sale.findFirst({
@@ -532,29 +538,60 @@ export class CreateSaleUseCase {
 
     const totalAmount = subtotal.minus(discountAmount).plus(taxAmount);
 
-    // Phase 10 (Exchanges): the returned goods' credit counts as tendered.
-    // It is applied in FULL, which is why the replacement must be worth at
-    // least the credit - see the check immediately below.
-    const payments = exchange
-      ? [{ amount: exchange.credit, method: 'EXCHANGE_CREDIT' as const, reference: undefined }, ...input.payments]
+    // ---------------------------------------------------------------
+    // Phase 10.2 (Exchanges): PROVING THE REFUND.
+    //
+    // The client states how much money goes back; the server states
+    // whether that is the amount this exchange permits. There is exactly
+    // one permitted figure, and it falls out of the two totals:
+    //
+    //     requiredRefund = max(0, returnCredit - replacementTotal)
+    //
+    // Upward and even exchanges therefore require ZERO - the customer
+    // tenders the difference instead - and a downward one requires
+    // precisely the surplus. Nothing in between is accepted, because
+    // nothing in between describes a settled exchange: the leftover would
+    // be money the business had taken and not accounted for.
+    //
+    // This is the only place the check can live. The return half runs
+    // first (so the returned goods are back on the shelf before the
+    // replacement is drawn from it) and `sale_returns` is append-only, so
+    // the refund is written before the replacement is priced. A wrong
+    // figure therefore rolls the WHOLE exchange back rather than being
+    // corrected in place - which is the honest outcome, and why the error
+    // names the figure that would have worked.
+    // ---------------------------------------------------------------
+    let exchangeCreditApplied = new Prisma.Decimal(0);
+    if (exchange) {
+      const surplus = exchange.returnCredit.minus(totalAmount);
+      const requiredRefund = round4(surplus.greaterThan(0) ? surplus : new Prisma.Decimal(0));
+      if (!round4(exchange.refundAmount).equals(requiredRefund)) {
+        throw new ValidationFailedError(
+          requiredRefund.isZero()
+            ? 'This exchange refunds nothing: the replacement is worth at least the goods returned, so the customer tenders the difference instead.'
+            : 'The refund on an exchange must be exactly the amount by which the returned goods exceed the replacement.',
+          {
+            returnCredit: exchange.returnCredit.toString(),
+            replacementTotal: totalAmount.toString(),
+            requiredRefund: requiredRefund.toString(),
+            statedRefund: round4(exchange.refundAmount).toString(),
+          },
+        );
+      }
+      // The single source of truth for the credit, computed here and
+      // stored once, on the payment row below.
+      exchangeCreditApplied = round4(exchange.returnCredit.minus(requiredRefund));
+    }
+
+    // The credit the returned goods carry counts as tendered. A
+    // fully-discounted replacement can consume nothing, and a zero-amount
+    // payment row carries no information, so it is simply not written.
+    const payments = exchangeCreditApplied.greaterThan(0)
+      ? [{ amount: exchangeCreditApplied, method: 'EXCHANGE_CREDIT' as const, reference: undefined }, ...input.payments]
       : input.payments;
 
     let paidNow = new Prisma.Decimal(0);
     for (const p of payments) paidNow = paidNow.plus(p.amount);
-
-    if (exchange && exchange.credit.greaterThan(totalAmount)) {
-      // A DOWNWARD exchange - swapping for something cheaper - is a return
-      // plus a separate sale, and the difference is real money going back
-      // to the customer. The return document already models that event
-      // exactly, with its own refund tender; expressing it here would need
-      // a two-part refund the append-only `sale_returns` row cannot carry.
-      // Rejecting with both figures named is more useful than inventing a
-      // shape for it.
-      throw new ValidationFailedError(
-        'The replacement must be worth at least the credit of the goods returned. For a cheaper replacement, record the return and the new sale separately so the difference is refunded as money.',
-        { returnCredit: exchange.credit.toString(), replacementTotal: totalAmount.toString() },
-      );
-    }
 
     if (paidNow.greaterThan(totalAmount)) {
       throw new ValidationFailedError('Payments exceed the sale total - overpayment/change-due is not tracked, tender the exact amount owed');
