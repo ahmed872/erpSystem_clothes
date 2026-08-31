@@ -69,4 +69,46 @@ describe('cartStore', () => {
     useCartStore.getState().updateDiscount(key, -10);
     expect(useCartStore.getState().lines[0].discountAmount).toBe(0);
   });
+
+  // ---------------------------------------------- Phase 12: held sales ----
+  const parkedLine = {
+    key: 'variant-9',
+    variantId: 'variant-9',
+    sku: 'SKU-9',
+    productName: 'Parked coat',
+    variantLabel: 'Blue',
+    tracksSerialNumbers: false,
+    unitPrice: 80,
+    quantity: 2,
+    discountAmount: 0,
+    serials: [],
+  };
+
+  it('a fresh cart is not resuming anything', () => {
+    expect(useCartStore.getState().resuming).toBeNull();
+  });
+
+  it('loading a parked basket REPLACES the cart rather than merging into it', () => {
+    // Merging someone else's parked basket into a half-built one would
+    // sell goods nobody asked for.
+    useCartStore.getState().addVariant(makeVariant(), 45);
+    useCartStore.getState().loadHold({ id: 'h1', holdNumber: 'HOLD-ABCD1234', label: 'blue coat lady' }, [parkedLine], null);
+
+    const state = useCartStore.getState();
+    expect(state.lines).toEqual([parkedLine]);
+    expect(state.resuming).toEqual({ id: 'h1', holdNumber: 'HOLD-ABCD1234', label: 'blue coat lady' });
+  });
+
+  it('a resumed basket starts with no loyalty redemption — points are spent against the sale being made now', () => {
+    useCartStore.getState().setRedeemPoints(50);
+    useCartStore.getState().loadHold({ id: 'h1', holdNumber: 'HOLD-ABCD1234', label: null }, [parkedLine], null);
+    expect(useCartStore.getState().redeemPoints).toBe(0);
+  });
+
+  it('clearing the cart also puts the basket back — the till must not still think it is holding one', () => {
+    useCartStore.getState().loadHold({ id: 'h1', holdNumber: 'HOLD-ABCD1234', label: null }, [parkedLine], null);
+    useCartStore.getState().clear();
+    expect(useCartStore.getState().resuming).toBeNull();
+    expect(useCartStore.getState().lines).toHaveLength(0);
+  });
 });

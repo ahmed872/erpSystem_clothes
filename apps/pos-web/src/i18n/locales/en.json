@@ -154,7 +154,8 @@
     "returns": "Returns",
     "closeShift": "Close shift",
     "logout": "Log out",
-    "language": "العربية"
+    "language": "العربية",
+    "holds": "Held sales"
   },
   "common": {
     "loading": "Loading...",
@@ -189,5 +190,42 @@
     "confirming": "Processing exchange…",
     "doneTitle": "Exchange complete",
     "newExchange": "Another exchange"
+  },
+  "holds": {
+    "title": "Held sales",
+    "notASaleNotice": "A held basket is not a sale. Nothing has been paid, no stock has moved and no receipt exists until it is resumed and completed at the till.",
+    "empty": "No held baskets",
+    "status": {
+      "OPEN": "Held",
+      "RESUMED": "Completed",
+      "VOIDED": "Cancelled"
+    },
+    "holdTitle": "Hold this basket",
+    "holdAction": "Hold sale",
+    "holding": "Holding...",
+    "holdExplainer": "The basket is put aside so the till is free. Nothing is sold and no money is taken. Prices, tax and promotions are worked out when you pick it up again.",
+    "labelField": "Name this basket",
+    "labelHint": "So you can find it again - \"blue coat lady\", \"table 4\"",
+    "notesField": "Notes",
+    "itemCount": "Lines",
+    "indicativeValue": "Indicative value",
+    "indicativeShort": "Indicative",
+    "indicativeNotice": "An indication only. The real total is worked out by the server when the basket is resumed.",
+    "lineSummary": "{{lines}} line(s), {{units}} unit(s)",
+    "parkedAt": "Held at",
+    "resumeAction": "Resume",
+    "cancelAction": "Cancel basket",
+    "cancelTitle": "Cancel this held basket?",
+    "cancelConfirm": "Basket {{holdNumber}} will be marked cancelled and can no longer be resumed.",
+    "cancelNotice": "No money moves and no stock changes. The basket stays visible under Cancelled.",
+    "cancelReason": "Abandoned at the till",
+    "noLongerOpen": "This basket is no longer held - someone else has already resumed or cancelled it.",
+    "otherWarehouse": "This basket was held at another warehouse and cannot be resumed from this till.",
+    "viewResultingSale": "View the sale it became",
+    "resumingBadge": "Resuming a held basket",
+    "resumingNotice": "Not sold yet. Finish at the till to complete the sale.",
+    "putBack": "Put back",
+    "checkoutTitle": "Complete held sale",
+    "checkoutNotice": "Prices, tax, promotions and loyalty have just been worked out afresh - not when the basket was held."
   }
 }

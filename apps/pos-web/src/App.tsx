@@ -10,6 +10,7 @@ import { ShiftSetupPage } from './pages/ShiftSetupPage';
 import { PosPage } from './pages/PosPage';
 import { ReceiptPage } from './pages/ReceiptPage';
 import { ReturnsPage } from './pages/ReturnsPage';
+import { HeldSalesPage } from './pages/HeldSalesPage';
 import { ShiftClosePage } from './pages/ShiftClosePage';
 
 /** On a fresh page load with a persisted session, re-validate permissions
@@ -65,6 +66,9 @@ export function App() {
           <Route element={<RequireShift />}>
             <Route path="/pos" element={<PosPage />} />
             <Route path="/returns" element={<ReturnsPage />} />
+            {/* Parked baskets get their own route and never appear in a
+                sales list — a hold is not a sale. */}
+            <Route path="/holds" element={<HeldSalesPage />} />
             <Route path="/shift-close" element={<ShiftClosePage />} />
             <Route path="/receipt/:saleId" element={<ReceiptPage />} />
           </Route>

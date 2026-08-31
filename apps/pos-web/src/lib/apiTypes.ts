@@ -561,3 +561,88 @@ export interface ExchangeResult {
   amountDue: string;
   refunded: string;
 }
+
+// ---------------------------------------------------------- Held sales ----
+
+/**
+ * Phase 12 (Held Sales) — a PARKED BASKET, exactly as the backend stores
+ * it (`apps/api/prisma/schema.prisma`, models `HeldSale`/`HeldSaleItem`).
+ *
+ * Read the item shape carefully: it is `SaleItemInput` with the values as
+ * decimal strings, and NOTHING ELSE. There is no subtotal, no tax, no
+ * promotion, no loyalty and no total on a hold, because a hold is a stored
+ * REQUEST and not a half-computed sale — those figures come into existence
+ * when the basket is resumed, from the configuration in force at that
+ * moment. Any total this app shows for a hold is therefore an explicitly
+ * labelled indication, never an authoritative figure.
+ */
+export type HeldSaleStatus = 'OPEN' | 'RESUMED' | 'VOIDED';
+
+export interface HeldSaleItem {
+  id: string;
+  heldSaleId: string;
+  variantId: string;
+  quantity: string;
+  unitPrice: string;
+  discountAmount: string;
+  taxExempt: boolean;
+  serials: string[];
+}
+
+export interface HeldSale {
+  id: string;
+  businessId: string;
+  branchId: string;
+  warehouseId: string;
+  customerId: string | null;
+  shiftId: string;
+  holdNumber: string;
+  status: HeldSaleStatus;
+  label: string | null;
+  notes: string | null;
+  resumedSaleId: string | null;
+  resumedAt: string | null;
+  voidedAt: string | null;
+  voidReason: string | null;
+  createdBy: string;
+  createdAt: string;
+  items: HeldSaleItem[];
+}
+
+/** Deliberately carries no `payments` and no `redeemPoints`: money is
+ * tendered when goods change hands, not when a basket is put aside. */
+export interface CreateHeldSaleInput {
+  warehouseId: string;
+  customerId?: string;
+  label?: string;
+  notes?: string;
+  items: SaleItemInput[];
+}
+
+export interface UpdateHeldSaleInput {
+  customerId?: string | null;
+  label?: string | null;
+  notes?: string | null;
+  items?: SaleItemInput[];
+}
+
+/** Only what could not have been known when the basket was parked. The
+ * goods, warehouse and customer come from the hold itself. */
+export interface ResumeHeldSaleInput {
+  idempotencyKey?: string;
+  payments: SalePaymentInput[];
+  redeemPoints?: number;
+  notes?: string;
+}
+
+export interface ResumeHeldSaleResult {
+  heldSale: HeldSale;
+  sale: Sale;
+}
+
+/** `GET /sales/holds` answers with `meta`, not the `pagination` envelope
+ * the catalogue/customer lists use. */
+export interface HeldSaleList {
+  data: HeldSale[];
+  meta: { total: number; page: number; limit: number };
+}

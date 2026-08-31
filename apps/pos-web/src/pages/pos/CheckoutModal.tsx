@@ -3,7 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button, ErrorBanner, Input, Modal, Select, Spinner } from '@retail/ui-kit';
 import { salesApi } from '../../api/sales';
+import { holdsApi } from '../../api/holds';
 import { describeError } from '../../lib/apiClient';
+import { basketMatchesHold } from '../../lib/holdItems';
 import { formatMoney, parseMoney } from '../../lib/money';
 import { canConfirmTender, changeDue as computeChange, outstanding as computeOutstanding } from '../../lib/tender';
 import { useCartStore } from '../../store/cartStore';
@@ -33,6 +35,18 @@ const METHODS: SalePaymentMethod[] = ['CASH', 'CARD', 'WALLET', 'OTHER'];
  * ran out, a promotion started, or a price moved between the quote and the
  * confirm, the server refuses and the cashier re-quotes - which is one
  * button, and the honest outcome.
+ *
+ * PHASE 12 (HELD SALES) - RESUMING A PARKED BASKET COMES THROUGH HERE TOO,
+ * and deliberately changes almost nothing. The quote is the SAME quote:
+ * a hold stores inputs, so pricing a resumed basket is pricing a cart.
+ * Only the confirm differs, and it has to. `POST /sales` would create the
+ * sale and leave the basket sitting on the shelf OPEN for someone to sell
+ * a second time; `POST /sales/holds/:id/resume` claims the hold and creates
+ * the sale in ONE server transaction, which is what makes two cashiers
+ * pressing confirm at once produce exactly one sale. There is still only
+ * one sale-creation path behind both - `CreateSaleUseCase` - so a resumed
+ * basket gets the same tax, promotions, loyalty, stock and serial checks,
+ * resolved fresh at checkout rather than frozen when it was parked.
  */
 export function CheckoutModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useTranslation();
@@ -41,6 +55,7 @@ export function CheckoutModal({ open, onClose }: { open: boolean; onClose: () =>
   const lines = useCartStore((s) => s.lines);
   const customer = useCartStore((s) => s.customer);
   const redeemPoints = useCartStore((s) => s.redeemPoints);
+  const resuming = useCartStore((s) => s.resuming);
   const clearCart = useCartStore((s) => s.clear);
 
   const [quote, setQuote] = useState<SaleQuote | null>(null);
@@ -127,21 +142,55 @@ export function CheckoutModal({ open, onClose }: { open: boolean; onClose: () =>
     setPayments((prev) => prev.filter((_, i) => i !== index));
   }
 
+  /**
+   * Confirming a PARKED basket, and the one subtlety worth knowing.
+   *
+   * `POST /sales/holds/:id/resume` sells the lines the SERVER has stored —
+   * that is what lets it claim the hold and create the sale in a single
+   * transaction. So anything the cashier changed after picking the basket
+   * up (a serial finally scanned, a quantity corrected, a customer
+   * attached) has to be written back with `PATCH /sales/holds/:id` first,
+   * or it would be silently discarded and the wrong basket sold. The
+   * comparison keeps that PATCH off the wire when nothing was touched,
+   * which is the common case.
+   *
+   * If someone else resumes the basket between the patch and the resume,
+   * the resume is refused with a conflict and no sale is created — which
+   * is the correct outcome, and the same one two simultaneous confirms get.
+   */
+  async function confirmResume(heldSaleId: string, tender: SalePaymentInput[]): Promise<string> {
+    const { data: stored } = await holdsApi.get(heldSaleId);
+    const customerChanged = (stored.customerId ?? null) !== (customer?.id ?? null);
+    if (customerChanged || !basketMatchesHold(stored, lines)) {
+      await holdsApi.update(heldSaleId, { customerId: customer?.id ?? null, items: cartItems() });
+    }
+    const { data } = await holdsApi.resume(heldSaleId, {
+      payments: tender,
+      redeemPoints: redeemPoints > 0 ? redeemPoints : undefined,
+    });
+    return data.sale.id;
+  }
+
   async function handleConfirm() {
     if (!activeShift || !quote) return;
     setSubmitting(true);
     setError(null);
+    const tender = payments.filter((p) => p.amount > 0);
     try {
-      const { data } = await salesApi.create({
-        warehouseId: activeShift.warehouseId,
-        customerId: customer?.id,
-        items: cartItems(),
-        redeemPoints: redeemPoints > 0 ? redeemPoints : undefined,
-        payments: payments.filter((p) => p.amount > 0),
-      });
+      const saleId = resuming
+        ? await confirmResume(resuming.id, tender)
+        : (
+            await salesApi.create({
+              warehouseId: activeShift.warehouseId,
+              customerId: customer?.id,
+              items: cartItems(),
+              redeemPoints: redeemPoints > 0 ? redeemPoints : undefined,
+              payments: tender,
+            })
+          ).data.id;
       clearCart();
       onClose();
-      navigate(`/receipt/${data.id}`);
+      navigate(`/receipt/${saleId}`);
     } catch (err) {
       // The server re-resolved everything and disagreed - stock gone, a
       // promotion started, a price moved. Re-quoting is the recovery, and
@@ -154,8 +203,20 @@ export function CheckoutModal({ open, onClose }: { open: boolean; onClose: () =>
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={t('checkout.title')} size="md">
+    <Modal open={open} onClose={onClose} title={resuming ? t('holds.checkoutTitle') : t('checkout.title')} size="md">
       <div className="flex flex-col gap-4">
+        {/* The basket became a sale at THIS moment, not when it was
+            parked — and the totals above it were resolved just now. */}
+        {resuming && (
+          <div className="rounded-lg border border-warning-200 bg-warning-50 px-3 py-2">
+            <p className="numeric text-xs font-bold text-neutral-800" data-testid="checkout-hold-number">
+              {resuming.holdNumber}
+              {resuming.label ? ` · ${resuming.label}` : ''}
+            </p>
+            <p className="mt-0.5 text-[11px] leading-snug text-neutral-600">{t('holds.checkoutNotice')}</p>
+          </div>
+        )}
+
         {quoting && !quote && (
           <div className="flex items-center justify-center gap-2 rounded-lg bg-neutral-50 p-6 text-sm text-neutral-500">
             <Spinner /> {t('checkout.quoting')}

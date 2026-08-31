@@ -1,7 +1,17 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 12 — POS Web (**Exchanges milestone complete.** Held sales, cash drawer, warranty NOT started. ERP Web NOT started, offline sync NOT started.)
+Phase 12 — POS Web (**Held sales milestone complete.** Cash drawer, warranty NOT started. ERP Web NOT started, offline sync NOT started.)
+
+### Held sales (Phase 12 milestone)
+
+The hold/resume BACKEND has existed and been correct since Phase 10 (`9eaec8c`) — a `HeldSale` is a separate entity storing sale INPUTS only, and resuming runs them through the unchanged `CreateSaleUseCase` inside the transaction that claims the hold. **No backend change was needed or made** in this milestone: no schema change, no migration, no endpoint, no permission (117, unchanged). The POS floor had no way to reach any of it, and that is what this milestone adds.
+
+**Frontend.** `/holds` lists parked baskets on their own route — never in a sales list — badged Held / Completed / Cancelled, with the standing notice that a held basket is not a sale. "Hold sale" on the cart parks the basket and frees the till; resuming loads it into the ORDINARY cart (product names re-fetched from the catalogue, the customer re-read from the server) and sends the cashier to the ORDINARY checkout, where the ORDINARY `POST /sales/quote` prices it. Serials are deliberately not required to park a basket — BD-13 is enforced at checkout, by the server, where it belongs.
+
+**One sale-creation path.** Confirming a resumed basket calls `POST /sales/holds/:id/resume`, never `POST /sales`: the latter would create the sale and leave the basket OPEN for a second cashier to sell again. Edits made after picking a basket up are written back with `PATCH /sales/holds/:id` first, because the resume sells the lines the SERVER stores; the browser compares by value so an untouched basket sends no needless write.
+
+**Nothing in the browser computes money.** The only arithmetic added is `indicativeValue` — quantity x price less the manual discount — labelled an indication on every screen it appears, so a cashier can tell two parked baskets apart. Tax, promotions, loyalty and the total come from the quote at resume time and from nowhere else.
 
 The exchange BACKEND has existed and been correct since Phase 10/10.2 — one atomic transaction composing the unchanged return and sale, all three directions, the clearing account netting to zero. What it could not do was tell a till the outcome **before** the cashier committed to it, and that is the only thing this milestone adds.
 

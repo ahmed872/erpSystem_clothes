@@ -17,6 +17,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const activeShift = useShiftStore((s) => s.activeShift);
   const clearShift = useShiftStore((s) => s.setActiveShift);
   const canReturn = usePermission('sales.return');
+  const canHold = usePermission('sales.hold');
   const canCloseShift = usePermission('shifts.close');
 
   async function handleLogout() {
@@ -38,6 +39,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           {activeShift && (
             <nav className="hidden items-center gap-1 sm:flex">
               <ShellNavLink to="/pos">{t('nav.pos')}</ShellNavLink>
+              {canHold && <ShellNavLink to="/holds">{t('nav.holds')}</ShellNavLink>}
               {canReturn && <ShellNavLink to="/returns">{t('nav.returns')}</ShellNavLink>}
               {canCloseShift && <ShellNavLink to="/shift-close">{t('nav.closeShift')}</ShellNavLink>}
             </nav>

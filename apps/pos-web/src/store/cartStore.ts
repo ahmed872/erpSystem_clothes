@@ -17,10 +17,30 @@ export interface CartLine {
   serials: string[];
 }
 
+/**
+ * Phase 12 (Held Sales) — which parked basket, if any, this cart came
+ * from.
+ *
+ * The cart is otherwise unchanged: a resumed basket is edited, priced and
+ * paid for exactly like one typed in fresh. All this carries is the
+ * identity needed to (a) tell the cashier plainly that they are holding
+ * someone's parked basket rather than a new sale, and (b) send the
+ * confirmation down `POST /sales/holds/:id/resume` instead of
+ * `POST /sales`, so the hold is claimed and the sale created in the same
+ * transaction.
+ */
+export interface ResumingHold {
+  id: string;
+  holdNumber: string;
+  label: string | null;
+}
+
 interface CartState {
   lines: CartLine[];
   customer: Customer | null;
   redeemPoints: number;
+  /** Non-null only while a parked basket is being picked up. */
+  resuming: ResumingHold | null;
   addVariant: (variant: ProductVariant, unitPrice: number) => void;
   updateQuantity: (key: string, quantity: number) => void;
   updateDiscount: (key: string, discountAmount: number) => void;
@@ -29,6 +49,10 @@ interface CartState {
   removeLine: (key: string) => void;
   setCustomer: (customer: Customer | null) => void;
   setRedeemPoints: (points: number) => void;
+  /** Replaces the whole cart with a parked basket. Whatever was in the
+   * cart is discarded on purpose: picking up someone else's basket and
+   * silently merging it into a half-built one would sell the wrong goods. */
+  loadHold: (hold: ResumingHold, lines: CartLine[], customer: Customer | null) => void;
   clear: () => void;
 }
 
@@ -40,6 +64,7 @@ export const useCartStore = create<CartState>()((set) => ({
   lines: [],
   customer: null,
   redeemPoints: 0,
+  resuming: null,
   addVariant: (variant, unitPrice) =>
     set((state) => {
       const existing = state.lines.find((l) => l.variantId === variant.id);
@@ -77,5 +102,6 @@ export const useCartStore = create<CartState>()((set) => ({
   removeLine: (key) => set((state) => ({ lines: state.lines.filter((l) => l.key !== key) })),
   setCustomer: (customer) => set({ customer, redeemPoints: customer ? 0 : 0 }),
   setRedeemPoints: (redeemPoints) => set({ redeemPoints: Math.max(0, redeemPoints) }),
-  clear: () => set({ lines: [], customer: null, redeemPoints: 0 }),
+  loadHold: (resuming, lines, customer) => set({ resuming, lines, customer, redeemPoints: 0 }),
+  clear: () => set({ lines: [], customer: null, redeemPoints: 0, resuming: null }),
 }));

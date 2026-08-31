@@ -23,6 +23,15 @@ export const catalogApi = {
     );
     return { data: { ...data, variants: data.variants.map((v) => ({ ...v, product: data })) } };
   },
+  /**
+   * Phase 12 (Held Sales): a parked basket stores variant IDS and numbers
+   * — it stores a sale REQUEST, not a display — so picking one up needs
+   * the product name and the serial-tracking flag back before the cashier
+   * sees the cart. Same `VARIANT_INCLUDE` shape as the barcode lookup, so
+   * `product` is already nested; `products.view`, which every till user
+   * holds in order to search at all.
+   */
+  getVariant: (id: string) => api.get<{ data: ProductVariant }>(`/catalog/variants/${id}`),
   lookupByBarcode: (barcode: string) =>
     api.get<{ data: ProductVariant }>(`/catalog/variants/lookup?barcode=${encodeURIComponent(barcode)}`),
   lookupBySku: (sku: string) => api.get<{ data: ProductVariant }>(`/catalog/variants/lookup?sku=${encodeURIComponent(sku)}`),

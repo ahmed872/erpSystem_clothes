@@ -6,8 +6,10 @@ import { useCartStore } from '../../store/cartStore';
 import { usePermission } from '../../hooks/usePermission';
 import { loyaltyApi } from '../../api/loyalty';
 import { formatMoney, parseMoney, previewLineTotal } from '../../lib/money';
+import { canHold } from '../../lib/holdItems';
 import { CustomerPickerModal } from './CustomerPickerModal';
 import { SerialCaptureModal } from './SerialCaptureModal';
+import { HoldSaleModal } from './HoldSaleModal';
 import type { CartLine } from '../../store/cartStore';
 
 export function CartPanel({ onCheckout }: { onCheckout: () => void }) {
@@ -15,12 +17,16 @@ export function CartPanel({ onCheckout }: { onCheckout: () => void }) {
   const lines = useCartStore((s) => s.lines);
   const customer = useCartStore((s) => s.customer);
   const redeemPoints = useCartStore((s) => s.redeemPoints);
+  const resuming = useCartStore((s) => s.resuming);
+  const clearCart = useCartStore((s) => s.clear);
   const { updateQuantity, updateDiscount, updateUnitPrice, removeLine, setCustomer, setRedeemPoints, setSerials } = useCartStore();
   const canChangePrice = usePermission('products.change_price');
   const canViewLoyalty = usePermission('loyalty.view');
+  const canHoldSale = usePermission('sales.hold');
 
   const [customerPickerOpen, setCustomerPickerOpen] = useState(false);
   const [serialLine, setSerialLine] = useState<CartLine | null>(null);
+  const [holdOpen, setHoldOpen] = useState(false);
 
   const pointsQuery = useQuery({
     queryKey: ['loyalty-balance', customer?.id],
@@ -45,6 +51,28 @@ export function CartPanel({ onCheckout }: { onCheckout: () => void }) {
           {customer ? customer.name : t('pos.walkIn')}
         </button>
       </div>
+
+      {/* PICKED UP, NOT SOLD. A cashier who walks up to a till holding
+          someone else's basket must be able to see that at a glance —
+          otherwise the difference between "held" and "completed" lives
+          only in their memory. */}
+      {resuming && (
+        <div className="flex items-start justify-between gap-2 border-b border-warning-200 bg-warning-50 px-4 py-2">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone="warning">{t('holds.resumingBadge')}</Badge>
+              <span className="numeric text-xs font-bold text-neutral-800" data-testid="resuming-hold-number">
+                {resuming.holdNumber}
+              </span>
+            </div>
+            {resuming.label && <p className="mt-0.5 text-xs font-semibold text-neutral-700">{resuming.label}</p>}
+            <p className="mt-0.5 text-[11px] leading-snug text-neutral-500">{t('holds.resumingNotice')}</p>
+          </div>
+          <button type="button" onClick={clearCart} className="shrink-0 text-xs font-medium text-neutral-600 hover:underline">
+            {t('holds.putBack')}
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto px-3 py-2">
         {lines.length === 0 ? (
@@ -144,6 +172,25 @@ export function CartPanel({ onCheckout }: { onCheckout: () => void }) {
         <Button fullWidth size="lg" className="mt-3" disabled={lines.length === 0 || missingSerials} onClick={onCheckout}>
           {t('pos.checkout')}
         </Button>
+
+        {/* PARKING THE BASKET. Offered only for a NEW cart: a basket that
+            is already parked and has been picked up must go to the till or
+            back on the shelf, because holding it again would leave two
+            parked copies of the same goods. Serials are deliberately NOT
+            required to park — a cashier holds a basket to clear the queue,
+            and the units get scanned when it is picked up. */}
+        {canHoldSale && !resuming && (
+          <Button
+            fullWidth
+            variant="secondary"
+            className="mt-2"
+            disabled={!canHold(lines)}
+            onClick={() => setHoldOpen(true)}
+            data-testid="hold-sale"
+          >
+            {t('holds.holdAction')}
+          </Button>
+        )}
       </div>
 
       <CustomerPickerModal
@@ -162,6 +209,7 @@ export function CartPanel({ onCheckout }: { onCheckout: () => void }) {
           setSerialLine(null);
         }}
       />
+      <HoldSaleModal open={holdOpen} onClose={() => setHoldOpen(false)} onHeld={() => setHoldOpen(false)} />
     </div>
   );
 }
