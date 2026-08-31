@@ -8,6 +8,7 @@ import {
   ResetUserPasswordInput,
 } from '@retail/shared-validation';
 import { ZodValidationPipe } from '../../../common/pipes/zod-validation.pipe';
+import { ThrottleCredential } from '../../../common/security/throttle-policy';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser, RequestUser } from '../../../common/decorators/current-user.decorator';
 import { CreateUserUseCase } from '../application/users/create-user.use-case';
@@ -46,6 +47,7 @@ export class UsersController {
    * actually ends the compromise.
    */
   @RequirePermissions('users.edit')
+  @ThrottleCredential()
   @Post(':id/password')
   @HttpCode(HttpStatus.OK)
   async resetPassword(

@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Patch, Post } from '@nestjs/common';
 import { registerBusinessSchema, updateBusinessSchema, UpdateBusinessInput } from '@retail/shared-validation';
 import { ZodValidationPipe } from '../../../common/pipes/zod-validation.pipe';
+import { ThrottleRegistration } from '../../../common/security/throttle-policy';
 import { Public } from '../../../common/decorators/public.decorator';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser, RequestUser } from '../../../common/decorators/current-user.decorator';
@@ -17,6 +18,7 @@ export class BusinessController {
   ) {}
 
   @Public()
+  @ThrottleRegistration()
   @Post('businesses/register')
   @HttpCode(HttpStatus.CREATED)
   async register(@Body(new ZodValidationPipe(registerBusinessSchema)) body: ReturnType<typeof registerBusinessSchema.parse>) {

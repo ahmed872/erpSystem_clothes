@@ -9,6 +9,7 @@ import {
   ChangeOwnPasswordInput,
 } from '@retail/shared-validation';
 import { ZodValidationPipe } from '../../../common/pipes/zod-validation.pipe';
+import { ThrottleLogin, ThrottleCredential } from '../../../common/security/throttle-policy';
 import { Public } from '../../../common/decorators/public.decorator';
 import { CurrentUser, RequestUser } from '../../../common/decorators/current-user.decorator';
 import { LoginUseCase } from '../application/auth/login.use-case';
@@ -26,6 +27,7 @@ export class AuthController {
   ) {}
 
   @Public()
+  @ThrottleLogin()
   @Post('login')
   @HttpCode(HttpStatus.OK)
   async loginHandler(@Body(new ZodValidationPipe(loginSchema)) body: LoginInput, @Req() req: Request) {
@@ -38,6 +40,7 @@ export class AuthController {
   }
 
   @Public()
+  @ThrottleCredential()
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refreshHandler(@Body(new ZodValidationPipe(refreshTokenSchema)) body: RefreshTokenInput) {
@@ -57,6 +60,7 @@ export class AuthController {
    * till is the ordinary case in a shop, and without that check anyone
    * walking past could lock the real user out of their own account.
    */
+  @ThrottleCredential()
   @Post('password')
   @HttpCode(HttpStatus.OK)
   async changePasswordHandler(

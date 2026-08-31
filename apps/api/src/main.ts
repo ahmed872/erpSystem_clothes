@@ -5,8 +5,14 @@ import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { setupSwagger } from './common/openapi/setup-swagger';
+import { assertEnvironmentIsUsable } from './common/config/validate-environment';
 
 async function bootstrap() {
+  // Phase 11: before anything is built or bound. A server missing a
+  // signing secret used to start cleanly and fail on the first person who
+  // tried to sign in - a deploy that looked successful and was unusable.
+  assertEnvironmentIsUsable();
+
   const app = await NestFactory.create(AppModule, { cors: false });
 
   app.use(helmet());

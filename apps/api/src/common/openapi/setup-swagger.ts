@@ -1,5 +1,9 @@
 import { INestApplication } from '@nestjs/common';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { DocumentBuilder, SwaggerModule, OpenAPIObject } from '@nestjs/swagger';
+import { PATH_METADATA, METHOD_METADATA } from '@nestjs/common/constants';
+import { RequestMethod } from '@nestjs/common';
+import { PERMISSIONS_KEY } from '../decorators/require-permissions.decorator';
+import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
 /**
  * Phase 10 (10I) — the browsable API contract.
@@ -26,6 +30,7 @@ export function setupSwagger(app: INestApplication): void {
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
+  annotateAuthorization(app, document);
   SwaggerModule.setup('api/v1/docs', app, document, {
     swaggerOptions: { persistAuthorization: true },
   });
@@ -82,3 +87,87 @@ document already closed, an idempotency key reused differently), \`403\`
 for a missing permission, \`404\` for anything outside the caller's tenant —
 a cross-tenant row is invisible, not merely forbidden.
 `;
+
+
+/**
+ * Stamps each operation with the permissions it actually requires, and
+ * marks the ones that need no token.
+ *
+ * THE POINT IS THAT THIS CANNOT DRIFT. The permissions are read from the
+ * SAME `@RequirePermissions` metadata `PermissionsGuard` reads at runtime,
+ * and the public flag from the same `@Public` metadata `JwtAuthGuard`
+ * reads. Hand-written `@ApiOperation` text describing what a route needs
+ * would be a second statement of the same fact, free to fall out of step
+ * the first time a permission changed - and documentation that is
+ * confidently wrong about authorization is worse than none.
+ */
+function annotateAuthorization(app: INestApplication, document: OpenAPIObject): void {
+  const server = app.getHttpAdapter().getInstance();
+  const controllers = collectControllers(app);
+
+  for (const controller of controllers) {
+    const controllerPath = Reflect.getMetadata(PATH_METADATA, controller) ?? '';
+    const prototype = controller.prototype;
+    if (!prototype) continue;
+
+    for (const methodName of Object.getOwnPropertyNames(prototype)) {
+      if (methodName === 'constructor') continue;
+      const handler = prototype[methodName];
+      if (typeof handler !== 'function') continue;
+
+      const methodPath = Reflect.getMetadata(PATH_METADATA, handler);
+      if (methodPath === undefined) continue;
+
+      const verb = HTTP_VERB[Reflect.getMetadata(METHOD_METADATA, handler) as RequestMethod];
+      if (!verb) continue;
+
+      const required: string[] =
+        Reflect.getMetadata(PERMISSIONS_KEY, handler) ?? Reflect.getMetadata(PERMISSIONS_KEY, controller) ?? [];
+      const isPublic =
+        Reflect.getMetadata(IS_PUBLIC_KEY, handler) ?? Reflect.getMetadata(IS_PUBLIC_KEY, controller) ?? false;
+
+      const path = toOpenApiPath(controllerPath, methodPath);
+      const operation = (document.paths[path] as Record<string, { description?: string }> | undefined)?.[verb];
+      if (!operation) continue;
+
+      const note = isPublic
+        ? '**No authentication required.**'
+        : required.length === 0
+          ? '**Requires a valid access token.** No additional permission.'
+          : `**Requires a valid access token, and ALL of:** ${required.map((c) => `\`${c}\``).join(', ')}.`;
+      operation.description = operation.description ? `${operation.description}\n\n${note}` : note;
+    }
+  }
+  void server;
+}
+
+const HTTP_VERB: Partial<Record<RequestMethod, string>> = {
+  [RequestMethod.GET]: 'get',
+  [RequestMethod.POST]: 'post',
+  [RequestMethod.PUT]: 'put',
+  [RequestMethod.DELETE]: 'delete',
+  [RequestMethod.PATCH]: 'patch',
+};
+
+/** `sales` + `:id/receipt` -> `/api/v1/sales/{id}/receipt`, matching the
+ *  shape the generated document uses as its key. */
+function toOpenApiPath(controllerPath: string, methodPath: string): string {
+  const joined = [controllerPath, methodPath].filter((part) => part && part !== '/').join('/');
+  const withParams = joined.replace(/:([A-Za-z0-9_]+)/g, '{$1}');
+  return `/api/v1/${withParams}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/api/v1';
+}
+
+/** Walks the Nest module graph for every controller class. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function collectControllers(app: INestApplication): any[] {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const container = (app as any).container;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out: any[] = [];
+  for (const module of container.getModules().values()) {
+    for (const wrapper of module.controllers.values()) {
+      if (wrapper.metatype) out.push(wrapper.metatype);
+    }
+  }
+  return out;
+}

@@ -157,3 +157,26 @@ export const upsertSettingSchema = z.object({
   value: z.unknown(),
 });
 export type UpsertSettingInput = z.infer<typeof upsertSettingSchema>;
+
+/**
+ * Phase 11 — reading the audit trail.
+ *
+ * `audit.view` has existed since Phase 1 and nothing ever served it, so
+ * the record every module has been writing since then was unreadable
+ * through the API. The filters below are the questions a security review
+ * actually asks: what did this person do, what happened to this record,
+ * who was denied, and what happened in this window.
+ */
+export const auditLogListQuerySchema = z.object({
+  userId: z.string().uuid().optional(),
+  action: z.enum(['CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGIN_FAILED', 'LOGOUT', 'PERMISSION_DENIED']).optional(),
+  entityType: z.string().trim().min(1).max(120).optional(),
+  entityId: z.string().trim().min(1).max(200).optional(),
+  /// Correlates every row written while serving one request.
+  requestId: z.string().trim().min(1).max(120).optional(),
+  from: z.string().trim().max(40).optional(),
+  to: z.string().trim().max(40).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+export type AuditLogListQuery = z.infer<typeof auditLogListQuerySchema>;

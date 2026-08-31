@@ -26,7 +26,9 @@ import { PermissionsGuard } from './common/guards/permissions.guard';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, envFilePath: process.env.NODE_ENV === 'test' ? '.env.test' : '.env' }),
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
+    // The global ceiling. Endpoints that are actually attacked carry a much
+    // tighter limit of their own - see common/security/throttle-policy.ts.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: Number(process.env.RATE_LIMIT_GLOBAL ?? 120) }]),
     PrismaModule,
     AuthorizationModule,
     AuditModule,
