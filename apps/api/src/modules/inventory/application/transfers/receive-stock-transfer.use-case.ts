@@ -7,6 +7,8 @@ import { EffectivePermissionsService } from '../../../../common/authorization/ef
 import { ConflictDomainError, NotFoundDomainError, ValidationFailedError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { resolveAllowNegative } from '../../domain/resolve-allow-negative';
+import { assertNoSerialsForUntrackedVariant } from '../../domain/lot-and-serial';
+import { receiveSerialsOnTransfer } from '../../domain/serial-movements';
 
 /**
  * IN_TRANSIT -> COMPLETED. Increments the DESTINATION warehouse using
@@ -31,7 +33,12 @@ export class ReceiveStockTransferUseCase {
     return this.prisma.withTenant(actor.tenantId, async (tx) => {
       const transfer = await tx.stockTransfer.findFirst({
         where: { id: transferId, businessId: actor.tenantId },
-        include: { items: true, destinationWarehouse: true },
+        // Phase 10 (10D): the product's tracking flag decides whether a
+        // line must name the units taken out of the box.
+        include: {
+          items: { include: { variant: { include: { product: { select: { tracksSerialNumbers: true } } } } } },
+          destinationWarehouse: true,
+        },
       });
       if (!transfer) throw new NotFoundDomainError('StockTransfer', transferId);
       if (transfer.status !== 'IN_TRANSIT') {
@@ -54,6 +61,7 @@ export class ReceiveStockTransferUseCase {
 
       const permissions = await this.effectivePermissions.get(tx, actor.id);
       const allowNegative = await resolveAllowNegative(tx, actor.tenantId, permissions ?? new Set());
+      const transferItemsByVariant = new Map(transfer.items.map((i) => [i.variantId, i]));
 
       for (const item of input.items) {
         const cost = costByVariant.get(item.variantId);
@@ -82,6 +90,25 @@ export class ReceiveStockTransferUseCase {
           where: { stockTransferId_variantId: { stockTransferId: transferId, variantId: item.variantId } },
           data: { quantityReceived: item.quantityReceived },
         });
+
+        // Phase 10 (10D): IN_TRANSIT -> IN_STOCK at the destination, for
+        // the units actually taken out of the box. Anything this transfer
+        // shipped but that did not arrive STAYS IN_TRANSIT: a short
+        // receipt is a real discrepancy, and pretending the missing unit
+        // is sitting in one of the two warehouses would hide it.
+        const transferItem = transferItemsByVariant.get(item.variantId)!;
+        if (transferItem.variant.product.tracksSerialNumbers) {
+          await receiveSerialsOnTransfer(
+            tx,
+            actor.tenantId,
+            transferItem.id,
+            transfer.destinationWarehouseId,
+            item.serials,
+            item.quantityReceived,
+          );
+        } else {
+          assertNoSerialsForUntrackedVariant(item.serials, item.variantId);
+        }
       }
 
       const updated = await tx.stockTransfer.update({

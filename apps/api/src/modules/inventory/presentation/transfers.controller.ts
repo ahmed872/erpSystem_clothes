@@ -1,8 +1,10 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import {
   createStockTransferSchema,
+  sendStockTransferSchema,
   receiveStockTransferSchema,
   CreateStockTransferInput,
+  SendStockTransferInput,
   ReceiveStockTransferInput,
 } from '@retail/shared-validation';
 import { ZodValidationPipe } from '../../../common/pipes/zod-validation.pipe';
@@ -48,8 +50,15 @@ export class TransfersController {
   @RequirePermissions('inventory.transfer_send')
   @Post(':id/send')
   @HttpCode(HttpStatus.OK)
-  async send(@CurrentUser() user: RequestUser, @Param('id') id: string) {
-    return { data: await this.sendTransfer.execute(user, id) };
+  async send(
+    @CurrentUser() user: RequestUser,
+    @Param('id') id: string,
+    // Phase 10 (10D): the body names the physical units going in the box.
+    // It stays optional so a transfer of nothing serial-tracked sends with
+    // no body at all, exactly as it always has.
+    @Body(new ZodValidationPipe(sendStockTransferSchema)) body: SendStockTransferInput,
+  ) {
+    return { data: await this.sendTransfer.execute(user, id, body) };
   }
 
   @RequirePermissions('inventory.transfer_receive')

@@ -11,6 +11,7 @@ import { lockPurchase } from '../../domain/lock-purchase';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
 import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
 import { buildPurchaseReceiptJournalLines } from '../../../accounting/domain/purchase-journal-lines';
+import { createSerialsForReceipt, assertNoSerialsForUntrackedVariant } from '../../../inventory/domain/lot-and-serial';
 
 const RECEIVABLE_STATUSES = new Set(['APPROVED', 'PARTIALLY_RECEIVED']);
 
@@ -60,7 +61,9 @@ export class ReceivePurchaseUseCase {
       await lockPurchase(tx, actor.tenantId, purchaseId);
       const purchase = await tx.purchase.findFirst({
         where: { id: purchaseId, businessId: actor.tenantId },
-        include: { items: true, warehouse: true },
+        // Phase 10 (10D): the variant's product carries `tracksSerialNumbers`,
+        // and only the server may decide whether a line needs serials.
+        include: { items: { include: { variant: { include: { product: { select: { tracksSerialNumbers: true } } } } } }, warehouse: true },
       });
       if (!purchase) throw new NotFoundDomainError('Purchase', purchaseId);
       if (!RECEIVABLE_STATUSES.has(purchase.status)) {
@@ -124,7 +127,7 @@ export class ReceivePurchaseUseCase {
           allowNegative: false,
         });
 
-        await tx.purchaseReceiptItem.create({
+        const receiptItem = await tx.purchaseReceiptItem.create({
           data: {
             businessId: actor.tenantId,
             purchaseReceiptId: receipt.id,
@@ -134,6 +137,34 @@ export class ReceivePurchaseUseCase {
             unitCost: purchaseItem.unitCost,
           },
         });
+
+        // Phase 10 (10D): register the physical units this receipt brought
+        // in, and record which receipt line brought each one. Serials are
+        // MANDATORY for a serial-tracked variant here, exactly as they are
+        // on the sale side (BD-13). Receiving tracked goods without them
+        // used to succeed and leave stock that could never be sold.
+        if (purchaseItem.variant.product.tracksSerialNumbers) {
+          const serialIds = await createSerialsForReceipt(
+            tx,
+            actor.tenantId,
+            purchaseItem.variantId,
+            purchase.warehouseId,
+            line.serials,
+            line.quantityReceived,
+          );
+          for (const serialNumberId of serialIds) {
+            await tx.purchaseReceiptItemSerial.create({
+              data: {
+                businessId: actor.tenantId,
+                purchaseReceiptId: receipt.id,
+                purchaseReceiptItemId: receiptItem.id,
+                serialNumberId,
+              },
+            });
+          }
+        } else {
+          assertNoSerialsForUntrackedVariant(line.serials, purchaseItem.variantId);
+        }
 
         await tx.purchaseItem.update({
           where: { id: purchaseItem.id },

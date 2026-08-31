@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { SendStockTransferInput } from '@retail/shared-validation';
 import { PrismaService } from '../../../../common/prisma/prisma.service';
 import { AuditService } from '../../../audit/audit.service';
 import { InventoryEngineService } from '../../../../engines/inventory/inventory-engine.service';
@@ -6,6 +7,9 @@ import { EffectivePermissionsService } from '../../../../common/authorization/ef
 import { ConflictDomainError, NotFoundDomainError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { resolveAllowNegative } from '../../domain/resolve-allow-negative';
+import { assertNoSerialsForUntrackedVariant } from '../../domain/lot-and-serial';
+import { shipSerialsOnTransfer } from '../../domain/serial-movements';
+import { ValidationFailedError } from '../../../../common/errors/domain-error';
 
 /**
  * DRAFT -> IN_TRANSIT. Decrements the SOURCE warehouse for every item in
@@ -22,11 +26,16 @@ export class SendStockTransferUseCase {
     private readonly effectivePermissions: EffectivePermissionsService,
   ) {}
 
-  async execute(actor: RequestUser, transferId: string) {
+  async execute(actor: RequestUser, transferId: string, input: SendStockTransferInput = {}) {
     return this.prisma.withTenant(actor.tenantId, async (tx) => {
       const transfer = await tx.stockTransfer.findFirst({
         where: { id: transferId, businessId: actor.tenantId },
-        include: { items: true, sourceWarehouse: true },
+        // Phase 10 (10D): the product's tracking flag decides whether a
+        // line must name its physical units - never the request.
+        include: {
+          items: { include: { variant: { include: { product: { select: { tracksSerialNumbers: true } } } } } },
+          sourceWarehouse: true,
+        },
       });
       if (!transfer) throw new NotFoundDomainError('StockTransfer', transferId);
       if (transfer.status !== 'DRAFT') {
@@ -35,6 +44,14 @@ export class SendStockTransferUseCase {
 
       const permissions = await this.effectivePermissions.get(tx, actor.id);
       const allowNegative = await resolveAllowNegative(tx, actor.tenantId, permissions ?? new Set());
+
+      const serialsByVariant = new Map((input.items ?? []).map((i) => [i.variantId, i.serials]));
+      const transferVariantIds = new Set(transfer.items.map((i) => i.variantId));
+      for (const variantId of serialsByVariant.keys()) {
+        if (!transferVariantIds.has(variantId)) {
+          throw new ValidationFailedError('Serials were supplied for a variant that is not on this transfer', { variantId });
+        }
+      }
 
       for (const item of transfer.items) {
         await this.engine.applyMovement(tx, {
@@ -50,6 +67,34 @@ export class SendStockTransferUseCase {
           createdBy: actor.id,
           allowNegative,
         });
+
+        // Phase 10 (10D): the units physically going in the box move to
+        // IN_TRANSIT and stop belonging to either warehouse. Before this,
+        // a transferred serial kept pointing at the warehouse it had left,
+        // so it could be sold at neither end - a silent failure, because
+        // the transfer itself succeeded and only the later sale broke.
+        if (item.variant.product.tracksSerialNumbers) {
+          const serialIds = await shipSerialsOnTransfer(
+            tx,
+            actor.tenantId,
+            item.variantId,
+            transfer.sourceWarehouseId,
+            serialsByVariant.get(item.variantId),
+            item.quantity,
+          );
+          for (const serialNumberId of serialIds) {
+            await tx.stockTransferItemSerial.create({
+              data: {
+                businessId: actor.tenantId,
+                stockTransferId: transferId,
+                stockTransferItemId: item.id,
+                serialNumberId,
+              },
+            });
+          }
+        } else {
+          assertNoSerialsForUntrackedVariant(serialsByVariant.get(item.variantId), item.variantId);
+        }
       }
 
       const updated = await tx.stockTransfer.update({

@@ -72,6 +72,12 @@ export const receivePurchaseSchema = z.object({
       z.object({
         purchaseItemId: z.string().uuid(),
         quantityReceived: positiveQuantitySchema,
+        /// Phase 10 (10D): the exact physical units arriving. REQUIRED for a
+        /// serial-tracked variant and rejected for one that is not - the
+        /// server decides which, because only it knows the product's
+        /// tracking flag. Same posture, and the same rule, as BD-13 on the
+        /// sale side. The count must equal the quantity.
+        serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
       }),
     )
     .min(1)
@@ -88,6 +94,12 @@ export const createPurchaseReturnSchema = z.object({
       z.object({
         purchaseItemId: z.string().uuid(),
         quantity: positiveQuantitySchema,
+        /// Phase 10 (10D): the exact physical units going back to the
+        /// supplier. REQUIRED for a serial-tracked variant, rejected for
+        /// one that is not, and the count must equal the quantity. The
+        /// units must be IN_STOCK at the purchase's warehouse: you cannot
+        /// send back something already sold or already returned.
+        serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
       }),
     )
     .min(1)

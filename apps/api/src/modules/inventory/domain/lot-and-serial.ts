@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { TenantTx } from '../../../common/prisma/prisma.service';
 import { ConflictDomainError, ValidationFailedError } from '../../../common/errors/domain-error';
 
@@ -31,33 +32,88 @@ export async function resolveOrCreateLot(
   return created.id;
 }
 
-/** Validates the serial count matches the (integer) quantity being
- * received and that none already exist, then registers them as IN_STOCK. */
+/**
+ * Validates the serial count matches the (integer) quantity being
+ * received and that none already exist, then registers them as IN_STOCK,
+ * returning their ids so the caller can record which document brought
+ * each unit in.
+ *
+ * PRE-EXISTING DEFECT FIXED IN PHASE 10 (10D). This used to return
+ * silently when `serials` was empty, even though every caller only
+ * reaches it for a variant whose product IS serial-tracked. The effect
+ * was that a serial-tracked variant could be received with no serials at
+ * all: stock went up, no unit was registered, and the goods were then
+ * unsellable, because the sale path (BD-13) requires a serial per unit
+ * and there were none to give. Serials are now MANDATORY at every point
+ * of receipt, which is the same rule BD-13 already applied to the sale.
+ */
 export async function createSerialsForReceipt(
   tx: TenantTx,
   businessId: string,
   variantId: string,
   warehouseId: string,
   serials: string[] | undefined,
-  quantity: number,
-): Promise<void> {
-  if (!serials || serials.length === 0) return;
+  quantity: Prisma.Decimal.Value,
+): Promise<string[]> {
+  const count = assertSerialCountMatchesQuantity(serials, quantity);
+  if (count === 0) return [];
+  const list = serials!;
 
-  if (!Number.isInteger(quantity) || serials.length !== quantity) {
-    throw new ValidationFailedError('The number of serials provided must equal the quantity for a serial-tracked variant');
-  }
-  if (new Set(serials).size !== serials.length) {
-    throw new ValidationFailedError('Duplicate serial number in request');
-  }
-
-  const existing = await tx.serialNumber.findMany({ where: { businessId, serial: { in: serials } }, select: { serial: true } });
+  const existing = await tx.serialNumber.findMany({ where: { businessId, serial: { in: list } }, select: { serial: true } });
   if (existing.length > 0) {
     throw new ConflictDomainError(`Serial number already registered: ${existing[0].serial}`);
   }
 
   await tx.serialNumber.createMany({
-    data: serials.map((serial) => ({ businessId, variantId, serial, status: 'IN_STOCK', currentWarehouseId: warehouseId })),
+    data: list.map((serial) => ({ businessId, variantId, serial, status: 'IN_STOCK', currentWarehouseId: warehouseId })),
   });
+
+  const created = await tx.serialNumber.findMany({
+    where: { businessId, variantId, serial: { in: list } },
+    select: { id: true },
+  });
+  return created.map((r) => r.id);
+}
+
+/**
+ * The one rule every serial-carrying document obeys: exactly one serial
+ * per unit, no duplicates, and a whole number of units.
+ *
+ * Shared rather than repeated so that receiving, selling, transferring
+ * and returning to a supplier can never drift into disagreeing about what
+ * "one unit, one serial" means. Returns the count so a caller can
+ * distinguish "nothing to do" from "a mismatch".
+ */
+export function assertSerialCountMatchesQuantity(serials: string[] | undefined, quantity: Prisma.Decimal.Value): number {
+  const qty = new Prisma.Decimal(quantity);
+  const count = serials?.length ?? 0;
+  if (qty.isZero() && count === 0) return 0;
+
+  if (!qty.isInteger()) {
+    throw new ValidationFailedError('A serial-tracked variant can only move in whole units', { quantity: qty.toString() });
+  }
+  if (!qty.equals(count)) {
+    throw new ValidationFailedError('The number of serials provided must equal the quantity for a serial-tracked variant', {
+      quantity: qty.toString(),
+      serialsProvided: count,
+    });
+  }
+  if (new Set(serials).size !== count) {
+    throw new ValidationFailedError('Duplicate serial number in request');
+  }
+  return count;
+}
+
+/**
+ * The mirror rule: a variant that is NOT serial-tracked cannot be given
+ * serials. Only the server knows a product's tracking flag, so this is
+ * decided here rather than trusted from the request - the same posture
+ * BD-13 established on the sale path.
+ */
+export function assertNoSerialsForUntrackedVariant(serials: string[] | undefined, variantId: string): void {
+  if (serials && serials.length > 0) {
+    throw new ValidationFailedError('Serial numbers were supplied for a variant that is not serial-tracked', { variantId });
+  }
 }
 
 interface LockedSerialRow {
@@ -90,16 +146,9 @@ export async function consumeSerialsForSale(
   variantId: string,
   warehouseId: string,
   serials: string[] | undefined,
-  quantity: number,
+  quantity: Prisma.Decimal.Value,
 ): Promise<string[]> {
-  if (!serials || serials.length === 0) return [];
-
-  if (!Number.isInteger(quantity) || serials.length !== quantity) {
-    throw new ValidationFailedError('The number of serials provided must equal the quantity for a serial-tracked variant');
-  }
-  if (new Set(serials).size !== serials.length) {
-    throw new ValidationFailedError('Duplicate serial number in request');
-  }
+  if (assertSerialCountMatchesQuantity(serials, quantity) === 0) return [];
 
   const rows = await tx.$queryRawUnsafe<LockedSerialRow[]>(
     `SELECT id, serial, status::text AS status, current_warehouse_id
@@ -111,7 +160,7 @@ export async function consumeSerialsForSale(
     variantId,
     serials,
   );
-  if (rows.length !== serials.length) {
+  if (rows.length !== serials!.length) {
     throw new ValidationFailedError('One or more serials do not exist for this variant');
   }
   const notAvailable = rows.find((r) => r.status !== 'IN_STOCK' || r.current_warehouse_id !== warehouseId);

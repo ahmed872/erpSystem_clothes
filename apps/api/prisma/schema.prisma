@@ -109,13 +109,16 @@ model Business {
   salePromotionApplications SalePromotionApplication[]
   SaleItemSerial            SaleItemSerial[]
   SaleReturnItemSerial      SaleReturnItemSerial[]
+  PurchaseReceiptItemSerial PurchaseReceiptItemSerial[]
+  StockTransferItemSerial   StockTransferItemSerial[]
+  PurchaseReturnItemSerial  PurchaseReturnItemSerial[]
   /// Phase 10 (BD-18 rule 3). Default EXCLUSIVE - exactly how every
   /// pre-Phase-10 business already behaved, so no existing tenant changes
   /// meaning.
-  taxPricingMode            TaxPricingMode             @default(EXCLUSIVE) @map("tax_pricing_mode")
+  taxPricingMode            TaxPricingMode              @default(EXCLUSIVE) @map("tax_pricing_mode")
   /// The tax applied when a product names none of its own.
-  defaultTaxId              String?                    @map("default_tax_id")
-  defaultTax                Tax?                       @relation("BusinessDefaultTax", fields: [defaultTaxId], references: [id], onDelete: SetNull)
+  defaultTaxId              String?                     @map("default_tax_id")
+  defaultTax                Tax?                        @relation("BusinessDefaultTax", fields: [defaultTaxId], references: [id], onDelete: SetNull)
   taxes                     Tax[]
   cashRegisters             CashRegister[]
   cashTransactions          CashTransaction[]
@@ -807,6 +810,16 @@ enum SerialNumberStatus {
   SOLD
   DAMAGED
   RETURNED
+  /// Phase 10 (10D): the unit has left the source warehouse on a stock
+  /// transfer but has not yet been received at the destination. Before
+  /// this existed a transferred serial kept pointing at the warehouse it
+  /// had physically left, so it could not be sold at either end - which
+  /// made serial-tracked stock effectively untransferable.
+  IN_TRANSIT
+  /// Phase 10 (10D): the unit went back to the supplier. Terminal: the
+  /// item is no longer the business's to sell, and the row survives so
+  /// the serial can never be re-registered as if it were new stock.
+  RETURNED_TO_SUPPLIER
 }
 
 /// Append-only. Never UPDATEd or DELETEd by application code - enforced
@@ -931,12 +944,15 @@ model SerialNumber {
   createdAt          DateTime           @default(now()) @map("created_at")
   updatedAt          DateTime           @updatedAt @map("updated_at")
 
-  business              Business               @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "serial_numbers_business_fk")
-  variant               ProductVariant         @relation(fields: [variantId], references: [id], onDelete: Cascade)
-  currentWarehouse      Warehouse?             @relation(fields: [currentWarehouseId], references: [id], onDelete: SetNull)
-  warranties            Warranty[]
-  saleItemSerials       SaleItemSerial[]
-  saleReturnItemSerials SaleReturnItemSerial[]
+  business                   Business                    @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "serial_numbers_business_fk")
+  variant                    ProductVariant              @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  currentWarehouse           Warehouse?                  @relation(fields: [currentWarehouseId], references: [id], onDelete: SetNull)
+  warranties                 Warranty[]
+  saleItemSerials            SaleItemSerial[]
+  saleReturnItemSerials      SaleReturnItemSerial[]
+  purchaseReceiptItemSerials PurchaseReceiptItemSerial[]
+  stockTransferItemSerials   StockTransferItemSerial[]
+  purchaseReturnItemSerials  PurchaseReturnItemSerial[]
 
   @@unique([businessId, serial])
   @@index([businessId])
@@ -1000,10 +1016,11 @@ model StockTransfer {
   createdAt              DateTime            @default(now()) @map("created_at")
   updatedAt              DateTime            @updatedAt @map("updated_at")
 
-  business             Business            @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "stock_transfers_business_fk")
-  sourceWarehouse      Warehouse           @relation("TransferSource", fields: [sourceWarehouseId], references: [id], onDelete: Restrict)
-  destinationWarehouse Warehouse           @relation("TransferDestination", fields: [destinationWarehouseId], references: [id], onDelete: Restrict)
+  business             Business                  @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "stock_transfers_business_fk")
+  sourceWarehouse      Warehouse                 @relation("TransferSource", fields: [sourceWarehouseId], references: [id], onDelete: Restrict)
+  destinationWarehouse Warehouse                 @relation("TransferDestination", fields: [destinationWarehouseId], references: [id], onDelete: Restrict)
   items                StockTransferItem[]
+  itemSerials          StockTransferItemSerial[]
 
   @@index([businessId])
   @@index([sourceWarehouseId])
@@ -1023,8 +1040,9 @@ model StockTransferItem {
   /// not auto-corrected.
   quantityReceived Decimal? @map("quantity_received") @db.Decimal(18, 4)
 
-  stockTransfer StockTransfer  @relation(fields: [stockTransferId], references: [id], onDelete: Cascade)
-  variant       ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  stockTransfer StockTransfer             @relation(fields: [stockTransferId], references: [id], onDelete: Cascade)
+  variant       ProductVariant            @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  serials       StockTransferItemSerial[]
 
   @@unique([stockTransferId, variantId])
   @@map("stock_transfer_items")
@@ -1262,10 +1280,11 @@ model PurchaseReceipt {
   receivedAt     DateTime @default(now()) @map("received_at")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  business  Business              @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_receipts_business_fk")
-  purchase  Purchase              @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
-  warehouse Warehouse             @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
-  items     PurchaseReceiptItem[]
+  business    Business                    @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_receipts_business_fk")
+  purchase    Purchase                    @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  warehouse   Warehouse                   @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  items       PurchaseReceiptItem[]
+  itemSerials PurchaseReceiptItemSerial[]
 
   @@unique([businessId, idempotencyKey])
   @@index([businessId])
@@ -1289,10 +1308,11 @@ model PurchaseReceiptItem {
   unitCost          Decimal  @map("unit_cost") @db.Decimal(18, 4)
   createdAt         DateTime @default(now()) @map("created_at")
 
-  business        Business        @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_receipt_items_business_fk")
-  purchaseReceipt PurchaseReceipt @relation(fields: [purchaseReceiptId], references: [id], onDelete: Cascade)
-  purchaseItem    PurchaseItem    @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
-  variant         ProductVariant  @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  business        Business                    @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_receipt_items_business_fk")
+  purchaseReceipt PurchaseReceipt             @relation(fields: [purchaseReceiptId], references: [id], onDelete: Cascade)
+  purchaseItem    PurchaseItem                @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
+  serials         PurchaseReceiptItemSerial[]
+  variant         ProductVariant              @relation(fields: [variantId], references: [id], onDelete: Restrict)
 
   @@unique([purchaseReceiptId, purchaseItemId])
   @@index([purchaseReceiptId])
@@ -1317,10 +1337,11 @@ model PurchaseReturn {
   createdBy    String?  @map("created_by")
   createdAt    DateTime @default(now()) @map("created_at")
 
-  business  Business             @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_returns_business_fk")
-  purchase  Purchase             @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
-  warehouse Warehouse            @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
-  items     PurchaseReturnItem[]
+  business    Business                   @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_returns_business_fk")
+  purchase    Purchase                   @relation(fields: [purchaseId], references: [id], onDelete: Restrict)
+  warehouse   Warehouse                  @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  items       PurchaseReturnItem[]
+  itemSerials PurchaseReturnItemSerial[]
 
   @@index([businessId])
   @@index([purchaseId])
@@ -1345,10 +1366,11 @@ model PurchaseReturnItem {
   unitCost         Decimal  @map("unit_cost") @db.Decimal(18, 4)
   createdAt        DateTime @default(now()) @map("created_at")
 
-  business       Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_return_items_business_fk")
-  purchaseReturn PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
-  purchaseItem   PurchaseItem   @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
-  variant        ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  business       Business                   @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_return_items_business_fk")
+  purchaseReturn PurchaseReturn             @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  purchaseItem   PurchaseItem               @relation(fields: [purchaseItemId], references: [id], onDelete: Restrict)
+  serials        PurchaseReturnItemSerial[]
+  variant        ProductVariant             @relation(fields: [variantId], references: [id], onDelete: Restrict)
 
   @@index([purchaseReturnId])
   @@index([purchaseItemId])
@@ -2446,6 +2468,82 @@ model SaleItemSerial {
   @@index([saleItemId])
   @@index([serialNumberId])
   @@map("sale_item_serials")
+}
+
+/// APPEND-ONLY record of WHICH physical units a goods receipt brought in
+/// (Phase 10, 10D). The mirror of `sale_item_serials` on the buy side:
+/// together they answer "where did this unit come from, and where did it
+/// go" for any serial the business has ever held.
+model PurchaseReceiptItemSerial {
+  id                    String   @id @default(uuid())
+  businessId            String   @map("business_id")
+  purchaseReceiptId     String   @map("purchase_receipt_id")
+  purchaseReceiptItemId String   @map("purchase_receipt_item_id")
+  serialNumberId        String   @map("serial_number_id")
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  business            Business            @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_receipt_item_serials_business_fk")
+  purchaseReceipt     PurchaseReceipt     @relation(fields: [purchaseReceiptId], references: [id], onDelete: Cascade)
+  purchaseReceiptItem PurchaseReceiptItem @relation(fields: [purchaseReceiptItemId], references: [id], onDelete: Cascade)
+  serialNumber        SerialNumber        @relation(fields: [serialNumberId], references: [id], onDelete: Restrict)
+
+  /// A physical unit can be received at most once on a given receipt line.
+  @@unique([businessId, purchaseReceiptItemId, serialNumberId])
+  @@index([businessId])
+  @@index([purchaseReceiptId])
+  @@index([serialNumberId])
+  @@map("purchase_receipt_item_serials")
+}
+
+/// APPEND-ONLY record of WHICH physical units were put in the box when a
+/// transfer was SENT (Phase 10, 10D).
+///
+/// This is not bookkeeping for its own sake: the receiving warehouse has
+/// to know which units to expect, and it reads them from here. Naming the
+/// serials at send rather than at draft time matches what actually
+/// happens - you scan what you are shipping, not what you intended to.
+model StockTransferItemSerial {
+  id                  String   @id @default(uuid())
+  businessId          String   @map("business_id")
+  stockTransferId     String   @map("stock_transfer_id")
+  stockTransferItemId String   @map("stock_transfer_item_id")
+  serialNumberId      String   @map("serial_number_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  business          Business          @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "stock_transfer_item_serials_business_fk")
+  stockTransfer     StockTransfer     @relation(fields: [stockTransferId], references: [id], onDelete: Cascade)
+  stockTransferItem StockTransferItem @relation(fields: [stockTransferItemId], references: [id], onDelete: Cascade)
+  serialNumber      SerialNumber      @relation(fields: [serialNumberId], references: [id], onDelete: Restrict)
+
+  /// A physical unit can be shipped at most once on a given transfer line.
+  @@unique([businessId, stockTransferItemId, serialNumberId])
+  @@index([businessId])
+  @@index([stockTransferId])
+  @@index([serialNumberId])
+  @@map("stock_transfer_item_serials")
+}
+
+/// APPEND-ONLY record of WHICH physical units went back to the supplier
+/// (Phase 10, 10D).
+model PurchaseReturnItemSerial {
+  id                   String   @id @default(uuid())
+  businessId           String   @map("business_id")
+  purchaseReturnId     String   @map("purchase_return_id")
+  purchaseReturnItemId String   @map("purchase_return_item_id")
+  serialNumberId       String   @map("serial_number_id")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  business           Business           @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "purchase_return_item_serials_business_fk")
+  purchaseReturn     PurchaseReturn     @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  purchaseReturnItem PurchaseReturnItem @relation(fields: [purchaseReturnItemId], references: [id], onDelete: Cascade)
+  serialNumber       SerialNumber       @relation(fields: [serialNumberId], references: [id], onDelete: Restrict)
+
+  /// A physical unit can be returned at most once on a given return line.
+  @@unique([businessId, purchaseReturnItemId, serialNumberId])
+  @@index([businessId])
+  @@index([purchaseReturnId])
+  @@index([serialNumberId])
+  @@map("purchase_return_item_serials")
 }
 
 /// APPEND-ONLY record of WHICH physical unit came back on WHICH return

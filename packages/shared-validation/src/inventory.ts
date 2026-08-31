@@ -81,9 +81,45 @@ export const createStockTransferSchema = z
   });
 export type CreateStockTransferInput = z.infer<typeof createStockTransferSchema>;
 
+/**
+ * Phase 10 (10D): sending a transfer now names the physical units going
+ * in the box.
+ *
+ * `items` is OPTIONAL as a whole - a transfer with no serial-tracked
+ * variant in it needs no body at all, which keeps every existing caller
+ * working unchanged. A serial-tracked line, however, must appear here
+ * with one serial per unit, or the send is rejected: shipping a tracked
+ * unit without saying which one is what made serial-tracked stock
+ * untransferable before this existed.
+ */
+export const sendStockTransferSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        variantId: z.string().uuid(),
+        serials: z.array(z.string().trim().min(1).max(120)).max(10_000),
+      }),
+    )
+    .max(500)
+    .optional(),
+});
+export type SendStockTransferInput = z.infer<typeof sendStockTransferSchema>;
+
 export const receiveStockTransferSchema = z.object({
   items: z
-    .array(z.object({ variantId: z.string().uuid(), quantityReceived: z.number().finite().min(0) }))
+    .array(
+      z.object({
+        variantId: z.string().uuid(),
+        quantityReceived: z.number().finite().min(0),
+        /// Phase 10 (10D): the units actually taken out of the box. Must be
+        /// a subset of what this transfer shipped, and its count must equal
+        /// `quantityReceived`. Anything shipped but not listed here STAYS
+        /// IN_TRANSIT rather than being quietly absorbed at either end -
+        /// a short receipt is a real discrepancy, and the serial record
+        /// says so.
+        serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
+      }),
+    )
     .min(1)
     .max(500),
 });

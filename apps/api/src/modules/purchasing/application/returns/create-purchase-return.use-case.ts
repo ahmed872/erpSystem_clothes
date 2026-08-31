@@ -13,6 +13,8 @@ import { lockPurchase } from '../../domain/lock-purchase';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
 import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
 import { buildPurchaseReturnJournalLines } from '../../../accounting/domain/purchase-journal-lines';
+import { assertNoSerialsForUntrackedVariant } from '../../../inventory/domain/lot-and-serial';
+import { returnSerialsToSupplier } from '../../../inventory/domain/serial-movements';
 
 /**
  * A purchase return is a single-step atomic action (not a draft/confirm
@@ -42,7 +44,12 @@ export class CreatePurchaseReturnUseCase {
   async execute(actor: RequestUser, purchaseId: string, input: CreatePurchaseReturnInput) {
     return this.prisma.withTenant(actor.tenantId, async (tx) => {
       await lockPurchase(tx, actor.tenantId, purchaseId);
-      const purchase = await tx.purchase.findFirst({ where: { id: purchaseId, businessId: actor.tenantId }, include: { items: true } });
+      const purchase = await tx.purchase.findFirst({
+        where: { id: purchaseId, businessId: actor.tenantId },
+        // Phase 10 (10D): only the server may decide whether a line needs
+        // serials, so the product's tracking flag comes with the item.
+        include: { items: { include: { variant: { include: { product: { select: { tracksSerialNumbers: true } } } } } } },
+      });
       if (!purchase) throw new NotFoundDomainError('Purchase', purchaseId);
 
       const itemIds = input.items.map((i) => i.purchaseItemId);
@@ -106,7 +113,7 @@ export class CreatePurchaseReturnUseCase {
           allowNegative,
         });
 
-        await tx.purchaseReturnItem.create({
+        const returnItem = await tx.purchaseReturnItem.create({
           data: {
             businessId: actor.tenantId,
             purchaseReturnId: purchaseReturn.id,
@@ -116,6 +123,32 @@ export class CreatePurchaseReturnUseCase {
             unitCost: purchaseItem.unitCost,
           },
         });
+
+        // Phase 10 (10D): the exact physical units going back to the
+        // supplier. RETURNED_TO_SUPPLIER is terminal - the row survives so
+        // the serial can never be re-registered later as fresh stock.
+        if (purchaseItem.variant.product.tracksSerialNumbers) {
+          const serialIds = await returnSerialsToSupplier(
+            tx,
+            actor.tenantId,
+            purchaseItem.variantId,
+            purchase.warehouseId,
+            line.serials,
+            line.quantity,
+          );
+          for (const serialNumberId of serialIds) {
+            await tx.purchaseReturnItemSerial.create({
+              data: {
+                businessId: actor.tenantId,
+                purchaseReturnId: purchaseReturn.id,
+                purchaseReturnItemId: returnItem.id,
+                serialNumberId,
+              },
+            });
+          }
+        } else {
+          assertNoSerialsForUntrackedVariant(line.serials, purchaseItem.variantId);
+        }
 
         await tx.purchaseItem.update({
           where: { id: purchaseItem.id },
