@@ -11,9 +11,30 @@ import { lockPurchase } from '../../domain/lock-purchase';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
 import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
 import { buildPurchaseReceiptJournalLines } from '../../../accounting/domain/purchase-journal-lines';
+import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
 import { createSerialsForReceipt, assertNoSerialsForUntrackedVariant } from '../../../inventory/domain/lot-and-serial';
 
 const RECEIVABLE_STATUSES = new Set(['APPROVED', 'PARTIALLY_RECEIVED']);
+
+/**
+ * The canonical shape of "what arrived", for comparing a replayed
+ * idempotency key against the receipt it already produced.
+ *
+ * Quantities are normalised through Decimal so "10" and "10.0000" compare
+ * equal, and both lines and serials are sorted so the same delivery keyed
+ * in a different order is still the same delivery.
+ */
+function receiptFingerprint(items: { purchaseItemId: string; quantityReceived: Prisma.Decimal.Value; serials?: string[] }[]) {
+  return items
+    .map((i) => ({
+      purchaseItemId: i.purchaseItemId,
+      quantityReceived: new Prisma.Decimal(i.quantityReceived).toString(),
+      // WHICH physical units arrived is part of the request, so a replay
+      // naming different serials must be rejected rather than accepted.
+      serials: [...(i.serials ?? [])].sort(),
+    }))
+    .sort((a, b) => a.purchaseItemId.localeCompare(b.purchaseItemId));
+}
 
 /**
  * The "Receiving" responsibility - deliberately separate from the
@@ -53,9 +74,31 @@ export class ReceivePurchaseUseCase {
       if (input.idempotencyKey) {
         const existing = await tx.purchaseReceipt.findFirst({
           where: { businessId: actor.tenantId, idempotencyKey: input.idempotencyKey },
-          include: { items: true },
+          include: { items: { include: { serials: { include: { serialNumber: { select: { serial: true } } } } } } },
         });
-        if (existing) return existing;
+        if (existing) {
+          // PRE-EXISTING DEFECT FIXED IN PHASE 10 (10I). This used to
+          // return the stored receipt unconditionally, whatever the new
+          // request said. A key reused with a DIFFERENT delivery - other
+          // quantities, other lines, other physical units - was silently
+          // handed the first receipt and the second delivery was never
+          // recorded: stock the business had actually taken in simply did
+          // not exist. Every other idempotent path in this codebase already
+          // compared fingerprints; receiving was the one that did not.
+          assertIdempotentReplayMatches(
+            receiptFingerprint(
+              // Rebuilt from what was STORED, so the comparison is against
+              // the goods that actually arrived.
+              existing.items.map((i) => ({
+                purchaseItemId: i.purchaseItemId,
+                quantityReceived: i.quantityReceived,
+                serials: i.serials.map((x) => x.serialNumber.serial),
+              })),
+            ),
+            receiptFingerprint(input.items),
+          );
+          return existing;
+        }
       }
 
       await lockPurchase(tx, actor.tenantId, purchaseId);
