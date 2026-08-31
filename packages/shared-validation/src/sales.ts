@@ -152,6 +152,35 @@ export const createSaleReturnSchema = z.object({
 export type CreateSaleReturnInput = z.infer<typeof createSaleReturnSchema>;
 
 /**
+ * Phase 12 (Returns) — what the return will be worth, before it happens.
+ *
+ * DELIBERATELY THE RETURN REQUEST MINUS WHAT A PREVIEW MUST NOT CARRY:
+ * no `refund` (the preview exists to tell the caller what the refund may
+ * or must be - asking for it first would be circular), no
+ * `idempotencyKey` (nothing is created, so there is nothing to
+ * deduplicate), no `reason` (nothing is recorded).
+ *
+ * `items` is byte-identical to the real return's, including `condition`
+ * and `serials`, so the preview is computed from the SAME request the
+ * return will be given. A preview of a different request is a figure for
+ * a different return.
+ */
+export const previewSaleReturnSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        saleItemId: z.string().uuid(),
+        quantity: positiveQuantitySchema,
+        condition: z.enum(['SELLABLE', 'DAMAGED']).default('SELLABLE'),
+        serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
+      }),
+    )
+    .min(1)
+    .max(500),
+});
+export type PreviewSaleReturnInput = z.infer<typeof previewSaleReturnSchema>;
+
+/**
  * Phase 10 (Exchanges) — goods back and goods out, as ONE event.
  *
  * The two halves are the SAME return and the SAME sale the existing
@@ -297,6 +326,29 @@ export const heldSaleListQuerySchema = z.object({
 export type HeldSaleListQuery = z.infer<typeof heldSaleListQuerySchema>;
 
 export const saleListQuerySchema = z.object({
+  /**
+   * Phase 12 (Returns) — find the sale on the receipt in the customer's
+   * hand, whichever shift produced it.
+   *
+   * EXACT match, not a search. `sale_number` carries a
+   * `@@unique([businessId, saleNumber])` index, so equality is
+   * index-backed and cannot degrade on a large tenant; a `contains`
+   * scan would. The stored form is always upper-case (it is derived by
+   * `documentNumberFromId`), so the input is upper-cased here and the
+   * comparison stays a plain equality - a cashier typing `inv-ead0819b`
+   * finds `INV-EAD0819B` without the query becoming a pattern match.
+   *
+   * This is deliberately the ONLY lookup added: it answers the one
+   * question a returns desk actually asks, and adds no new filter
+   * surface to reason about.
+   */
+  saleNumber: z
+    .string()
+    .trim()
+    .min(1)
+    .max(60)
+    .transform((v) => v.toUpperCase())
+    .optional(),
   customerId: z.string().uuid().optional(),
   warehouseId: z.string().uuid().optional(),
   branchId: z.string().uuid().optional(),

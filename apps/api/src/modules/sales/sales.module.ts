@@ -18,6 +18,7 @@ import { QuoteSaleUseCase } from './application/sales/quote-sale.use-case';
 import { GetSaleUseCase } from './application/sales/get-sale.use-case';
 import { ListSalesUseCase } from './application/sales/list-sales.use-case';
 import { CreateSaleReturnUseCase } from './application/returns/create-sale-return.use-case';
+import { PreviewSaleReturnUseCase } from './application/returns/preview-sale-return.use-case';
 import { CreateSalePaymentUseCase } from './application/payments/create-sale-payment.use-case';
 import { CreateExchangeUseCase } from './application/exchanges/create-exchange.use-case';
 import { HeldSalesService } from './application/holds/held-sales.service';
@@ -50,6 +51,7 @@ import { FinanceModule } from '../finance/finance.module';
     GetSaleUseCase,
     ListSalesUseCase,
     CreateSaleReturnUseCase,
+    PreviewSaleReturnUseCase,
     CreateSalePaymentUseCase,
     CreateExchangeUseCase,
     HeldSalesService,

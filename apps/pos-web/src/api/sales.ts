@@ -2,12 +2,14 @@ import { api } from '../lib/apiClient';
 import type {
   CreateSaleInput,
   CreateSaleReturnInput,
+  PreviewSaleReturnInput,
   QuoteSaleInput,
   Sale,
   SaleListRow,
   SaleQuote,
   SaleReceipt,
   SaleReturn,
+  SaleReturnPreview,
 } from '../lib/apiTypes';
 
 export const salesApi = {
@@ -21,10 +23,23 @@ export const salesApi = {
   quote: (input: QuoteSaleInput) => api.post<{ data: SaleQuote }>('/sales/quote', input),
   get: (id: string) => api.get<{ data: Sale }>(`/sales/${id}`),
   receipt: (id: string) => api.get<{ data: SaleReceipt }>(`/sales/${id}/receipt`),
-  /** There is no sale-search-by-number endpoint (deliberately out of Phase
-   * 12 scope, see docs/state/PROJECT_STATE.md's recorded gaps) — a cashier
-   * picks a return's source sale from THIS SHIFT's own transaction list,
-   * which the existing `GET /sales?shiftId=` contract already supports. */
+  /**
+   * Phase 12 (Returns): find the sale on the receipt in the customer's
+   * hand, whichever shift produced it. Exact, index-backed equality
+   * against `@@unique([businessId, saleNumber])`; the server upper-cases
+   * the input, so a cashier may type it however they read it.
+   */
+  findByNumber: (saleNumber: string) =>
+    api.get<{ data: SaleListRow[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
+      `/sales?saleNumber=${encodeURIComponent(saleNumber)}`,
+    ),
+  /**
+   * Phase 12 (Returns): what this return is worth, before it happens.
+   * Read-only on the server; creates nothing and reserves nothing.
+   * `refund.requiredAmount` is the exact figure a walk-in must be handed.
+   */
+  previewReturn: (saleId: string, input: PreviewSaleReturnInput) =>
+    api.post<{ data: SaleReturnPreview }>(`/sales/${saleId}/returns/preview`, input),
   listByShift: (shiftId: string) =>
     api.get<{ data: SaleListRow[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
       `/sales?shiftId=${shiftId}&limit=100`,

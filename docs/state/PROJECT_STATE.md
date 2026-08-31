@@ -1,7 +1,31 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 12 — POS Web (**Sale Quote milestone complete.** ERP Web NOT started, offline sync NOT started.)
+Phase 12 — POS Web (**Returns milestone complete.** Exchanges, held sales, cash drawer, warranty NOT started. ERP Web NOT started, offline sync NOT started.)
+
+The POS Web slice (login → shift → sell → quote → payment → receipt → blind close) is complete, and this milestone finishes the **Returns** workflow, which was exposed in the navigation and could not complete for two whole categories of sale.
+
+**What was broken, and what fixed it**
+
+| Was | Now |
+|---|---|
+| A serial-tracked product could not be returned at all — the request sent no `serials`, and the backend refuses without them | The cashier **chooses** the units coming back from the ones the sale actually delivered, read from the receipt payload |
+| A walk-in refund had to equal the return credit exactly, and nothing ever showed that figure | `POST /sales/:id/returns/preview` states it; for a walk-in the field is the server's own number and is not editable |
+| Return lines were labelled with raw variant UUIDs | Product name, Arabic alternative name and SKU, from `GET /sales/:id/receipt` |
+| Three hard-coded English strings in an Arabic-first product | Fully localised; ar/en key parity verified (146 keys, no drift) |
+| Only the current shift's sales were reachable | `GET /sales?saleNumber=` finds the receipt in the customer's hand, whichever shift produced it |
+
+**`POST /sales/:id/returns/preview`** — read-only, `sales.return`, inside `withTenantReadOnly` so PostgreSQL refuses any write with SQLSTATE 25006. It is **not a second return engine**: the credit comes from `lineReturnCredit` (the single shared BD-1 definition) and `TaxEngineService.cumulativeLineTax` (BD-18's cumulative reversal) — the same functions `CreateSaleReturnUseCase` calls. Both are pure functions of values already stored on the sale line, which is why no extraction from that 684-line use-case was needed. The response states the exact walk-in refund, the maximum for an account customer, and what would stay on their ledger.
+
+**`GET /sales?saleNumber=`** — the one contract widened, and minimally: exact, case-normalised equality against the existing `@@unique([businessId, saleNumber])` index. Not a `contains` scan, and no other filter added.
+
+**No schema change, no migration, no new permission (117, unchanged), no new business rule.** Return eligibility, credit, tax reversal, serial rules, loyalty clawback, inventory and accounting are untouched and still revalidated by the return itself.
+
+**Verification:** 720/720 backend e2e across 55 files (31 new) · 37/37 backend unit · 29/29 frontend unit (10 new) · build, `tsc --noEmit` and lint clean · 54 migrations, no drift on either database · `ops/verify-security.sh` PASS. Browser-verified against the real backend: two sales made in a **closed** shift, found from a new shift by typing the receipt number in lower case, one returned for an authoritative **342.00** and one serial-tracked unit returned for **570.00** — with `SW-1002` confirmed back `IN_STOCK` and `SW-1001` still `SOLD`, and both journal entries balancing.
+
+---
+
+## Phase 12 — Sale Quote (**Complete.**)
 
 Phase 12 delivered the two blocking contracts (`GET /permissions/me`, `GET /sales/shifts/available-warehouses`), then the POS Web vertical slice — login through blind shift close, exercised against the real backend in a browser.
 

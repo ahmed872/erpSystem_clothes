@@ -85,7 +85,7 @@ export function ProductSearchPanel({ warehouseId }: { warehouseId: string }) {
             <Spinner />
           </div>
         )}
-        {query.isError && <ErrorBanner title="Search failed" message={(query.error as Error).message} />}
+        {query.isError && <ErrorBanner title={t('common.searchFailed')} message={(query.error as Error).message} />}
         {!query.isFetching && debounced && (query.data?.data.length ?? 0) === 0 && <EmptyState title={t('common.noResults')} />}
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">

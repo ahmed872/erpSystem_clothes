@@ -287,6 +287,63 @@ export interface SaleItem {
   quantityReturned: string;
 }
 
+/**
+ * Phase 12 (Returns) — what `POST /sales/:id/returns/preview` answers.
+ *
+ * `totals.totalRefundable` is BD-1's merchandise credit plus BD-18's
+ * cumulative tax reversal, computed by the same functions the real return
+ * calls. `refund.requiredAmount` is the exact figure a WALK-IN must be
+ * handed; for an account customer it is null and anything up to
+ * `refund.maxAmount` is allowed, with the remainder going to their ledger.
+ */
+export interface SaleReturnPreviewLine {
+  saleItemId: string;
+  variantId: string;
+  sku: string;
+  name: string;
+  alternativeName: string | null;
+  quantity: string;
+  quantitySold: string;
+  quantityAlreadyReturned: string;
+  quantityAvailableToReturn: string;
+  condition: 'SELLABLE' | 'DAMAGED';
+  requiresSerials: boolean;
+  serials: string[];
+  merchandiseCredit: string;
+  taxReversal: string;
+  lineRefundable: string;
+}
+
+export interface SaleReturnPreview {
+  sale: { id: string; saleNumber: string; createdAt: string; shiftId: string; totalAmount: string };
+  customer: { id: string; name: string; isActive: boolean } | null;
+  isWalkIn: boolean;
+  lines: SaleReturnPreviewLine[];
+  totals: { merchandiseCredit: string; taxReversal: string; totalRefundable: string };
+  refund: {
+    required: boolean;
+    requiredAmount: string | null;
+    maxAmount: string;
+    creditToLedgerIfNoRefund: string;
+  };
+  previewedAt: string;
+  guarantees: {
+    authoritativeCredit: boolean;
+    reservesNothing: boolean;
+    createsNothing: boolean;
+    finalReturnRevalidates: boolean;
+  };
+}
+
+export interface PreviewSaleReturnInput {
+  items: Array<{
+    saleItemId: string;
+    quantity: number;
+    condition?: 'SELLABLE' | 'DAMAGED';
+    serials?: string[];
+  }>;
+}
+
 export interface SalePayment {
   id: string;
   saleId: string;

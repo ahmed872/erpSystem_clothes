@@ -3,12 +3,14 @@ import {
   createSaleSchema,
   quoteSaleSchema,
   createSaleReturnSchema,
+  previewSaleReturnSchema,
   createExchangeSchema,
   createSalePaymentSchema,
   saleListQuerySchema,
   CreateSaleInput,
   QuoteSaleInput,
   CreateSaleReturnInput,
+  PreviewSaleReturnInput,
   CreateExchangeInput,
   CreateSalePaymentInput,
   SaleListQuery,
@@ -21,6 +23,7 @@ import { QuoteSaleUseCase } from '../application/sales/quote-sale.use-case';
 import { GetSaleUseCase } from '../application/sales/get-sale.use-case';
 import { ListSalesUseCase } from '../application/sales/list-sales.use-case';
 import { CreateSaleReturnUseCase } from '../application/returns/create-sale-return.use-case';
+import { PreviewSaleReturnUseCase } from '../application/returns/preview-sale-return.use-case';
 import { CreateSalePaymentUseCase } from '../application/payments/create-sale-payment.use-case';
 import { CreateExchangeUseCase } from '../application/exchanges/create-exchange.use-case';
 import { GetSaleReceiptUseCase } from '../application/sales/get-sale-receipt.use-case';
@@ -33,6 +36,7 @@ export class SalesController {
     private readonly getSale: GetSaleUseCase,
     private readonly listSales: ListSalesUseCase,
     private readonly createReturn: CreateSaleReturnUseCase,
+    private readonly previewReturn: PreviewSaleReturnUseCase,
     private readonly createPayment: CreateSalePaymentUseCase,
     private readonly createExchange: CreateExchangeUseCase,
     private readonly saleReceipt: GetSaleReceiptUseCase,
@@ -89,6 +93,29 @@ export class SalesController {
   @Get(':id/receipt')
   async receipt(@CurrentUser() user: RequestUser, @Param('id') id: string) {
     return { data: await this.saleReceipt.execute(user, id) };
+  }
+
+  /**
+   * Phase 12 (Returns): what this return is worth, before it happens.
+   *
+   * POST rather than GET because the request is a set of lines with
+   * quantities, conditions and serials - not a query string. It creates
+   * nothing: the handler runs in a READ ONLY transaction, so the database
+   * itself refuses a write from this path (see PreviewSaleReturnUseCase).
+   *
+   * Gated on `sales.return`, the same permission the return itself needs -
+   * not a new one, and not `sales.view`: knowing what a refund would be
+   * worth is part of taking one.
+   */
+  @RequirePermissions('sales.return')
+  @Post(':id/returns/preview')
+  @HttpCode(HttpStatus.OK)
+  async previewSaleReturn(
+    @CurrentUser() user: RequestUser,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(previewSaleReturnSchema)) body: PreviewSaleReturnInput,
+  ) {
+    return { data: await this.previewReturn.execute(user, id, body) };
   }
 
   @RequirePermissions('sales.return')

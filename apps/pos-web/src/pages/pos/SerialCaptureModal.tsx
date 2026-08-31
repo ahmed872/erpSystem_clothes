@@ -55,7 +55,7 @@ export function SerialCaptureModal({
             autoFocus={i === 0}
           />
         ))}
-        {hasDuplicates && <p className="text-xs text-danger-600">Serial numbers must be unique.</p>}
+        {hasDuplicates && <p className="text-xs text-danger-600">{t('checkout.serialsMustBeUnique')}</p>}
       </div>
     </Modal>
   );

@@ -11,6 +11,10 @@ export class ListSalesUseCase {
     return this.prisma.withTenant(actor.tenantId, async (tx) => {
       const where = {
         businessId: actor.tenantId,
+        // Phase 12 (Returns): the receipt in the customer's hand. Exact,
+        // index-backed equality against `@@unique([businessId,
+        // saleNumber])` - see the schema note on `saleNumber`.
+        saleNumber: query.saleNumber,
         customerId: query.customerId,
         warehouseId: query.warehouseId,
         branchId: query.branchId,
