@@ -1,0 +1,121 @@
+{
+  "app": { "title": "POS" },
+  "login": {
+    "title": "Sign in",
+    "subtitle": "Enter your account details to start a sales shift",
+    "businessSlug": "Business slug",
+    "email": "Email",
+    "password": "Password",
+    "submit": "Sign in",
+    "submitting": "Signing in..."
+  },
+  "shiftSetup": {
+    "title": "Start your shift",
+    "warehouse": "Warehouse",
+    "register": "Cash register",
+    "openingFloat": "Opening float",
+    "submit": "Open shift",
+    "noWarehouse": "No warehouse is authorized for your account. Ask an administrator to assign you to a branch.",
+    "chooseWarehouse": "Choose where you're selling from"
+  },
+  "pos": {
+    "searchPlaceholder": "Search by name, barcode, or SKU",
+    "scanHint": "Scan a barcode or type to search",
+    "cart": "Cart",
+    "emptyCart": "Cart is empty — search for an item to add it",
+    "customer": "Customer",
+    "walkIn": "Walk-in (no customer)",
+    "addCustomer": "Add new customer",
+    "customerName": "Customer name",
+    "customerPhone": "Phone",
+    "subtotal": "Subtotal",
+    "discount": "Discount",
+    "tax": "Tax",
+    "total": "Total",
+    "estimateNotice": "Estimate — the real total is computed by the server at checkout",
+    "checkout": "Checkout",
+    "quantity": "Qty",
+    "unitPrice": "Price",
+    "lineDiscount": "Discount",
+    "remove": "Remove",
+    "outOfStock": "Out of stock",
+    "available": "Available",
+    "redeemPoints": "Redeem loyalty points",
+    "pointsAvailable": "Available balance"
+  },
+  "checkout": {
+    "title": "Complete sale",
+    "payments": "Payments",
+    "addPayment": "Add payment",
+    "method": "Method",
+    "amount": "Amount",
+    "reference": "Reference",
+    "cash": "Cash",
+    "card": "Card",
+    "wallet": "Wallet",
+    "other": "Other",
+    "remaining": "Remaining",
+    "change": "Change due",
+    "confirm": "Confirm sale",
+    "confirming": "Processing sale...",
+    "creditSaleHint": "Credit sale to a registered customer — payments may be left empty",
+    "serialsRequired": "This item requires serial numbers",
+    "serialsTitle": "Enter serial numbers"
+  },
+  "receipt": {
+    "title": "Sale receipt",
+    "saleNumber": "Sale #",
+    "cashier": "Cashier",
+    "items": "Items",
+    "pointsEarned": "Points earned",
+    "pointsRedeemed": "Points redeemed",
+    "newSale": "New sale",
+    "print": "Print"
+  },
+  "returns": {
+    "title": "Returns",
+    "selectSale": "Select a sale",
+    "todaysSales": "This shift's sales",
+    "noSales": "No sales in this shift yet",
+    "condition": "Condition",
+    "sellable": "Sellable",
+    "damaged": "Damaged",
+    "refundMethod": "Refund method",
+    "refundAmount": "Refund amount",
+    "submit": "Process return",
+    "exchangeNote": "Exchange (swap for a different item) is not yet in this frontend milestone — the backend supports it and can be added next."
+  },
+  "shiftClose": {
+    "title": "Close shift",
+    "countedCash": "Counted cash",
+    "notes": "Notes",
+    "submit": "Close shift",
+    "blindNotice": "Blind close: enter what you actually counted in the drawer — the expected amount is not shown to you.",
+    "summaryTitle": "Shift summary",
+    "closedAt": "Closed at",
+    "openedAt": "Opened at",
+    "countedCashLabel": "Counted cash",
+    "done": "Back to sign-in"
+  },
+  "nav": {
+    "pos": "Sell",
+    "returns": "Returns",
+    "closeShift": "Close shift",
+    "logout": "Log out",
+    "language": "العربية"
+  },
+  "common": {
+    "loading": "Loading...",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "save": "Save",
+    "back": "Back",
+    "search": "Search",
+    "noResults": "No results",
+    "requestId": "Request ID"
+  },
+  "errors": {
+    "forbidden": "You don't have permission for this action",
+    "network": "Could not reach the server. Check your connection."
+  }
+}

@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-neutral-50 text-neutral-900;
+  font-family: 'Cairo', 'Tajawal', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numeric fields (money, quantity) should stay LTR-shaped even in an RTL
+   document — digits read the same direction either way, and a mirrored
+   decimal point/currency layout is a real bug, not a style choice. */
+.numeric {
+  direction: ltr;
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+}
