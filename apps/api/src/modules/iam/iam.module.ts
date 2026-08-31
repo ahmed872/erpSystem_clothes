@@ -12,6 +12,7 @@ import { LogoutUseCase } from './application/auth/logout.use-case';
 import { CreateUserUseCase } from './application/users/create-user.use-case';
 import { ListUsersUseCase } from './application/users/list-users.use-case';
 import { UpdateUserUseCase } from './application/users/update-user.use-case';
+import { ChangePasswordUseCase } from './application/users/change-password.use-case';
 import { CreateRoleUseCase } from './application/roles/create-role.use-case';
 import { ListRolesUseCase } from './application/roles/list-roles.use-case';
 import { UpdateRoleUseCase } from './application/roles/update-role.use-case';
@@ -22,6 +23,7 @@ import { ListPermissionsUseCase } from './application/permissions/list-permissio
   imports: [JwtModule.register({})],
   controllers: [AuthController, UsersController, RolesController, PermissionsController],
   providers: [
+    ChangePasswordUseCase,
     PasswordHasherService,
     AuthTokenService,
     LoginUseCase,

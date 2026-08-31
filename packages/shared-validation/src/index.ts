@@ -66,6 +66,36 @@ export const updateUserSchema = z.object({
 });
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;
 
+/**
+ * Phase 10 (10G) — a user changes their OWN password.
+ *
+ * The current password is required, not optional. A logged-in session on
+ * an unattended terminal is the ordinary case in a shop, and without this
+ * anyone who walked past a signed-in till could lock the real user out of
+ * their own account.
+ */
+export const changeOwnPasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(200),
+  newPassword: passwordSchema,
+});
+export type ChangeOwnPasswordInput = z.infer<typeof changeOwnPasswordSchema>;
+
+/**
+ * Phase 10 (10G) — an administrator resets SOMEONE ELSE'S password.
+ *
+ * The forgotten-password case, which is what actually happens in a shop:
+ * the owner sets a new one and tells the person. There is deliberately no
+ * self-service email or SMS reset - delivery is out of Phase 10's approved
+ * scope, and a reset link nobody can receive is worse than none.
+ *
+ * No `currentPassword`: the administrator does not know it, which is the
+ * whole point. The permission is the check.
+ */
+export const resetUserPasswordSchema = z.object({
+  newPassword: passwordSchema,
+});
+export type ResetUserPasswordInput = z.infer<typeof resetUserPasswordSchema>;
+
 export const createRoleSchema = z.object({
   name: nameSchema,
   permissionCodes: z.array(z.string()).min(1, 'At least one permission is required'),
