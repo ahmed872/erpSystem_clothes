@@ -254,7 +254,20 @@ describe('Phase 8E: cross-feature integration, serials and concurrency (e2e, rea
       const back = await admin.saleReturnItemSerial.findMany({ where: { serialNumberId: s1.id } });
       expect(back.length).toBe(1);
       expect(back[0].saleReturnId).toBe(ret.body.data.id);
-      expect((await admin.serialNumber.findUniqueOrThrow({ where: { id: s1.id } })).status).toBe('RETURNED');
+      // BEHAVIOURAL CORRECTION, Phase 10 (BD-22). Phase 8E asserted
+      // RETURNED here: a quarantine state on the way to an inspection
+      // workflow that was deferred. The consequence was that the QUANTITY
+      // came back into sellable stock (a SELLABLE return posts a real
+      // SALES_RETURN increase) while the SERIAL did not, so the balance
+      // and the serial register disagreed permanently and nobody could
+      // ever sell the unit again. The serial now takes the SAME
+      // disposition the return line declared for the goods.
+      const returned = await admin.serialNumber.findUniqueOrThrow({ where: { id: s1.id } });
+      expect(returned.status).toBe('IN_STOCK');
+      expect(returned.currentWarehouseId).toBe(biz.warehouseId);
+      // ...and what was decided for this unit is recorded permanently on
+      // the return link, where a later sale cannot overwrite it.
+      expect(back[0].condition).toBe('SELLABLE');
       // The unit NOT returned is untouched and still SOLD.
       expect((await admin.serialNumber.findUniqueOrThrow({ where: { id: s2.id } })).status).toBe('SOLD');
       expect(await admin.saleReturnItemSerial.findMany({ where: { serialNumberId: s2.id } })).toEqual([]);
@@ -371,8 +384,11 @@ describe('Phase 8E: cross-feature integration, serials and concurrency (e2e, rea
       ]);
       expect(results.filter((r) => r.status === 201).length).toBe(1);
 
+      // BEHAVIOURAL CORRECTION, Phase 10 (BD-22): see the note on the
+      // traceability test above. The unit came back SELLABLE, so it is
+      // back on the shelf rather than in a quarantine state.
       const serial = await admin.serialNumber.findFirstOrThrow({ where: { serial: 'CR-1' } });
-      expect(serial.status).toBe('RETURNED');
+      expect(serial.status).toBe('IN_STOCK');
       expect(await admin.saleReturnItemSerial.count({ where: { serialNumberId: serial.id } })).toBe(1);
     });
 

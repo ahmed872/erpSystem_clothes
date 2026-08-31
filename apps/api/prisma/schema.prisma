@@ -809,6 +809,12 @@ enum SerialNumberStatus {
   RESERVED
   SOLD
   DAMAGED
+  /// Phase 8E's post-return quarantine state. Phase 10 (BD-22) replaced it
+  /// with an immediate disposition: a returned unit goes straight to
+  /// IN_STOCK or DAMAGED according to the condition the return recorded.
+  /// The value is RETAINED, never dropped, because rows written under
+  /// Phase 8E legitimately hold it and history is not rewritten to match a
+  /// later decision.
   RETURNED
   /// Phase 10 (10D): the unit has left the source warehouse on a stock
   /// transfer but has not yet been received at the destination. Before
@@ -2560,12 +2566,23 @@ model PurchaseReturnItemSerial {
 /// `erp_app` gets SELECT + INSERT only, and the row is never deleted: it
 /// is the permanent record that this unit came back on this document.
 model SaleReturnItemSerial {
-  id               String   @id @default(uuid())
-  businessId       String   @map("business_id")
-  saleReturnId     String   @map("sale_return_id")
-  saleReturnItemId String   @map("sale_return_item_id")
-  serialNumberId   String   @map("serial_number_id")
-  createdAt        DateTime @default(now()) @map("created_at")
+  id               String              @id @default(uuid())
+  businessId       String              @map("business_id")
+  saleReturnId     String              @map("sale_return_id")
+  saleReturnItemId String              @map("sale_return_item_id")
+  serialNumberId   String              @map("serial_number_id")
+  /// Phase 10 (BD-22): the disposition decided for THIS physical unit at
+  /// the moment it came back, carried over from the return line's own
+  /// condition.
+  ///
+  /// The serial's own row only ever holds its CURRENT status, and that
+  /// changes the next time the unit is sold. This column is the permanent
+  /// record of what was decided when the customer handed it over - the
+  /// same reasoning as `SaleItem.taxRateSnapshot`. Without it, "was this
+  /// unit taken back as sellable or as damaged?" becomes unanswerable as
+  /// soon as the unit moves again.
+  condition        SaleReturnCondition @default(SELLABLE)
+  createdAt        DateTime            @default(now()) @map("created_at")
 
   business       Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_return_item_serials_business_fk")
   saleReturn     SaleReturn     @relation(fields: [saleReturnId], references: [id], onDelete: Cascade)
@@ -2573,8 +2590,8 @@ model SaleReturnItemSerial {
   serialNumber   SerialNumber   @relation(fields: [serialNumberId], references: [id], onDelete: Restrict)
 
   /// A physical unit can come back at most once on a given return line,
-  /// and - because a serial can only transition SOLD -> RETURNED once -
-  /// at most once overall until a future inspection workflow releases it.
+  /// and - because the transition is guarded on the unit being SOLD - at
+  /// most once per sale of it.
   @@unique([businessId, saleReturnItemId, serialNumberId])
   @@index([businessId])
   @@index([saleReturnId])

@@ -438,6 +438,146 @@ describe('Serial lifecycle across purchasing and transfers (e2e, real Postgres)'
   });
 
   // ==================================================================
+  describe('A returned unit takes the disposition the return declared (BD-22)', () => {
+    /** Sells `serials` of a freshly received tracked variant. */
+    async function soldTrackedVariant(serials: string[]) {
+      const { variantId } = await receivedTrackedVariant(serials);
+      await openShiftAt(biz.warehouseId);
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: serials.length, unitPrice: 50, serials }],
+          payments: [{ amount: 50 * serials.length }],
+        })
+        .expect(201);
+      return { variantId, saleId: sale.body.data.id as string, saleItemId: sale.body.data.items[0].id as string };
+    }
+
+    const returnItems = (saleId: string, items: Record<string, unknown>[], refund?: { method: string; amount: number }) =>
+      request(app.getHttpServer())
+        .post(`/api/v1/sales/${saleId}/returns`)
+        .set('Authorization', auth())
+        .send({ items, refund });
+
+    it('SELLABLE puts the unit straight back on the shelf, at the warehouse that took it', async () => {
+      const { variantId, saleId, saleItemId } = await soldTrackedVariant(['BACK-1']);
+
+      await returnItems(saleId, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['BACK-1'] }], {
+        method: 'CASH',
+        amount: 50,
+      }).expect(201);
+
+      const row = await serialRow('BACK-1');
+      expect(row.status).toBe('IN_STOCK');
+      expect(row.currentWarehouseId).toBe(biz.warehouseId);
+
+      // THE POINT OF BD-22: the unit can be sold again. Under Phase 8E's
+      // quarantine state the QUANTITY came back into sellable stock while
+      // the SERIAL did not, so the balance said one unit was on the shelf
+      // and the serial register said it was not - and the goods were stuck
+      // in that contradiction forever.
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 50, serials: ['BACK-1'] }],
+          payments: [{ amount: 50 }],
+        })
+        .expect(201);
+      expect((await serialRow('BACK-1')).status).toBe('SOLD');
+    });
+
+    it('DAMAGED writes the unit off, owned by no warehouse, and it can never be sold again', async () => {
+      const { variantId, saleId, saleItemId } = await soldTrackedVariant(['BROKEN-1']);
+
+      await returnItems(saleId, [{ saleItemId, quantity: 1, condition: 'DAMAGED', serials: ['BROKEN-1'] }], {
+        method: 'CASH',
+        amount: 50,
+      }).expect(201);
+
+      const row = await serialRow('BROKEN-1');
+      expect(row.status).toBe('DAMAGED');
+      // Matches the stock side exactly: a DAMAGED return posts the
+      // SALES_RETURN increase and an immediate DAMAGE decrease, so no
+      // sellable quantity remains either.
+      expect(row.currentWarehouseId).toBeNull();
+
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 50, serials: ['BROKEN-1'] }],
+          payments: [{ amount: 50 }],
+        })
+        .expect(409);
+    });
+
+    it('records the disposition permanently on the return link, where a later sale cannot overwrite it', async () => {
+      const { variantId, saleId, saleItemId } = await soldTrackedVariant(['RECORD-1']);
+      const ret = await returnItems(saleId, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['RECORD-1'] }], {
+        method: 'CASH',
+        amount: 50,
+      }).expect(201);
+
+      const link = await admin.saleReturnItemSerial.findFirstOrThrow({
+        where: { saleReturnId: ret.body.data.id },
+        include: { serialNumber: true },
+      });
+      expect(link.serialNumber.serial).toBe('RECORD-1');
+      expect(link.condition).toBe('SELLABLE');
+
+      // Sell the unit again: its own status moves on to SOLD, and the
+      // record of what was decided when the customer handed it over does
+      // not budge. That is the whole reason the column exists rather than
+      // being read off the serial at query time.
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 50, serials: ['RECORD-1'] }],
+          payments: [{ amount: 50 }],
+        })
+        .expect(201);
+
+      expect((await serialRow('RECORD-1')).status).toBe('SOLD');
+      const reread = await admin.saleReturnItemSerial.findUniqueOrThrow({ where: { id: link.id } });
+      expect(reread.condition).toBe('SELLABLE');
+    });
+
+    it('a unit returned SELLABLE and sold again cannot be returned twice against the FIRST sale', async () => {
+      const { variantId, saleId, saleItemId } = await soldTrackedVariant(['TWICE-1']);
+      await returnItems(saleId, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['TWICE-1'] }], {
+        method: 'CASH',
+        amount: 50,
+      }).expect(201);
+
+      // Sold again on a NEW sale.
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 50, serials: ['TWICE-1'] }],
+          payments: [{ amount: 50 }],
+        })
+        .expect(201);
+
+      // The first sale has nothing left to give back: its quantity bound
+      // is exhausted, so a second return against it is refused even though
+      // the unit is once again SOLD.
+      await returnItems(saleId, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['TWICE-1'] }], {
+        method: 'CASH',
+        amount: 50,
+      }).expect(409);
+    });
+  });
+
+  // ==================================================================
   describe('Database-level guarantees on the three link tables', () => {
     const TABLES = ['purchase_receipt_item_serials', 'stock_transfer_item_serials', 'purchase_return_item_serials'];
 
@@ -477,7 +617,7 @@ describe('Serial lifecycle across purchasing and transfers (e2e, real Postgres)'
       const bad: Array<{ serial: string }> = await admin.$queryRawUnsafe(
         `SELECT serial FROM serial_numbers
           WHERE (status = 'IN_STOCK' AND current_warehouse_id IS NULL)
-             OR (status IN ('SOLD', 'IN_TRANSIT', 'RETURNED_TO_SUPPLIER') AND current_warehouse_id IS NOT NULL)`,
+             OR (status IN ('SOLD', 'IN_TRANSIT', 'RETURNED_TO_SUPPLIER', 'DAMAGED') AND current_warehouse_id IS NOT NULL)`,
       );
       expect(bad).toEqual([]);
     });

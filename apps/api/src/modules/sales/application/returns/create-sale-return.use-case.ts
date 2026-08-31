@@ -22,7 +22,7 @@ import { recordCashTransaction } from '../../../finance/domain/record-cash-trans
 import { TaxEngineService } from '../../../../engines/tax/tax-engine.service';
 import { getCustomerPointsBalance } from '../../../loyalty/domain/customer-points-balance';
 import { computeCumulativeClawback, computeCumulativeRestoration } from '../../../loyalty/domain/loyalty-returns';
-import { returnSerialsToQuarantine } from '../../../inventory/domain/return-serials';
+import { disposeReturnedSerials } from '../../../inventory/domain/return-serials';
 
 function saleReturnFingerprint(
   saleId: string,
@@ -279,15 +279,21 @@ export class CreateSaleReturnUseCase {
           },
         });
 
-        // BD-14: SOLD -> RETURNED (quarantine), AFTER the stock movements
-        // above so the lock sequence stays
-        // Customer -> Sale -> StockBalance -> SerialNumber.
+        // BD-22 (superseding BD-14): the returned unit takes the SAME
+        // disposition the line already declared for the goods - SELLABLE
+        // puts it back on the shelf, DAMAGED writes it off - rather than
+        // sitting in a quarantine state waiting for an inspection workflow
+        // that was deferred. Run AFTER the stock movements above so the
+        // lock sequence stays Customer -> Sale -> StockBalance ->
+        // SerialNumber.
         if (saleItem.variant.product.tracksSerialNumbers) {
-          const returnedSerialIds = await returnSerialsToQuarantine(
+          const returnedSerialIds = await disposeReturnedSerials(
             tx,
             actor.tenantId,
             saleItem.id,
             line.serials ?? [],
+            line.condition,
+            sale.warehouseId,
           );
 
           // BD-15: any warranty still covering a returned unit is voided
@@ -303,6 +309,10 @@ export class CreateSaleReturnUseCase {
                 saleReturnId: saleReturn.id,
                 saleReturnItemId: createdReturnItem.id,
                 serialNumberId,
+                // BD-22: the permanent record of what was decided for this
+                // unit. The serial's own status will change the next time
+                // it is sold; this will not.
+                condition: line.condition,
               },
             });
           }

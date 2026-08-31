@@ -8,19 +8,30 @@ interface LockedSerialRow {
 }
 
 /**
- * Transitions returned serial-tracked units SOLD -> RETURNED (approved
- * decision BD-14).
+ * Transitions returned serial-tracked units out of SOLD, into the
+ * disposition the return recorded for them (approved decision BD-22).
  *
- * RETURNED, deliberately NOT straight back to IN_STOCK: a physical item
- * coming back over the counter is not automatically known to be sellable.
- * RETURNED is the post-return quarantine state, and the intended
- * lifecycle is SOLD -> RETURNED -> (future inspection workflow) ->
- * IN_STOCK or DAMAGED. Phase 8E implements only the approved RETURNED
- * disposition and builds no inspection workflow.
+ *   SELLABLE -> IN_STOCK, back at the warehouse that took them
+ *   DAMAGED  -> DAMAGED, owned by no warehouse
+ *
+ * WHY THIS CHANGED IN PHASE 10. Phase 8E sent every returned unit to a
+ * RETURNED quarantine state on the way to a future inspection workflow.
+ * That workflow was deferred, and the consequence was that the QUANTITY
+ * came back into sellable stock (a SELLABLE return posts a real
+ * SALES_RETURN increase) while the SERIAL did not. The two disagreed
+ * permanently: the balance said one unit was on the shelf and the serial
+ * register said it was in quarantine, so nobody could ever sell it. BD-22
+ * resolves this by making the serial follow the same disposition the
+ * return line already declares for the goods, which is the decision the
+ * person at the counter actually makes.
+ *
+ * A DAMAGED return keeps `currentWarehouseId` null, matching the stock
+ * side exactly: a DAMAGED return posts the SALES_RETURN increase and an
+ * immediate DAMAGE decrease, so no sellable quantity remains either.
  *
  * A serial can never be returned twice: the transition is guarded by the
- * unit's own current status under a row lock, so the second attempt sees
- * RETURNED and is rejected.
+ * unit's own current status under a row lock, so the second attempt sees a
+ * unit that is no longer SOLD and is rejected.
  *
  * CONCURRENCY: rows are taken with `SELECT ... FOR UPDATE` in
  * deterministic `id` order - the same ordering the sale path uses - so
@@ -32,11 +43,13 @@ interface LockedSerialRow {
  * Returns the ids transitioned, so the caller can void any warranty
  * covering them.
  */
-export async function returnSerialsToQuarantine(
+export async function disposeReturnedSerials(
   tx: TenantTx,
   businessId: string,
   saleItemId: string,
   serials: string[],
+  condition: 'SELLABLE' | 'DAMAGED',
+  warehouseId: string,
 ): Promise<string[]> {
   if (serials.length === 0) return [];
   if (new Set(serials).size !== serials.length) {
@@ -76,6 +89,12 @@ export async function returnSerialsToQuarantine(
   }
 
   const ids = rows.map((r) => r.id);
-  await tx.serialNumber.updateMany({ where: { id: { in: ids } }, data: { status: 'RETURNED' } });
+  await tx.serialNumber.updateMany({
+    where: { id: { in: ids } },
+    data:
+      condition === 'DAMAGED'
+        ? { status: 'DAMAGED', currentWarehouseId: null }
+        : { status: 'IN_STOCK', currentWarehouseId: warehouseId },
+  });
   return ids;
 }
