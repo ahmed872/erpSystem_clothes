@@ -30,10 +30,28 @@ export const registerBusinessSchema = z.object({
 });
 export type RegisterBusinessInput = z.infer<typeof registerBusinessSchema>;
 
+/** Phase 10 (10F): every profile field is free text, nullable, and
+ *  trimmed. `null` clears one; omitting it leaves it alone. The product
+ *  validates none of them against any national invoicing regime, because
+ *  it has not been told which one applies - and inventing a format check
+ *  would break the first business whose country works differently. */
+const profileText = (max: number) => z.string().trim().max(max).nullable().optional();
+
 export const updateBusinessSchema = z.object({
   name: nameSchema.optional(),
   currency: currencyCodeSchema.optional(),
   timezone: z.string().trim().min(1).max(64).optional(),
+  legalName: profileText(200),
+  taxNumber: profileText(64),
+  registrationNumber: profileText(64),
+  phone: profileText(40),
+  email: profileText(200),
+  addressLine: profileText(300),
+  city: profileText(120),
+  country: profileText(120),
+  logoUrl: profileText(500),
+  receiptHeader: profileText(500),
+  receiptFooter: profileText(500),
 });
 export type UpdateBusinessInput = z.infer<typeof updateBusinessSchema>;
 

@@ -123,3 +123,64 @@ export const updateTaxSettingsSchema = z.object({
   defaultTaxId: z.string().uuid().nullable().optional(),
 });
 export type UpdateTaxSettingsInput = z.infer<typeof updateTaxSettingsSchema>;
+
+// ======================================================================
+// Phase 10 (10H) — EXPENSES
+// ======================================================================
+
+/**
+ * A category is the bridge between an everyday word ("rent", "delivery van
+ * fuel") and the GL account it lands in. The account is chosen by the
+ * business rather than derived from a fixed list, because no product can
+ * know what a given shop counts as an expense line - the same posture
+ * `AccountingMappingRule` already takes for everything else.
+ */
+export const createExpenseCategorySchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  /// Must be an EXPENSE-type account. Checked server-side, where the
+  /// account's type is actually known.
+  accountId: z.string().uuid(),
+});
+export type CreateExpenseCategoryInput = z.infer<typeof createExpenseCategorySchema>;
+
+export const updateExpenseCategorySchema = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    accountId: z.string().uuid().optional(),
+    /// Categories are never deleted - an expense already posted against
+    /// one must stay explicable forever.
+    isActive: z.boolean().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: 'No fields to update' });
+export type UpdateExpenseCategoryInput = z.infer<typeof updateExpenseCategorySchema>;
+
+/**
+ * Money leaving the business for something other than stock.
+ *
+ * There is no `branchId`: it comes from the acting user's open shift for a
+ * cash expense, and from the business's own default otherwise. Letting a
+ * client name a branch would let an expense be charged to one it never
+ * touched.
+ */
+export const createExpenseSchema = z.object({
+  expenseCategoryId: z.string().uuid(),
+  amount: z.number().finite().positive().max(999_999_999_999),
+  paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CHEQUE', 'CARD', 'OTHER']).default('CASH'),
+  reference: z.string().trim().max(200).optional(),
+  description: z.string().trim().max(500).optional(),
+  /// The date the business considers the expense to have occurred, which
+  /// is not always the date it was typed in. Defaults to today.
+  expenseDate: z.string().trim().max(40).optional(),
+  idempotencyKey: z.string().trim().min(1).max(120).optional(),
+});
+export type CreateExpenseInput = z.infer<typeof createExpenseSchema>;
+
+export const expenseListQuerySchema = z.object({
+  expenseCategoryId: z.string().uuid().optional(),
+  shiftId: z.string().uuid().optional(),
+  from: z.string().trim().max(40).optional(),
+  to: z.string().trim().max(40).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+export type ExpenseListQuery = z.infer<typeof expenseListQuerySchema>;

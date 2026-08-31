@@ -41,14 +41,35 @@ enum AuditAction {
 /// and is protected by a Postgres RLS policy comparing it to
 /// current_setting('app.current_tenant_id').
 model Business {
-  id        String         @id @default(uuid())
-  name      String
-  slug      String         @unique
-  currency  String         @default("EGP")
-  timezone  String         @default("Africa/Cairo")
-  status    BusinessStatus @default(ACTIVE)
-  createdAt DateTime       @default(now()) @map("created_at")
-  updatedAt DateTime       @updatedAt @map("updated_at")
+  id                 String         @id @default(uuid())
+  name               String
+  slug               String         @unique
+  currency           String         @default("EGP")
+  timezone           String         @default("Africa/Cairo")
+  status             BusinessStatus @default(ACTIVE)
+  /// Phase 10 (10F) — the business's own identity, as it appears on a
+  /// receipt. All nullable and all free text: the product ships knowing
+  /// nothing about any country's invoicing rules, so it stores what the
+  /// business tells it rather than validating against a regime it has not
+  /// been told about. A jurisdiction-aware e-invoicing layer is a separate,
+  /// deferred decision, and guessing at its shape now would be worse than
+  /// leaving these as the plain strings a printed receipt needs.
+  legalName          String?        @map("legal_name")
+  taxNumber          String?        @map("tax_number")
+  registrationNumber String?        @map("registration_number")
+  phone              String?
+  email              String?
+  addressLine        String?        @map("address_line")
+  city               String?
+  country            String?
+  logoUrl            String?        @map("logo_url")
+  /// Free text printed above the lines and below the totals - the shop's
+  /// own greeting and its returns policy, which is the one thing customers
+  /// actually read on a receipt.
+  receiptHeader      String?        @map("receipt_header")
+  receiptFooter      String?        @map("receipt_footer")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
 
   branches   Branch[]
   warehouses Warehouse[]
@@ -124,6 +145,8 @@ model Business {
   taxes                     Tax[]
   cashRegisters             CashRegister[]
   cashTransactions          CashTransaction[]
+  ExpenseCategory           ExpenseCategory[]
+  Expense                   Expense[]
 
   @@map("businesses")
 }
@@ -149,6 +172,7 @@ model Branch {
   sales          Sale[]
   cashRegisters  CashRegister[]
   heldSales      HeldSale[]
+  Expense        Expense[]
 
   @@unique([businessId, name])
   @@index([businessId])
@@ -1636,6 +1660,7 @@ model Shift {
   cashRegister     CashRegister?     @relation(fields: [cashRegisterId], references: [id], onDelete: Restrict)
   sales            Sale[]
   cashTransactions CashTransaction[]
+  Expense          Expense[]
 
   @@index([businessId])
   @@index([openedBy])
@@ -2058,11 +2083,12 @@ model Account {
   createdBy       String?       @map("created_by")
   updatedBy       String?       @map("updated_by")
 
-  business      Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "accounts_business_fk")
-  parentAccount Account?                @relation("AccountHierarchy", fields: [parentAccountId], references: [id], onDelete: Restrict)
-  childAccounts Account[]               @relation("AccountHierarchy")
-  mappingRules  AccountingMappingRule[]
-  journalLines  JournalEntryLine[]
+  business        Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "accounts_business_fk")
+  parentAccount   Account?                @relation("AccountHierarchy", fields: [parentAccountId], references: [id], onDelete: Restrict)
+  childAccounts   Account[]               @relation("AccountHierarchy")
+  mappingRules    AccountingMappingRule[]
+  journalLines    JournalEntryLine[]
+  ExpenseCategory ExpenseCategory[]
 
   @@unique([businessId, code])
   @@index([businessId])
@@ -2742,4 +2768,81 @@ model HeldSaleItem {
   @@index([businessId])
   @@index([heldSaleId])
   @@map("held_sale_items")
+}
+
+/// Phase 10 (10H) — what a shop spends money on, other than stock.
+///
+/// A category is the bridge between an everyday word ("rent", "delivery
+/// van fuel") and the GL account it lands in. The account is chosen by the
+/// business rather than derived from a fixed list, because no product can
+/// know what a given shop counts as an expense line - which is the same
+/// posture `AccountingMappingRule` already takes for everything else.
+///
+/// Never deleted, only deactivated: an expense already posted against a
+/// category must stay explicable forever.
+model ExpenseCategory {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  name       String
+  /// The GL account this category's expenses are DEBITED to. Restricted to
+  /// an EXPENSE-type account, checked in the application layer where the
+  /// account's type is known.
+  accountId  String   @map("account_id")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdBy  String?  @map("created_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  updatedBy  String?  @map("updated_by")
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "expense_categories_business_fk")
+  account  Account   @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  expenses Expense[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+  @@map("expense_categories")
+}
+
+/// Phase 10 (10H) — money leaving the business for something other than
+/// stock.
+///
+/// APPEND-ONLY. An expense is a financial event, and a mistaken one is
+/// corrected by a compensating entry, never by editing the record of what
+/// happened - the same posture as every other ledger in this codebase.
+///
+/// A CASH expense is ALSO a movement of physical money, so it enters the
+/// shift's drawer ledger in the same transaction. Without that, paying the
+/// window cleaner out of the till would show up at close as a shortage the
+/// cashier could not explain.
+model Expense {
+  id                String                @id @default(uuid())
+  businessId        String                @map("business_id")
+  branchId          String                @map("branch_id")
+  expenseCategoryId String                @map("expense_category_id")
+  /// Set only for a CASH expense: the shift whose drawer the money left.
+  shiftId           String?               @map("shift_id")
+  expenseNumber     String                @map("expense_number")
+  idempotencyKey    String?               @map("idempotency_key")
+  amount            Decimal               @db.Decimal(18, 4)
+  paymentMethod     PurchasePaymentMethod @default(CASH) @map("payment_method")
+  reference         String?
+  description       String?
+  /// The date the business considers the expense to have occurred, which
+  /// is not always the date it was typed in.
+  expenseDate       DateTime              @map("expense_date")
+  createdBy         String?               @map("created_by")
+  createdAt         DateTime              @default(now()) @map("created_at")
+
+  business Business        @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "expenses_business_fk")
+  branch   Branch          @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  category ExpenseCategory @relation(fields: [expenseCategoryId], references: [id], onDelete: Restrict)
+  shift    Shift?          @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, expenseNumber])
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId])
+  @@index([businessId, expenseDate])
+  @@index([expenseCategoryId])
+  @@index([shiftId])
+  @@map("expenses")
 }

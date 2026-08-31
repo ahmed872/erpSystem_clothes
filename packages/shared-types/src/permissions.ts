@@ -166,6 +166,13 @@ export const PERMISSION_CODES = [
   // Tax configuration (Phase 10, BD-18)
   'tax.view',
   'tax.manage',
+  // Expenses (Phase 10, 10H): money leaving the business for something
+  // other than stock. `create` is separate from `manage_categories`
+  // because deciding WHICH GL account an expense lands in is an accounting
+  // decision, while recording that the window cleaner was paid is not.
+  'expenses.view',
+  'expenses.create',
+  'expenses.manage_categories',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -228,6 +235,10 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'reports.sales.view',
     'reports.inventory.view',
     'reports.dashboard.view',
+    // Expenses (Phase 10, 10H): a branch manager pays the window cleaner
+    // out of the till, but does not decide which GL account that lands in.
+    'expenses.view',
+    'expenses.create',
     // Warranty (Phase 8A): full operational handling for their branches'
     // customers - register, view, and process claims.
     'warranty.view',
@@ -311,6 +322,12 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // author it as well as read it.
     'tax.view',
     'tax.manage',
+    // Expenses (Phase 10, 10H): the Accountant both records expenses and
+    // decides which GL account each category lands in - that mapping is an
+    // accounting decision, not an operational one.
+    'expenses.view',
+    'expenses.create',
+    'expenses.manage_categories',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',

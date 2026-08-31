@@ -19,6 +19,7 @@ import { CreateSaleReturnUseCase } from './application/returns/create-sale-retur
 import { CreateSalePaymentUseCase } from './application/payments/create-sale-payment.use-case';
 import { CreateExchangeUseCase } from './application/exchanges/create-exchange.use-case';
 import { HeldSalesService } from './application/holds/held-sales.service';
+import { GetSaleReceiptUseCase } from './application/sales/get-sale-receipt.use-case';
 import { HeldSalesController } from './presentation/held-sales.controller';
 import { FinanceModule } from '../finance/finance.module';
 
@@ -48,6 +49,7 @@ import { FinanceModule } from '../finance/finance.module';
     CreateSalePaymentUseCase,
     CreateExchangeUseCase,
     HeldSalesService,
+    GetSaleReceiptUseCase,
   ],
 })
 export class SalesModule {}

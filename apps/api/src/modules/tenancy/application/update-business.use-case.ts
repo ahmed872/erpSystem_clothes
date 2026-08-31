@@ -19,10 +19,25 @@ export class UpdateBusinessUseCase {
 
       const after = await tx.business.update({
         where: { id: actor.tenantId },
+        // Phase 10 (10F): the profile fields are NULLABLE, so `undefined`
+        // (absent) and `null` (explicitly cleared) mean different things
+        // and cannot be collapsed with `??` the way the three required
+        // fields above can.
         data: {
           name: input.name ?? undefined,
           currency: input.currency ?? undefined,
           timezone: input.timezone ?? undefined,
+          legalName: input.legalName,
+          taxNumber: input.taxNumber,
+          registrationNumber: input.registrationNumber,
+          phone: input.phone,
+          email: input.email,
+          addressLine: input.addressLine,
+          city: input.city,
+          country: input.country,
+          logoUrl: input.logoUrl,
+          receiptHeader: input.receiptHeader,
+          receiptFooter: input.receiptFooter,
         },
       });
 

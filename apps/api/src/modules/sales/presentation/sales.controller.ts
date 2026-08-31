@@ -20,6 +20,7 @@ import { ListSalesUseCase } from '../application/sales/list-sales.use-case';
 import { CreateSaleReturnUseCase } from '../application/returns/create-sale-return.use-case';
 import { CreateSalePaymentUseCase } from '../application/payments/create-sale-payment.use-case';
 import { CreateExchangeUseCase } from '../application/exchanges/create-exchange.use-case';
+import { GetSaleReceiptUseCase } from '../application/sales/get-sale-receipt.use-case';
 
 @Controller('sales')
 export class SalesController {
@@ -30,6 +31,7 @@ export class SalesController {
     private readonly createReturn: CreateSaleReturnUseCase,
     private readonly createPayment: CreateSalePaymentUseCase,
     private readonly createExchange: CreateExchangeUseCase,
+    private readonly saleReceipt: GetSaleReceiptUseCase,
   ) {}
 
   @RequirePermissions('sales.view')
@@ -48,6 +50,18 @@ export class SalesController {
   @Get(':id')
   async get(@CurrentUser() user: RequestUser, @Param('id') id: string) {
     return { data: await this.getSale.execute(user, id) };
+  }
+
+  /**
+   * Phase 10 (10F): everything a printed receipt needs, in one request.
+   * Gated on `sales.view` - whoever may look at the sale may reprint its
+   * receipt. Cost and profit are absent from the payload for EVERYONE: a
+   * receipt is a document handed to a customer.
+   */
+  @RequirePermissions('sales.view')
+  @Get(':id/receipt')
+  async receipt(@CurrentUser() user: RequestUser, @Param('id') id: string) {
+    return { data: await this.saleReceipt.execute(user, id) };
   }
 
   @RequirePermissions('sales.return')
