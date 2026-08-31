@@ -9,6 +9,9 @@ import { formatMoney, parseMoney } from '../lib/money';
 import { canPreview, draftFromReceipt, toRequestItems, type ReturnLineDraft } from '../lib/returnLines';
 import { useShiftStore } from '../store/shiftStore';
 import { ReturnSerialPicker } from './returns/ReturnSerialPicker';
+import { ReturnLineList } from './returns/ReturnLineList';
+import { ExchangeBuilder } from './exchanges/ExchangeBuilder';
+import { usePermission } from '../hooks/usePermission';
 import type { SaleReceipt, SaleReturn, SaleReturnPreview, SalePaymentMethod } from '../lib/apiTypes';
 
 /**
@@ -36,18 +39,78 @@ import type { SaleReceipt, SaleReturn, SaleReturnPreview, SalePaymentMethod } fr
  * NO MONEY IS COMPUTED IN THIS FILE. Every figure displayed and every
  * figure sent comes from the preview.
  */
-type Stage = { kind: 'find' } | { kind: 'build'; saleId: string } | { kind: 'done'; result: SaleReturn; saleId: string };
+type Stage =
+  | { kind: 'find' }
+  | { kind: 'choose'; saleId: string }
+  | { kind: 'build'; saleId: string }
+  | { kind: 'exchange'; saleId: string }
+  | { kind: 'done'; result: SaleReturn; saleId: string };
 
 export function ReturnsPage() {
   const [stage, setStage] = useState<Stage>({ kind: 'find' });
+  // Both hooks called unconditionally - `&&` would short-circuit the second.
+  const canReturn = usePermission('sales.return');
+  const canSell = usePermission('sales.create');
+  const canExchange = canReturn && canSell;
 
+  if (stage.kind === 'choose') {
+    // A cashier who cannot also sell has no use for the exchange door -
+    // the backend requires both permissions anyway (see sales.controller.ts),
+    // so a role missing `sales.create` goes straight to the return it can do.
+    if (!canExchange) return <ReturnBuilder saleId={stage.saleId} onBack={() => setStage({ kind: 'find' })} onDone={(result) => setStage({ kind: 'done', result, saleId: stage.saleId })} />;
+    return (
+      <ChooseAction
+        onReturn={() => setStage({ kind: 'build', saleId: stage.saleId })}
+        onExchange={() => setStage({ kind: 'exchange', saleId: stage.saleId })}
+        onBack={() => setStage({ kind: 'find' })}
+      />
+    );
+  }
   if (stage.kind === 'build') {
-    return <ReturnBuilder saleId={stage.saleId} onBack={() => setStage({ kind: 'find' })} onDone={(result) => setStage({ kind: 'done', result, saleId: stage.saleId })} />;
+    return <ReturnBuilder saleId={stage.saleId} onBack={() => setStage({ kind: 'choose', saleId: stage.saleId })} onDone={(result) => setStage({ kind: 'done', result, saleId: stage.saleId })} />;
+  }
+  if (stage.kind === 'exchange') {
+    return (
+      <ExchangeBuilder
+        saleId={stage.saleId}
+        onBack={() => setStage({ kind: 'choose', saleId: stage.saleId })}
+        onDone={() => setStage({ kind: 'find' })}
+      />
+    );
   }
   if (stage.kind === 'done') {
     return <ReturnDone result={stage.result} saleId={stage.saleId} onAnother={() => setStage({ kind: 'find' })} />;
   }
-  return <FindSale onPick={(saleId) => setStage({ kind: 'build', saleId })} />;
+  return <FindSale onPick={(saleId) => setStage({ kind: 'choose', saleId })} />;
+}
+
+function ChooseAction({ onReturn, onExchange, onBack }: { onReturn: () => void; onExchange: () => void; onBack: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="mx-auto flex h-full max-w-md flex-col items-stretch justify-center gap-3 p-4">
+      <button type="button" onClick={onBack} className="mb-2 self-start text-sm text-brand-700">
+        ← {t('common.back')}
+      </button>
+      <h1 className="mb-1 text-lg font-bold text-neutral-900">{t('returns.chooseAction')}</h1>
+      <button
+        type="button"
+        onClick={onReturn}
+        className="rounded-xl border border-neutral-200 bg-white p-4 text-start shadow-sm hover:border-brand-400"
+      >
+        <p className="text-sm font-semibold text-neutral-900">{t('returns.actionReturnTitle')}</p>
+        <p className="mt-1 text-xs text-neutral-500">{t('returns.actionReturnDescription')}</p>
+      </button>
+      <button
+        type="button"
+        onClick={onExchange}
+        className="rounded-xl border border-neutral-200 bg-white p-4 text-start shadow-sm hover:border-brand-400"
+        data-testid="choose-exchange"
+      >
+        <p className="text-sm font-semibold text-neutral-900">{t('returns.actionExchangeTitle')}</p>
+        <p className="mt-1 text-xs text-neutral-500">{t('returns.actionExchangeDescription')}</p>
+      </button>
+    </div>
+  );
 }
 
 // ====================================================================
@@ -258,81 +321,7 @@ function ReturnForm({
       </div>
 
       <p className="mb-2 text-sm font-semibold text-neutral-700">{t('returns.selectItems')}</p>
-      <div className="flex flex-col gap-2">
-        {lines.map((line) => (
-          <Card key={line.saleItemId}>
-            <CardBody className="flex flex-col gap-2 p-3">
-              <label className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={line.selected}
-                  disabled={line.availableToReturn <= 0}
-                  onChange={(e) => update(line.saleItemId, { selected: e.target.checked })}
-                  data-testid={`return-line-${line.sku}`}
-                />
-                <span className="flex-1">
-                  <span className="block text-sm font-semibold text-neutral-900">{line.name}</span>
-                  {line.alternativeName && <span className="block text-xs text-neutral-500">{line.alternativeName}</span>}
-                  <span className="numeric block text-xs text-neutral-500">{line.sku}</span>
-                  <span className="mt-1 flex flex-wrap gap-2 text-[11px] text-neutral-500">
-                    <span>
-                      {t('returns.soldQuantity')}: <span className="numeric">{line.quantitySold}</span>
-                    </span>
-                    {line.quantityAlreadyReturned > 0 && (
-                      <span>
-                        {t('returns.alreadyReturned')}: <span className="numeric">{line.quantityAlreadyReturned}</span>
-                      </span>
-                    )}
-                    <span>
-                      {t('returns.availableToReturn')}: <span className="numeric">{line.availableToReturn}</span>
-                    </span>
-                  </span>
-                </span>
-                {line.availableToReturn <= 0 && <Badge tone="neutral">{t('returns.fullyReturned')}</Badge>}
-              </label>
-
-              {line.selected && (
-                <div className="flex flex-wrap items-end gap-2 border-t border-neutral-100 pt-2">
-                  <Input
-                    label={t('returns.quantityToReturn')}
-                    type="number"
-                    className="numeric w-24"
-                    min={1}
-                    max={line.availableToReturn}
-                    value={line.quantity}
-                    onChange={(e) => update(line.saleItemId, { quantity: Number(e.target.value), serials: [] })}
-                  />
-                  <Select
-                    label={t('returns.condition')}
-                    value={line.condition}
-                    onChange={(e) => update(line.saleItemId, { condition: e.target.value as 'SELLABLE' | 'DAMAGED' })}
-                  >
-                    <option value="SELLABLE">{t('returns.sellable')}</option>
-                    <option value="DAMAGED">{t('returns.damaged')}</option>
-                  </Select>
-                  {line.requiresSerials && (
-                    <button
-                      type="button"
-                      onClick={() => setSerialLineId(line.saleItemId)}
-                      className={`mb-1 rounded-lg border px-3 py-2 text-xs font-medium ${
-                        line.serials.length === line.quantity
-                          ? 'border-success-600 text-success-700'
-                          : 'border-warning-600 text-warning-700'
-                      }`}
-                      data-testid={`choose-serials-${line.sku}`}
-                    >
-                      {line.serials.length === line.quantity
-                        ? `${t('returns.chooseSerials')}: ${line.serials.join(', ')}`
-                        : t('returns.serialsNeeded', { needed: line.quantity })}
-                    </button>
-                  )}
-                </div>
-              )}
-            </CardBody>
-          </Card>
-        ))}
-      </div>
+      <ReturnLineList lines={lines} onUpdate={update} onChooseSerials={setSerialLineId} />
 
       <Button
         className="mt-3"
@@ -420,8 +409,6 @@ function ReturnForm({
           <ErrorBanner title={error.title} message={error.message} />
         </div>
       )}
-
-      <p className="mt-3 text-xs text-neutral-400">{t('returns.exchangeNote')}</p>
 
       {serialLine && (
         <ReturnSerialPicker

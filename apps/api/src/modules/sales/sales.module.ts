@@ -21,6 +21,7 @@ import { CreateSaleReturnUseCase } from './application/returns/create-sale-retur
 import { PreviewSaleReturnUseCase } from './application/returns/preview-sale-return.use-case';
 import { CreateSalePaymentUseCase } from './application/payments/create-sale-payment.use-case';
 import { CreateExchangeUseCase } from './application/exchanges/create-exchange.use-case';
+import { PreviewExchangeUseCase } from './application/exchanges/preview-exchange.use-case';
 import { HeldSalesService } from './application/holds/held-sales.service';
 import { GetSaleReceiptUseCase } from './application/sales/get-sale-receipt.use-case';
 import { HeldSalesController } from './presentation/held-sales.controller';
@@ -54,6 +55,7 @@ import { FinanceModule } from '../finance/finance.module';
     PreviewSaleReturnUseCase,
     CreateSalePaymentUseCase,
     CreateExchangeUseCase,
+    PreviewExchangeUseCase,
     HeldSalesService,
     GetSaleReceiptUseCase,
   ],

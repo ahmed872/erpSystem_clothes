@@ -1,7 +1,11 @@
 import { api } from '../lib/apiClient';
 import type {
+  CreateExchangeInput,
   CreateSaleInput,
   CreateSaleReturnInput,
+  ExchangePreview,
+  ExchangeResult,
+  PreviewExchangeInput,
   PreviewSaleReturnInput,
   QuoteSaleInput,
   Sale,
@@ -46,4 +50,14 @@ export const salesApi = {
     ),
   createReturn: (saleId: string, input: CreateSaleReturnInput) =>
     api.post<{ data: SaleReturn }>(`/sales/${saleId}/returns`, input),
+  /**
+   * Phase 12 (Exchange preview): the outcome — returned value, replacement
+   * value, exchange credit, and whichever of amountDue/refundAmount
+   * applies — before anything moves. Read-only on the server; creates and
+   * reserves nothing, exactly like `previewReturn` and `quote`.
+   */
+  previewExchange: (saleId: string, input: PreviewExchangeInput) =>
+    api.post<{ data: ExchangePreview }>(`/sales/${saleId}/exchanges/preview`, input),
+  createExchange: (saleId: string, input: CreateExchangeInput) =>
+    api.post<{ data: ExchangeResult }>(`/sales/${saleId}/exchanges`, input),
 };

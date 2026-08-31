@@ -469,3 +469,95 @@ export interface SaleReturn {
   items: SaleReturnItem[];
   totalRefundable: string;
 }
+
+// ------------------------------------------------------------ Exchanges ----
+
+/**
+ * Phase 12 (Exchange preview) — what `POST /sales/:id/exchanges/preview`
+ * answers. Composes the SAME `PreviewSaleReturnUseCase` computation (the
+ * return half) and the SAME `quotePricing` pipeline (the replacement half)
+ * the standalone return preview and sale quote already use — see the
+ * backend's `PreviewExchangeUseCase` doc comment for exactly how.
+ *
+ * `direction` is server-decided, never inferred here:
+ *   - EVEN: `amountDue` and `refundAmount` are both `'0'`.
+ *   - UPWARD: tender exactly `totals.amountDue` on `POST .../exchanges`.
+ *   - DOWNWARD: hand back exactly `totals.refundAmount`, with a method the
+ *     cashier chooses — the AMOUNT is never editable, only the method.
+ */
+export type ExchangeDirection = 'EVEN' | 'UPWARD' | 'DOWNWARD';
+
+export interface ExchangeNewLine {
+  variantId: string;
+  sku: string;
+  quantity: string;
+  unitPrice: string;
+  discountAmount: string;
+  taxAmount: string;
+  taxRatePercent: string | null;
+  lineTotal: string;
+  promotion: { id: string; name: string; type: string } | null;
+  requiresSerials: boolean;
+}
+
+export interface PreviewExchangeInput {
+  returnItems: Array<{
+    saleItemId: string;
+    quantity: number;
+    condition?: 'SELLABLE' | 'DAMAGED';
+    serials?: string[];
+  }>;
+  newItems: SaleItemInput[];
+  redeemPoints?: number;
+}
+
+export interface ExchangePreview {
+  sale: { id: string; saleNumber: string; createdAt: string; shiftId: string; totalAmount: string };
+  customer: { id: string; name: string; isActive: boolean } | null;
+  isWalkIn: boolean;
+  returnLines: SaleReturnPreviewLine[];
+  newLines: ExchangeNewLine[];
+  availability: { variantId: string; availableQuantity: string; requestedQuantity: string; sufficient: boolean }[];
+  direction: ExchangeDirection;
+  totals: {
+    returnCredit: string;
+    replacementTotal: string;
+    creditApplied: string;
+    /** Tender exactly this on `POST .../exchanges` — `'0'` unless UPWARD. */
+    amountDue: string;
+    /** Send this as `refund.amount` — `'0'` unless DOWNWARD. */
+    refundAmount: string;
+  };
+  refund: { required: boolean; requiredAmount: string | null };
+  previewedAt: string;
+  guarantees: {
+    authoritativeOutcome: boolean;
+    reservesNothing: boolean;
+    createsNothing: boolean;
+    finalExchangeRevalidates: boolean;
+  };
+}
+
+export interface CreateExchangeInput {
+  idempotencyKey?: string;
+  reason?: string;
+  notes?: string;
+  returnItems: PreviewExchangeInput['returnItems'];
+  newItems: SaleItemInput[];
+  /** Real tender for an UPWARD exchange. Never carries `EXCHANGE_CREDIT` —
+   * that method exists only for the server to produce. */
+  payments: SalePaymentInput[];
+  /** Real money back for a DOWNWARD exchange. The AMOUNT is proved by the
+   * server against the two totals; only the METHOD is genuinely a client
+   * input. Omit entirely for an EVEN or UPWARD exchange. */
+  refund?: { method: SalePaymentMethod; amount: number; reference?: string };
+  redeemPoints?: number;
+}
+
+export interface ExchangeResult {
+  saleReturn: SaleReturn;
+  sale: Sale;
+  exchangeCredit: string;
+  amountDue: string;
+  refunded: string;
+}

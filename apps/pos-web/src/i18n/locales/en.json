@@ -95,7 +95,6 @@
     "refundMethod": "Refund method",
     "refundAmount": "Refund amount",
     "submit": "Confirm return",
-    "exchangeNote": "Swapping for a different item is not in this milestone yet. The backend supports it and it is the next screen planned.",
     "findSale": "Find the sale",
     "saleNumberLabel": "Receipt / sale number",
     "saleNumberHint": "Type or scan the number printed on the receipt, e.g. INV-A1B2C3D4",
@@ -131,7 +130,12 @@
     "viewReceipt": "View receipt",
     "serialsMustBeUnique": "Each unit can only be chosen once.",
     "refundMethodRequired": "Refund method required — walk-in sale",
-    "refundOverMax": "That is more than the credit due. It cannot exceed {{max}}."
+    "refundOverMax": "That is more than the credit due. It cannot exceed {{max}}.",
+    "chooseAction": "What is happening with this sale?",
+    "actionReturnTitle": "Return only",
+    "actionReturnDescription": "Goods come back and the customer is refunded or credited.",
+    "actionExchangeTitle": "Exchange for another item",
+    "actionExchangeDescription": "Goods come back and different goods go out, settled in one step."
   },
   "shiftClose": {
     "title": "Close shift",
@@ -168,5 +172,22 @@
   "errors": {
     "forbidden": "You don't have permission for this action",
     "network": "Could not reach the server. Check your connection."
+  },
+  "exchange": {
+    "title": "Exchange",
+    "returnSection": "Coming back",
+    "newSection": "Going out instead",
+    "previewAction": "Work out the exchange",
+    "previewing": "Working out the exchange…",
+    "returnCredit": "Value of goods returned",
+    "replacementTotal": "Value of replacement",
+    "creditApplied": "Credit used",
+    "customerPays": "Customer pays",
+    "customerReceives": "Customer receives",
+    "evenNotice": "An even swap — nothing to pay and nothing to refund.",
+    "confirm": "Confirm exchange",
+    "confirming": "Processing exchange…",
+    "doneTitle": "Exchange complete",
+    "newExchange": "Another exchange"
   }
 }

@@ -154,10 +154,14 @@ export function CartPanel({ onCheckout }: { onCheckout: () => void }) {
           setCustomerPickerOpen(false);
         }}
       />
-      <SerialCaptureModal line={serialLine} onClose={() => setSerialLine(null)} onSave={(serials) => {
-        if (serialLine) setSerials(serialLine.key, serials);
-        setSerialLine(null);
-      }} />
+      <SerialCaptureModal
+        line={serialLine ? { productName: serialLine.productName, quantity: serialLine.quantity, serials: serialLine.serials } : null}
+        onClose={() => setSerialLine(null)}
+        onSave={(serials) => {
+          if (serialLine) setSerials(serialLine.key, serials);
+          setSerialLine(null);
+        }}
+      />
     </div>
   );
 }

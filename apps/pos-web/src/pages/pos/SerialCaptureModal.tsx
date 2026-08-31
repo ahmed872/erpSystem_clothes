@@ -1,14 +1,22 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Input, Modal } from '@retail/ui-kit';
-import type { CartLine } from '../../store/cartStore';
+
+/** Minimal shape this modal needs — deliberately NOT `CartLine`, so it can
+ * capture serials for a replacement line in an exchange (which has no cart
+ * entry at all) exactly as it does for a POS cart line. */
+export interface SerialCaptureTarget {
+  productName: string;
+  quantity: number;
+  serials: string[];
+}
 
 export function SerialCaptureModal({
   line,
   onClose,
   onSave,
 }: {
-  line: CartLine | null;
+  line: SerialCaptureTarget | null;
   onClose: () => void;
   onSave: (serials: string[]) => void;
 }) {

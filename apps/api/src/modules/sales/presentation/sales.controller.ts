@@ -5,6 +5,7 @@ import {
   createSaleReturnSchema,
   previewSaleReturnSchema,
   createExchangeSchema,
+  previewExchangeSchema,
   createSalePaymentSchema,
   saleListQuerySchema,
   CreateSaleInput,
@@ -12,6 +13,7 @@ import {
   CreateSaleReturnInput,
   PreviewSaleReturnInput,
   CreateExchangeInput,
+  PreviewExchangeInput,
   CreateSalePaymentInput,
   SaleListQuery,
 } from '@retail/shared-validation';
@@ -26,6 +28,7 @@ import { CreateSaleReturnUseCase } from '../application/returns/create-sale-retu
 import { PreviewSaleReturnUseCase } from '../application/returns/preview-sale-return.use-case';
 import { CreateSalePaymentUseCase } from '../application/payments/create-sale-payment.use-case';
 import { CreateExchangeUseCase } from '../application/exchanges/create-exchange.use-case';
+import { PreviewExchangeUseCase } from '../application/exchanges/preview-exchange.use-case';
 import { GetSaleReceiptUseCase } from '../application/sales/get-sale-receipt.use-case';
 
 @Controller('sales')
@@ -39,6 +42,7 @@ export class SalesController {
     private readonly previewReturn: PreviewSaleReturnUseCase,
     private readonly createPayment: CreateSalePaymentUseCase,
     private readonly createExchange: CreateExchangeUseCase,
+    private readonly previewExchange: PreviewExchangeUseCase,
     private readonly saleReceipt: GetSaleReceiptUseCase,
   ) {}
 
@@ -126,6 +130,25 @@ export class SalesController {
     @Body(new ZodValidationPipe(createSaleReturnSchema)) body: CreateSaleReturnInput,
   ) {
     return { data: await this.createReturn.execute(user, id, body) };
+  }
+
+  /**
+   * Phase 12 (Exchange preview) — the outcome, before the money moves.
+   * See PreviewExchangeUseCase for what this does and does not compute.
+   *
+   * Requires BOTH permissions, exactly as the real exchange does: a
+   * preview of an act neither role alone may perform is not a safe thing
+   * to show.
+   */
+  @RequirePermissions('sales.return', 'sales.create')
+  @Post(':id/exchanges/preview')
+  @HttpCode(HttpStatus.OK)
+  async previewSaleExchange(
+    @CurrentUser() user: RequestUser,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(previewExchangeSchema)) body: PreviewExchangeInput,
+  ) {
+    return { data: await this.previewExchange.execute(user, id, body) };
   }
 
   /**

@@ -1,9 +1,30 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 12 — POS Web (**Returns milestone complete.** Exchanges, held sales, cash drawer, warranty NOT started. ERP Web NOT started, offline sync NOT started.)
+Phase 12 — POS Web (**Exchanges milestone complete.** Held sales, cash drawer, warranty NOT started. ERP Web NOT started, offline sync NOT started.)
 
-The POS Web slice (login → shift → sell → quote → payment → receipt → blind close) is complete, and this milestone finishes the **Returns** workflow, which was exposed in the navigation and could not complete for two whole categories of sale.
+The exchange BACKEND has existed and been correct since Phase 10/10.2 — one atomic transaction composing the unchanged return and sale, all three directions, the clearing account netting to zero. What it could not do was tell a till the outcome **before** the cashier committed to it, and that is the only thing this milestone adds.
+
+**The gap, precisely.** `POST /sales/:id/exchanges` returns `exchangeCredit`, `amountDue` and `refunded` — after it commits. But a downward exchange must state its refund *in the request*, and the server accepts exactly one figure: `max(0, returnCredit − replacementTotal)`, where the credit is BD-1's apportionment plus BD-18's cumulative tax reversal and the replacement total depends on tax, promotions and loyalty resolved from the tenant's own configuration. A cashier had no way to know it, and `replacementTotal − returnedValue` is not it.
+
+**`POST /sales/:id/exchanges/preview`** — the smallest additive contract that closes it, built exactly like the two previews before it.
+
+- **It is not a third engine.** The return half is `PreviewSaleReturnUseCase.computeInTx` — the same function `POST /sales/:id/returns/preview` runs, now taking a caller-owned transaction so both halves share one. The replacement half is `CreateSaleUseCase.quotePricing` — the same function `POST /sales/quote` runs. The settlement split is the three lines copied verbatim from where `executeInTx` enforces them. Nothing new computes money.
+- **Side-effect freedom is enforced by PostgreSQL.** One `withTenantReadOnly` transaction wraps both halves, so any write reaching it fails with SQLSTATE 25006 — proven by a row-count sweep across sales, returns, payments, movements, journal entries, loyalty, promotion applications, both serial-link tables, cash and customer transactions, repeated three times in all three directions, and by both serials staying exactly where they were.
+- **It does not replace revalidation.** A serial with the right *count* but the wrong *identity* passes the preview (which reuses the return preview's count check) and is still refused at commit, where `disposeReturnedSerials` joins against what the line actually sold. Tested.
+- **`direction` is server-decided** (`EVEN` / `UPWARD` / `DOWNWARD`), so the till never infers it.
+
+**Frontend:** the exchange reuses the existing sale lookup, the return line/serial selection (extracted to `ReturnLineList`, shared by both builders), the POS product/variant picker, and the checkout payment rows. It shows returned value, replacement value, credit used, and then either *customer pays* or *customer receives* — the server's figures. The refund AMOUNT is never editable; only its method is. There is no `EXCHANGE_CREDIT` tender input, because that method exists only for the server to produce.
+
+**No schema change, no migration, no new permission (117, unchanged), no new business rule.** Gated on `sales.return` + `sales.create`, exactly as the exchange itself is.
+
+**Verification:** 746/746 backend e2e across 56 files (26 new) · 37/37 backend unit · 42/42 frontend unit (13 new) · build, `tsc --noEmit` and lint clean · 54 migrations, no drift on either database · `ops/verify-security.sh` PASS. Browser-verified against the real backend in all four shapes: **even** (100 → 100, nothing due), **upward** (100 → 150, customer pays 50.00), **downward** (100 → 60, customer receives 40.00) and a **serial-for-serial** swap (500 → 480, receives 20.00) — after which `SNA-1` is back `IN_STOCK`, `SNB-1` is `SOLD`, the clearing account is exactly 0.0000, no journal entry is unbalanced, and the two downward refunds are the only cash that left the drawer.
+
+---
+
+## Phase 12 — Returns (**Complete.**)
+
+This milestone finished the **Returns** workflow, which was exposed in the navigation and could not complete for two whole categories of sale.
 
 **What was broken, and what fixed it**
 

@@ -245,6 +245,30 @@ export const createExchangeSchema = z.object({
 export type CreateExchangeInput = z.infer<typeof createExchangeSchema>;
 
 /**
+ * Phase 12 (Exchange preview) — the same shape as `createExchangeSchema`,
+ * minus everything the preview cannot know the answer to yet: `payments`
+ * (there is nothing to tender until the outcome is known), `refund` (it is
+ * what this computes, not an input), and `idempotencyKey`/`reason`/`notes`
+ * (a preview writes no document to replay or annotate).
+ */
+export const previewExchangeSchema = z.object({
+  returnItems: z
+    .array(
+      z.object({
+        saleItemId: z.string().uuid(),
+        quantity: positiveQuantitySchema,
+        condition: z.enum(['SELLABLE', 'DAMAGED']).default('SELLABLE'),
+        serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
+      }),
+    )
+    .min(1)
+    .max(500),
+  newItems: z.array(saleItemInputSchema).min(1).max(500),
+  redeemPoints: nonNegativeMoneySchema.optional(),
+});
+export type PreviewExchangeInput = z.infer<typeof previewExchangeSchema>;
+
+/**
  * Phase 10 (approved resolution of BLOCKING-2) — parking a basket.
  *
  * These are DRAFT sale lines, not sale lines. The shape mirrors a sale's
