@@ -1,7 +1,17 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 12 — POS Web (**Held sales milestone complete.** Cash drawer, warranty NOT started. ERP Web NOT started, offline sync NOT started.)
+Phase 12 — POS Web (**Cash drawer milestone complete.** Warranty NOT started. ERP Web NOT started, offline sync NOT started.)
+
+### Cash drawer (Phase 12 milestone)
+
+The cash/till BACKEND has existed and been correct since Phase 10 (BD-17): expected cash is DERIVED (`openingFloat + SUM(cash_transactions.amount)`) and never stored; the counted amount is written once and never altered; the variance posts through the AccountingEngine at close; `cash_transactions` is append-only at the grant level. **No backend change was needed or made** — no schema change, no migration, no endpoint, no permission (117, unchanged).
+
+**Blind close is enforced by the server, not by a screen.** `applyExpectedCashVisibility` REMOVES `expectedCash`, `variance`, `cashIn` and `cashOut` from the active-shift, shift-list and close responses for any caller without `shifts.view_expected` — a cashier's device never receives the number. The POS renders those fields only when they actually arrived, so there is no client-side branch that could be flipped to reveal a figure that was never delivered. Verified at the wire level in a real browser: 19 shift API responses inspected across a full cashier session, zero carrying any of the four fields.
+
+**And the POS never sums the drawer.** `openingFloat + SUM(movements)` IS the expected figure, and the movement list is visible to a cashier (`shifts.view`). `lib/shiftCash.ts` therefore deliberately provides no function that totals it: the drawer history renders as an audit trail with each row's own signed amount, and no running total. The helpers that exist only CLASSIFY figures the server sent (`varianceKind` reads a sign; it returns null rather than "balanced" when no variance was sent).
+
+**Frontend.** A new `/shift` screen shows the till's state (No shift / Shift open / Awaiting reconciliation / Shift closed), register, opening float and drawer history, plus manual pay-in/pay-out gated on `cash.movement`. The close screen now instructs the cashier to count, starts the counted field EMPTY (it defaulted to "0", which could be submitted without counting), refuses submission until a figure is typed, and reports the outcome as an overage or a shortage in the viewer's own language — it previously carried hard-coded English labels in an Arabic-first product and said nothing about reconciliation.
 
 ### Held sales (Phase 12 milestone)
 

@@ -334,4 +334,557 @@ describe('Phase 10 - cash registers and blind-close till (e2e, real Postgres)', 
       ),
     ).rejects.toThrow(/cash_transactions_amount_sign_matches_type/);
   });
+  // ==================================================================
+  // Phase 12 (Cash Drawer milestone) — the claims the POS cash workflow
+  // rests on that the Phase 10 suite did not yet pin down.
+  //
+  // The through-line: ONLY PHYSICAL CASH REACHES THE DRAWER. A card sale, a
+  // card refund and the server's own EXCHANGE_CREDIT are all real financial
+  // events that must leave `cash_transactions` completely alone, because
+  // expected cash is derived from that table and a single stray row makes
+  // an honest cashier answer for a shortage that never existed.
+  // ==================================================================
+  describe('Only physical cash reaches the drawer', () => {
+    let seq = 0;
+
+    async function stocked(price = 100) {
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, `DRAWER-${seq++}`, {
+        defaultSellingPrice: price,
+        defaultCost: 40,
+      });
+      await request(server())
+        .post('/api/v1/inventory/opening-stock')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 40 })
+        .expect(201);
+      return variantId;
+    }
+
+    /** A fresh till and a shift on it, so each case owns its own drawer and
+     *  the assertions are about that drawer alone. */
+    async function freshShift(openingFloat: number) {
+      const till = await request(server())
+        .post('/api/v1/cash-registers')
+        .set('Authorization', auth())
+        .send({ branchId: biz.branchId, name: `Drawer till ${seq}`, code: `DRAWER-T${seq++}` })
+        .expect(201);
+      const opened = await request(server())
+        .post('/api/v1/sales/shifts/open')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, cashRegisterId: till.body.data.id, openingFloat })
+        .expect(201);
+      return opened.body.data.id as string;
+    }
+
+    const closeShift = (countedCash: number) =>
+      request(server()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).send({ countedCash });
+
+    const drawerRows = (shiftId: string) =>
+      admin.cashTransaction.findMany({ where: { businessId: biz.businessId, shiftId }, orderBy: { createdAt: 'asc' } });
+
+    async function customer(name: string) {
+      const res = await request(server())
+        .post('/api/v1/sales/customers')
+        .set('Authorization', auth())
+        .send({ name: `${name} ${seq++}` })
+        .expect(201);
+      return res.body.data.id as string;
+    }
+
+    it('A CARD SALE MOVES NO CASH: the drawer ledger stays empty and expected cash is still just the float', async () => {
+      const shiftId = await freshShift(100);
+      const variantId = await stocked();
+
+      await request(server())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 2, unitPrice: 100 }],
+          payments: [{ amount: 200, method: 'CARD' }],
+        })
+        .expect(201);
+
+      expect(await drawerRows(shiftId)).toHaveLength(0);
+      const active = await request(server()).get('/api/v1/sales/shifts/active').set('Authorization', auth()).expect(200);
+      expect(active.body.data.expectedCash).toBe('100');
+      expect(active.body.data.cashIn).toBe('0');
+
+      await closeShift(100).expect(200);
+    });
+
+    it('A MIXED TENDER banks only the cash half', async () => {
+      const shiftId = await freshShift(0);
+      const variantId = await stocked();
+
+      await request(server())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 3, unitPrice: 100 }],
+          payments: [
+            { amount: 120, method: 'CASH' },
+            { amount: 100, method: 'CARD' },
+            { amount: 80, method: 'WALLET' },
+          ],
+        })
+        .expect(201);
+
+      // One row, for 120 - not three, and not 300.
+      const rows = await drawerRows(shiftId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].type).toBe('SALE_TENDER');
+      expect(rows[0].amount.toString()).toBe('120');
+
+      const active = await request(server()).get('/api/v1/sales/shifts/active').set('Authorization', auth()).expect(200);
+      expect(active.body.data.expectedCash).toBe('120');
+      await closeShift(120).expect(200);
+    });
+
+    it('A CARD REFUND TAKES NO CASH OUT, while a cash refund does', async () => {
+      const shiftId = await freshShift(500);
+      const cardItem = await stocked();
+      const cashItem = await stocked();
+
+      const cardSale = await request(server())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId: cardItem, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 100, method: 'CARD' }],
+        })
+        .expect(201);
+
+      const cashSale = await request(server())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId: cashItem, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 100, method: 'CASH' }],
+        })
+        .expect(201);
+
+      // Refunded to the card it was paid on: real money, real accounting,
+      // but it never passes through the till.
+      await request(server())
+        .post(`/api/v1/sales/${cardSale.body.data.id}/returns`)
+        .set('Authorization', auth())
+        .send({
+          items: [{ saleItemId: cardSale.body.data.items[0].id, quantity: 1, condition: 'SELLABLE' }],
+          refund: { method: 'CARD', amount: 100 },
+        })
+        .expect(201);
+
+      let rows = await drawerRows(shiftId);
+      expect(rows.filter((r) => r.type === 'SALE_REFUND')).toHaveLength(0);
+
+      // The cash one is handed over the counter, so it leaves the drawer.
+      await request(server())
+        .post(`/api/v1/sales/${cashSale.body.data.id}/returns`)
+        .set('Authorization', auth())
+        .send({
+          items: [{ saleItemId: cashSale.body.data.items[0].id, quantity: 1, condition: 'SELLABLE' }],
+          refund: { method: 'CASH', amount: 100 },
+        })
+        .expect(201);
+
+      rows = await drawerRows(shiftId);
+      const refunds = rows.filter((r) => r.type === 'SALE_REFUND');
+      expect(refunds).toHaveLength(1);
+      expect(refunds[0].amount.toString()).toBe('-100');
+
+      // 500 float + 100 cash sale - 100 cash refund = 500. The card sale
+      // and the card refund are both absent, and cancel to nothing anyway.
+      const active = await request(server()).get('/api/v1/sales/shifts/active').set('Authorization', auth()).expect(200);
+      expect(active.body.data.expectedCash).toBe('500');
+      await closeShift(500).expect(200);
+    });
+
+    it('A DOWNWARD EXCHANGE refunds CASH out of the drawer - and the EXCHANGE CREDIT is not cash', async () => {
+      const shiftId = await freshShift(1000);
+      const oldItem = await stocked();
+      const newItem = await stocked();
+      const customerId = await customer('Downward cash');
+
+      const sale = await request(server())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          customerId,
+          items: [{ variantId: oldItem, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 100, method: 'CASH' }],
+        })
+        .expect(201);
+
+      // 100 back, 80 out: 80 of the credit is spent on the replacement and
+      // 20 is handed over in cash.
+      const res = await request(server())
+        .post(`/api/v1/sales/${sale.body.data.id}/exchanges`)
+        .set('Authorization', auth())
+        .send({
+          returnItems: [{ saleItemId: sale.body.data.items[0].id, quantity: 1, condition: 'SELLABLE' }],
+          newItems: [{ variantId: newItem, quantity: 1, unitPrice: 80 }],
+          refund: { method: 'CASH', amount: 20 },
+          payments: [],
+        })
+        .expect(201);
+      expect(res.body.data.exchangeCredit).toBe('80');
+      expect(res.body.data.refunded).toBe('20');
+
+      const rows = await drawerRows(shiftId);
+      // Exactly TWO drawer rows: the original cash sale, and the 20 refund.
+      // The 80 of exchange credit settled the replacement internally and
+      // must NOT appear - if it did, expected cash would be short by 80.
+      expect(rows.map((r) => [r.type, r.amount.toString()])).toEqual([
+        ['SALE_TENDER', '100'],
+        ['SALE_REFUND', '-20'],
+      ]);
+      expect(rows.some((r) => r.amount.toString() === '80')).toBe(false);
+
+      // 1000 + 100 - 20 = 1080.
+      const active = await request(server()).get('/api/v1/sales/shifts/active').set('Authorization', auth()).expect(200);
+      expect(active.body.data.expectedCash).toBe('1080');
+      await closeShift(1080).expect(200);
+    });
+
+    it('A DOWNWARD EXCHANGE refunded to CARD moves no cash at all', async () => {
+      const shiftId = await freshShift(1000);
+      const oldItem = await stocked();
+      const newItem = await stocked();
+      const customerId = await customer('Downward card');
+
+      const sale = await request(server())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          customerId,
+          items: [{ variantId: oldItem, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 100, method: 'CARD' }],
+        })
+        .expect(201);
+
+      await request(server())
+        .post(`/api/v1/sales/${sale.body.data.id}/exchanges`)
+        .set('Authorization', auth())
+        .send({
+          returnItems: [{ saleItemId: sale.body.data.items[0].id, quantity: 1, condition: 'SELLABLE' }],
+          newItems: [{ variantId: newItem, quantity: 1, unitPrice: 80 }],
+          refund: { method: 'CARD', amount: 20 },
+          payments: [],
+        })
+        .expect(201);
+
+      expect(await drawerRows(shiftId)).toHaveLength(0);
+      const active = await request(server()).get('/api/v1/sales/shifts/active').set('Authorization', auth()).expect(200);
+      expect(active.body.data.expectedCash).toBe('1000');
+      await closeShift(1000).expect(200);
+    });
+
+    it('AN UPWARD EXCHANGE banks only the difference the customer actually hands over', async () => {
+      const shiftId = await freshShift(1000);
+      const oldItem = await stocked();
+      const newItem = await stocked();
+      const customerId = await customer('Upward cash');
+
+      const sale = await request(server())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          customerId,
+          items: [{ variantId: oldItem, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 100, method: 'CASH' }],
+        })
+        .expect(201);
+
+      // 100 back, 150 out: the customer pays 50, not 150. The other 100 is
+      // exchange credit, which is not money and must not reach the drawer.
+      await request(server())
+        .post(`/api/v1/sales/${sale.body.data.id}/exchanges`)
+        .set('Authorization', auth())
+        .send({
+          returnItems: [{ saleItemId: sale.body.data.items[0].id, quantity: 1, condition: 'SELLABLE' }],
+          newItems: [{ variantId: newItem, quantity: 1, unitPrice: 150 }],
+          payments: [{ amount: 50, method: 'CASH' }],
+        })
+        .expect(201);
+
+      const rows = await drawerRows(shiftId);
+      expect(rows.map((r) => [r.type, r.amount.toString()])).toEqual([
+        ['SALE_TENDER', '100'],
+        ['SALE_TENDER', '50'],
+      ]);
+
+      const active = await request(server()).get('/api/v1/sales/shifts/active').set('Authorization', auth()).expect(200);
+      expect(active.body.data.expectedCash).toBe('1150');
+      await closeShift(1150).expect(200);
+    });
+  });
+
+  // ==================================================================
+  describe('Closing is final, and closes once', () => {
+    let seq = 0;
+
+    async function freshShift(openingFloat: number) {
+      const till = await request(server())
+        .post('/api/v1/cash-registers')
+        .set('Authorization', auth())
+        .send({ branchId: biz.branchId, name: `Close till ${seq}`, code: `CLOSE-T${seq++}` })
+        .expect(201);
+      const opened = await request(server())
+        .post('/api/v1/sales/shifts/open')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, cashRegisterId: till.body.data.id, openingFloat })
+        .expect(201);
+      return opened.body.data.id as string;
+    }
+
+    it('A SHIFT CANNOT BE CLOSED TWICE, and the second attempt changes nothing', async () => {
+      const shiftId = await freshShift(60);
+
+      await request(server())
+        .post('/api/v1/sales/shifts/close')
+        .set('Authorization', auth())
+        .send({ countedCash: 55 })
+        .expect(200);
+
+      // There is no open shift left to close, so the second attempt is
+      // refused outright rather than re-counting the drawer.
+      const again = await request(server())
+        .post('/api/v1/sales/shifts/close')
+        .set('Authorization', auth())
+        .send({ countedCash: 999 })
+        .expect(409);
+      expect(again.body.error.code).toBe('CONFLICT');
+
+      // Rule 6: the counted amount is what the cashier first submitted.
+      const row = await admin.shift.findUniqueOrThrow({ where: { id: shiftId } });
+      expect(row.countedCash!.toString()).toBe('55');
+      expect(row.status).toBe('CLOSED');
+
+      // And exactly ONE variance entry exists - a second posting would
+      // double-count the shortage in the books.
+      const entries = await admin.journalEntry.findMany({
+        where: { businessId: biz.businessId, sourceType: 'Shift', sourceId: shiftId },
+      });
+      expect(entries).toHaveLength(1);
+    });
+
+    it('CONCURRENCY: two simultaneous closes produce one close and one variance posting', async () => {
+      const shiftId = await freshShift(80);
+
+      const [a, b] = await Promise.all([
+        request(server()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).send({ countedCash: 70 }),
+        request(server()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).send({ countedCash: 70 }),
+      ]);
+      const statuses = [a.status, b.status].sort();
+      expect(statuses).toEqual([200, 409]);
+
+      const row = await admin.shift.findUniqueOrThrow({ where: { id: shiftId } });
+      expect(row.status).toBe('CLOSED');
+      expect(row.countedCash!.toString()).toBe('70');
+
+      // The financial effect happened once. Two entries here would mean the
+      // shop booked a 10.00 shortage twice.
+      const entries = await admin.journalEntry.findMany({
+        where: { businessId: biz.businessId, sourceType: 'Shift', sourceId: shiftId },
+        include: { lines: true },
+      });
+      expect(entries).toHaveLength(1);
+      const debits = entries[0].lines.reduce((s, l) => s + Number(l.debit), 0);
+      const credits = entries[0].lines.reduce((s, l) => s + Number(l.credit), 0);
+      expect(debits).toBeCloseTo(credits, 4);
+      expect(debits).toBeCloseTo(10, 4);
+    });
+
+    it('AUDIT: opening, the manual movement and the close each leave a record', async () => {
+      const shiftId = await freshShift(40);
+
+      await request(server())
+        .post(`/api/v1/sales/shifts/${shiftId}/cash-transactions`)
+        .set('Authorization', auth())
+        .send({ type: 'PAY_IN', amount: 10, reason: 'Change for the till' })
+        .expect(201);
+
+      await request(server())
+        .post('/api/v1/sales/shifts/close')
+        .set('Authorization', auth())
+        .send({ countedCash: 50, notes: 'All present' })
+        .expect(200);
+
+      const shiftLogs = await admin.auditLog.findMany({
+        where: { businessId: biz.businessId, entityType: 'Shift', entityId: shiftId },
+        orderBy: { createdAt: 'asc' },
+      });
+      expect(shiftLogs.map((l) => l.action)).toEqual(['CREATE', 'UPDATE']);
+
+      // The close record carries what was counted AND what was expected, so
+      // the ledger's variance can always be traced back to the moment it
+      // was decided - even though the cashier was never shown the figure.
+      const closeLog = shiftLogs[1];
+      expect(JSON.stringify(closeLog.after)).toContain('50');
+      expect(JSON.stringify(closeLog.after)).toContain('expectedCash');
+
+      const movementLogs = await admin.auditLog.findMany({
+        where: { businessId: biz.businessId, entityType: 'CashTransaction' },
+      });
+      expect(movementLogs.some((l) => l.reason === 'Change for the till')).toBe(true);
+    });
+  });
+
+  // ==================================================================
+  describe('Who may touch the drawer, and whose drawer it is', () => {
+    let seq = 0;
+
+    /** A user holding exactly `permissionCodes` and nothing else. */
+    async function userWith(permissionCodes: string[], label: string) {
+      const role = await request(server())
+        .post('/api/v1/roles')
+        .set('Authorization', auth())
+        .send({ name: `${label} ${seq++}`, permissionCodes })
+        .expect(201);
+      const email = `${label.toLowerCase().replace(/\s+/g, '-')}-${seq}@${biz.slug}.test`;
+      await request(server())
+        .post('/api/v1/users')
+        .set('Authorization', auth())
+        .send({ name: label, email, password: 'DrawerPass1!', roleIds: [role.body.data.id], branchIds: [biz.branchId] })
+        .expect(201);
+      const login = await request(server())
+        .post('/api/v1/auth/login')
+        .send({ businessSlug: biz.slug, email, password: 'DrawerPass1!' })
+        .expect(200);
+      return `Bearer ${login.body.data.accessToken}`;
+    }
+
+    it('PERMISSIONS: seeing registers, moving cash and reviewing a shift are three separate rights', async () => {
+      // A till user: can list registers and open/close, but cannot move
+      // cash by hand and cannot reconcile anybody.
+      const tillUser = await userWith(
+        ['cash_registers.view', 'shifts.view', 'shifts.open', 'shifts.close'],
+        'Till only',
+      );
+      await request(server()).get('/api/v1/cash-registers').set('Authorization', tillUser).expect(200);
+
+      const till = await request(server())
+        .post('/api/v1/cash-registers')
+        .set('Authorization', auth())
+        .send({ branchId: biz.branchId, name: `Perm till ${seq}`, code: `PERM-T${seq++}` })
+        .expect(201);
+      const opened = await request(server())
+        .post('/api/v1/sales/shifts/open')
+        .set('Authorization', tillUser)
+        .send({ warehouseId: biz.warehouseId, cashRegisterId: till.body.data.id, openingFloat: 0 })
+        .expect(201);
+
+      // No `cash.movement`: cannot hand-write a drawer row.
+      await request(server())
+        .post(`/api/v1/sales/shifts/${opened.body.data.id}/cash-transactions`)
+        .set('Authorization', tillUser)
+        .send({ type: 'PAY_IN', amount: 5, reason: 'nope' })
+        .expect(403);
+
+      // No `cash_registers.manage`: cannot invent a till.
+      await request(server())
+        .post('/api/v1/cash-registers')
+        .set('Authorization', tillUser)
+        .send({ branchId: biz.branchId, name: 'Rogue', code: `ROGUE-${seq++}` })
+        .expect(403);
+
+      await request(server())
+        .post('/api/v1/sales/shifts/close')
+        .set('Authorization', tillUser)
+        .send({ countedCash: 0 })
+        .expect(200);
+
+      // No `shifts.reconcile`: cannot sign off their own variance.
+      await request(server())
+        .post(`/api/v1/sales/shifts/${opened.body.data.id}/reconcile`)
+        .set('Authorization', tillUser)
+        .send({})
+        .expect(403);
+
+      // And still no expected figure anywhere, on the list endpoint too.
+      const list = await request(server()).get('/api/v1/sales/shifts').set('Authorization', tillUser).expect(200);
+      for (const row of list.body.data) {
+        expect(row).not.toHaveProperty('expectedCash');
+        expect(row).not.toHaveProperty('variance');
+      }
+    });
+
+    it('A REVIEWER sees the figures a till user cannot, on the very same shift', async () => {
+      const reviewer = await userWith(['shifts.view', 'shifts.view_expected', 'shifts.reconcile'], 'Reviewer');
+      const list = await request(server()).get('/api/v1/sales/shifts').set('Authorization', reviewer).expect(200);
+      expect(list.body.data.length).toBeGreaterThan(0);
+      for (const row of list.body.data) {
+        expect(row).toHaveProperty('expectedCash');
+      }
+    });
+
+    it('TENANT ISOLATION: another business sees none of this drawer and cannot move it', async () => {
+      const other = await setupInventoryFixture(app, `cash-till-x${seq++}`);
+      const otherAuth = `Bearer ${other.accessToken}`;
+
+      const mine = await admin.shift.findFirstOrThrow({ where: { businessId: biz.businessId } });
+
+      // Their register list is their own, and contains none of ours.
+      const registers = await request(server()).get('/api/v1/cash-registers').set('Authorization', otherAuth).expect(200);
+      expect(registers.body.data.every((r: { branchId: string }) => r.branchId !== biz.branchId)).toBe(true);
+
+      // Our shifts are not in their history...
+      const shifts = await request(server()).get('/api/v1/sales/shifts').set('Authorization', otherAuth).expect(200);
+      expect(shifts.body.data.map((s: { id: string }) => s.id)).not.toContain(mine.id);
+
+      // ...and our drawer is unreachable even with the id in hand.
+      await request(server()).get(`/api/v1/sales/shifts/${mine.id}/cash-transactions`).set('Authorization', otherAuth).expect(404);
+      await request(server())
+        .post(`/api/v1/sales/shifts/${mine.id}/cash-transactions`)
+        .set('Authorization', otherAuth)
+        .send({ type: 'PAY_OUT', amount: 10, reason: 'theft' })
+        .expect(404);
+      await request(server())
+        .post(`/api/v1/sales/shifts/${mine.id}/reconcile`)
+        .set('Authorization', otherAuth)
+        .send({})
+        .expect(404);
+
+      // Nothing moved.
+      const rows = await admin.cashTransaction.findMany({ where: { shiftId: mine.id } });
+      expect(rows.every((r) => r.reason !== 'theft')).toBe(true);
+    });
+
+    it('REGISTER DISCOVERY: the POS is offered its own branch’s ACTIVE tills, and retired ones stay out', async () => {
+      const retired = await request(server())
+        .post('/api/v1/cash-registers')
+        .set('Authorization', auth())
+        .send({ branchId: biz.branchId, name: 'Retired till', code: `RETIRED-${seq++}` })
+        .expect(201);
+      await request(server())
+        .patch(`/api/v1/cash-registers/${retired.body.data.id}`)
+        .set('Authorization', auth())
+        .send({ isActive: false })
+        .expect(200);
+
+      const listed = await request(server())
+        .get('/api/v1/cash-registers')
+        .set('Authorization', auth())
+        .query({ branchId: biz.branchId })
+        .expect(200);
+      const ids = listed.body.data.map((r: { id: string }) => r.id);
+      expect(ids).not.toContain(retired.body.data.id);
+      expect(listed.body.data.every((r: { branchId: string; isActive: boolean }) => r.branchId === biz.branchId && r.isActive)).toBe(true);
+
+      // A retired till cannot host a shift either - discovery and the rule
+      // agree, rather than the list merely being tidy.
+      await request(server())
+        .post('/api/v1/sales/shifts/open')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, cashRegisterId: retired.body.data.id, openingFloat: 0 })
+        .expect(422);
+    });
+  });
 });

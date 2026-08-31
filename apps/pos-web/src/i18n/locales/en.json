@@ -18,7 +18,10 @@
     "openingFloat": "Opening float",
     "submit": "Open shift",
     "noWarehouse": "No warehouse is authorized for your account. Ask an administrator to assign you to a branch.",
-    "chooseWarehouse": "Choose where you're selling from"
+    "chooseWarehouse": "Choose where you're selling from",
+    "noRegister": "No active register in this branch. A manager must add one before a shift can be opened.",
+    "openingFloatHint": "The cash physically in the drawer right now.",
+    "blindCloseWarning": "At the end of the shift you will count the drawer and enter the amount. The expected figure is not shown to you."
   },
   "pos": {
     "searchPlaceholder": "Search by name, barcode, or SKU",
@@ -147,7 +150,10 @@
     "closedAt": "Closed at",
     "openedAt": "Opened at",
     "countedCashLabel": "Counted cash",
-    "done": "Back to sign-in"
+    "done": "Back to sign-in",
+    "countInstruction": "Count the cash in the drawer now.",
+    "countedCashHint": "The amount you actually counted.",
+    "expectedWithheld": "The expected figure and the variance are reviewed by a manager. They are not shown at the till."
   },
   "nav": {
     "pos": "Sell",
@@ -155,7 +161,8 @@
     "closeShift": "Close shift",
     "logout": "Log out",
     "language": "العربية",
-    "holds": "Held sales"
+    "holds": "Held sales",
+    "shift": "Shift"
   },
   "common": {
     "loading": "Loading...",
@@ -227,5 +234,48 @@
     "putBack": "Put back",
     "checkoutTitle": "Complete held sale",
     "checkoutNotice": "Prices, tax, promotions and loyalty have just been worked out afresh - not when the basket was held."
+  },
+  "cashDrawer": {
+    "title": "Cash drawer",
+    "register": "Register",
+    "openedAt": "Opened at",
+    "cashIn": "Cash in",
+    "cashOut": "Cash out",
+    "expectedCash": "Expected cash",
+    "variance": "Variance",
+    "varianceKind": {
+      "OVERAGE": "over",
+      "SHORTAGE": "short",
+      "BALANCED": "balanced"
+    },
+    "state": {
+      "NONE": "No shift",
+      "OPEN": "Shift open",
+      "CLOSING": "Closing",
+      "AWAITING_RECONCILIATION": "Awaiting reconciliation",
+      "CLOSED": "Shift closed"
+    },
+    "noShiftExplainer": "You have no open shift. Open one against a register to start selling.",
+    "openShiftAction": "Open a shift",
+    "blindHint": "This till closes blind. You will be asked to count the cash and enter the amount; the expected figure is not shown to you.",
+    "awaitingReconciliation": "A manager still has to review and accept this shift.",
+    "reconciled": "A manager has reviewed and accepted this shift.",
+    "movements": "Drawer history",
+    "movementsNotice": "Each movement of physical cash through this drawer, as it happened. No running total is shown.",
+    "noMovements": "No cash has moved yet",
+    "movementTitle": "Record cash in/out",
+    "movementExplainer": "For cash that moves by hand — a float top-up, money to the safe, petty cash. Sale takings and refunds record themselves.",
+    "movementType": "Type",
+    "movementAmount": "Amount",
+    "movementAmountHint": "Always a positive amount. The direction comes from the type above.",
+    "movementReason": "Reason",
+    "movementSubmit": "Record movement",
+    "movement": {
+      "SALE_TENDER": "Cash sale",
+      "SALE_REFUND": "Cash refund",
+      "PAY_IN": "Pay in",
+      "PAY_OUT": "Pay out",
+      "EXPENSE": "Cash expense"
+    }
   }
 }

@@ -90,14 +90,33 @@ export interface CashRegister {
   isActive: boolean;
 }
 
+/**
+ * Phase 10 (BD-17) — one movement of PHYSICAL cash through a drawer.
+ *
+ * `amount` is SIGNED by the server from the type, and a database CHECK
+ * enforces the agreement: SALE_TENDER and PAY_IN are positive, SALE_REFUND,
+ * PAY_OUT and EXPENSE negative. Non-cash tenders never appear here at all —
+ * card and wallet post to their own clearing accounts and never enter the
+ * drawer.
+ *
+ * `GET /sales/shifts/:id/cash-transactions` returns EVERY type, not only the
+ * two a cashier can key in by hand. Typing it as PAY_IN | PAY_OUT (as this
+ * did before the Cash Drawer milestone) silently mislabelled every sale
+ * tender and refund the list contains.
+ */
+export type CashTransactionType = 'SALE_TENDER' | 'SALE_REFUND' | 'PAY_IN' | 'PAY_OUT' | 'EXPENSE';
+
 export interface CashTransaction {
   id: string;
   businessId: string;
   shiftId: string;
-  type: 'PAY_IN' | 'PAY_OUT';
+  type: CashTransactionType;
+  /** Signed. Negative = cash left the drawer. */
   amount: string;
-  reason: string;
-  createdBy: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  reason: string | null;
+  createdBy: string | null;
   createdAt: string;
 }
 

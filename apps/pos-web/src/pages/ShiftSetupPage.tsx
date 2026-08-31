@@ -91,11 +91,18 @@ export function ShiftSetupPage() {
                 ))}
               </Select>
 
+              {/* Every ACTIVE register in the branch is offered. Whether one
+                  is already taken is not asked here and must not be guessed:
+                  one-open-shift-per-register is enforced by a partial unique
+                  index, so the server is the only thing that can answer it
+                  without racing. A busy till returns 409 on submit and the
+                  banner below says so in the server's own words. */}
               <Select
                 label={t('shiftSetup.register')}
                 value={cashRegisterId}
                 onChange={(e) => setCashRegisterId(e.target.value)}
                 disabled={registers.length === 0}
+                data-testid="register-select"
               >
                 {registers.map((r) => (
                   <option key={r.id} value={r.id}>
@@ -104,21 +111,30 @@ export function ShiftSetupPage() {
                 ))}
               </Select>
 
+              {registers.length === 0 && !registersQuery.isLoading && (
+                <ErrorBanner title={t('shiftSetup.noRegister')} />
+              )}
+
               <Input
                 label={t('shiftSetup.openingFloat')}
+                hint={t('shiftSetup.openingFloatHint')}
                 type="number"
                 min={0}
                 step="0.01"
                 className="numeric"
                 value={openingFloat}
                 onChange={(e) => setOpeningFloat(e.target.value)}
+                data-testid="opening-float"
               />
 
               {error && <ErrorBanner title={error.title} message={error.message} />}
 
-              <Button type="submit" fullWidth loading={submitting} disabled={submitting || !cashRegisterId}>
+              <Button type="submit" fullWidth loading={submitting} disabled={submitting || !cashRegisterId} data-testid="open-shift">
                 {t('shiftSetup.submit')}
               </Button>
+
+              {/* Said at opening, not sprung at closing. */}
+              <p className="text-xs leading-snug text-neutral-500">{t('shiftSetup.blindCloseWarning')}</p>
             </form>
           )}
         </CardBody>
