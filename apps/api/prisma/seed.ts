@@ -84,6 +84,7 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'sales.create': 'Create (complete) a sale, applying inventory, payment, and customer ledger effects',
   'sales.return': 'Return previously sold goods, reversing inventory and posting a customer credit',
   'sales.pay': 'Record a payment from a customer against a credit sale',
+  'sales.hold': 'Park a basket at the till and pick it up, or abandon it, later',
   'shifts.view': 'View shifts',
   'shifts.open': 'Open a shift, required before completing a sale',
   'shifts.close': 'Close an open shift',

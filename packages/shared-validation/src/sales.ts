@@ -172,6 +172,87 @@ export const createExchangeSchema = z.object({
 });
 export type CreateExchangeInput = z.infer<typeof createExchangeSchema>;
 
+/**
+ * Phase 10 (approved resolution of BLOCKING-2) — parking a basket.
+ *
+ * These are DRAFT sale lines, not sale lines. The shape mirrors a sale's
+ * items so a basket round-trips exactly as the cashier typed it, but
+ * nothing here is priced, taxed or costed: those figures come into
+ * existence at CHECKOUT, and storing a guess would invite someone to
+ * trust it.
+ *
+ * There are deliberately no `payments` and no `redeemPoints`. Money is
+ * tendered when goods change hands, not when a basket is put to one side,
+ * and points are spent against a sale that exists.
+ */
+const heldSaleItemInputSchema = z.object({
+  variantId: z.string().uuid(),
+  quantity: positiveQuantitySchema,
+  unitPrice: nonNegativeMoneySchema,
+  discountAmount: nonNegativeMoneySchema.default(0),
+  taxExempt: z.boolean().default(false),
+  /// Units already scanned into the basket. Validated at CHECKOUT by the
+  /// unchanged BD-13 rules, never here: a unit scanned into a parked
+  /// basket is not sold and must stay sellable to everyone else.
+  serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
+});
+
+export const createHeldSaleSchema = z.object({
+  warehouseId: z.string().uuid(),
+  customerId: z.string().uuid().optional(),
+  /// What the cashier calls it - "blue coat lady", "table 4". The whole
+  /// point of a hold is being able to find it again.
+  label: z.string().trim().max(120).optional(),
+  notes: notesSchema.optional(),
+  items: z.array(heldSaleItemInputSchema).min(1).max(500),
+});
+export type CreateHeldSaleInput = z.infer<typeof createHeldSaleSchema>;
+
+/** Replaces a parked basket's lines wholesale - editing a draft is the
+ *  entire point of parking one. */
+export const updateHeldSaleSchema = z.object({
+  customerId: z.string().uuid().nullable().optional(),
+  label: z.string().trim().max(120).nullable().optional(),
+  notes: notesSchema.nullable().optional(),
+  items: z.array(heldSaleItemInputSchema).min(1).max(500).optional(),
+});
+export type UpdateHeldSaleInput = z.infer<typeof updateHeldSaleSchema>;
+
+/**
+ * Resuming turns the basket into a real sale through the UNCHANGED
+ * `CreateSaleUseCase`.
+ *
+ * The request carries only what could not have been known when the basket
+ * was parked: how the customer is paying, and whether they are spending
+ * points. Everything else - the goods, the warehouse, the customer - comes
+ * from the hold, and the PRICES are re-resolved at checkout rather than
+ * honoured from the draft, so parking a basket cannot lock in a price that
+ * has since changed.
+ */
+export const resumeHeldSaleSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(120).optional(),
+  payments: z.array(salePaymentInputSchema).max(20).default([]),
+  redeemPoints: nonNegativeMoneySchema.optional(),
+  notes: notesSchema.optional(),
+});
+export type ResumeHeldSaleInput = z.infer<typeof resumeHeldSaleSchema>;
+
+export const voidHeldSaleSchema = z.object({
+  reason: notesSchema.optional(),
+});
+export type VoidHeldSaleInput = z.infer<typeof voidHeldSaleSchema>;
+
+export const heldSaleListQuerySchema = z.object({
+  /// Defaults to OPEN: a till wants the baskets it can still pick up, not
+  /// every basket ever parked.
+  status: z.enum(['OPEN', 'RESUMED', 'VOIDED']).default('OPEN'),
+  warehouseId: z.string().uuid().optional(),
+  shiftId: z.string().uuid().optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+export type HeldSaleListQuery = z.infer<typeof heldSaleListQuerySchema>;
+
 export const saleListQuerySchema = z.object({
   customerId: z.string().uuid().optional(),
   warehouseId: z.string().uuid().optional(),

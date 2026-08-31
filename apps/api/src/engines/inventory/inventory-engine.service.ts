@@ -224,6 +224,48 @@ export class InventoryEngineService {
    * always sees the first one's already-applied change before deciding
    * whether there's enough stock left.
    */
+  /**
+   * Phase 10 (BLOCKING-2) — the ADVISORY reservation counter.
+   *
+   * Parking a basket raises it; resuming or voiding lowers it. It lives on
+   * the engine because `stock_balances` is the engine's table and nothing
+   * else may write it (non-negotiable #5) - not because a reservation is a
+   * movement. IT IS NOT ONE, and this method deliberately writes NO
+   * StockMovement: no goods went anywhere, and inventing a movement for an
+   * intention would corrupt the one ledger every cost in the system is
+   * derived from.
+   *
+   * NOTHING ENFORCES THIS NUMBER. `applyLockedDelta`'s insufficient-stock
+   * check reads `quantity_on_hand` alone, so a parked basket can never
+   * stop a real customer at the till from buying the goods in front of
+   * them. That is precisely what makes the hold SOFT (the approved
+   * resolution of BLOCKING-2); hard reservation is a separate, deferred
+   * decision. What the counter buys is visibility - `availableQuantity =
+   * quantityOnHand - quantityReserved` tells staff how much of the shelf
+   * is already spoken for.
+   *
+   * The row is taken with the SAME `FOR UPDATE` lock every movement takes,
+   * so a reservation and a sale of the same variant serialize rather than
+   * racing. A release that would drive the counter below zero is refused
+   * by the `stock_balances_quantity_reserved_nonneg` CHECK at the database
+   * level, because "more released than was ever held" would make the
+   * available figure wrong in the unsafe direction.
+   */
+  async adjustReservation(
+    tx: TenantTx,
+    params: { businessId: string; warehouseId: string; variantId: string; quantityDelta: Prisma.Decimal.Value },
+  ): Promise<void> {
+    const delta = new Prisma.Decimal(params.quantityDelta);
+    if (delta.isZero()) return;
+
+    const balance = await this.lockOrCreateBalance(tx, params.businessId, params.warehouseId, params.variantId);
+    await tx.$executeRawUnsafe(
+      `UPDATE stock_balances SET quantity_reserved = quantity_reserved + $2::numeric, updated_at = NOW() WHERE id = $1`,
+      balance.id,
+      delta.toString(),
+    );
+  }
+
   private async lockOrCreateBalance(
     tx: TenantTx,
     businessId: string,

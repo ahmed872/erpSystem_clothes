@@ -18,13 +18,18 @@ import { ListSalesUseCase } from './application/sales/list-sales.use-case';
 import { CreateSaleReturnUseCase } from './application/returns/create-sale-return.use-case';
 import { CreateSalePaymentUseCase } from './application/payments/create-sale-payment.use-case';
 import { CreateExchangeUseCase } from './application/exchanges/create-exchange.use-case';
+import { HeldSalesService } from './application/holds/held-sales.service';
+import { HeldSalesController } from './presentation/held-sales.controller';
 import { FinanceModule } from '../finance/finance.module';
 
 @Module({
   // FinanceModule supplies CashMovementsService for the cash-movement
   // sub-resource that the shifts controller exposes (Phase 10, BD-17).
   imports: [FinanceModule],
-  controllers: [CustomersController, ShiftsController, SalesController],
+  // HeldSalesController is declared BEFORE SalesController deliberately:
+  // Nest matches routes in declaration order, and `sales/:id` would
+  // otherwise swallow `sales/holds` and hand it to GetSaleUseCase.
+  controllers: [CustomersController, ShiftsController, HeldSalesController, SalesController],
   providers: [
     CreateCustomerUseCase,
     UpdateCustomerUseCase,
@@ -42,6 +47,7 @@ import { FinanceModule } from '../finance/finance.module';
     CreateSaleReturnUseCase,
     CreateSalePaymentUseCase,
     CreateExchangeUseCase,
+    HeldSalesService,
   ],
 })
 export class SalesModule {}

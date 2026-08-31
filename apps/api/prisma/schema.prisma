@@ -112,6 +112,8 @@ model Business {
   PurchaseReceiptItemSerial PurchaseReceiptItemSerial[]
   StockTransferItemSerial   StockTransferItemSerial[]
   PurchaseReturnItemSerial  PurchaseReturnItemSerial[]
+  HeldSale                  HeldSale[]
+  HeldSaleItem              HeldSaleItem[]
   /// Phase 10 (BD-18 rule 3). Default EXCLUSIVE - exactly how every
   /// pre-Phase-10 business already behaved, so no existing tenant changes
   /// meaning.
@@ -146,6 +148,7 @@ model Branch {
   shifts         Shift[]
   sales          Sale[]
   cashRegisters  CashRegister[]
+  heldSales      HeldSale[]
 
   @@unique([businessId, name])
   @@index([businessId])
@@ -153,16 +156,17 @@ model Branch {
 }
 
 model Warehouse {
-  id         String   @id @default(uuid())
-  businessId String   @map("business_id")
-  branchId   String   @map("branch_id")
+  id         String     @id @default(uuid())
+  businessId String     @map("business_id")
+  branchId   String     @map("branch_id")
   name       String
-  isDefault  Boolean  @default(false) @map("is_default")
-  isActive   Boolean  @default(true) @map("is_active")
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
-  createdBy  String?  @map("created_by")
-  updatedBy  String?  @map("updated_by")
+  isDefault  Boolean    @default(false) @map("is_default")
+  isActive   Boolean    @default(true) @map("is_active")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+  createdBy  String?    @map("created_by")
+  updatedBy  String?    @map("updated_by")
+  heldSales  HeldSale[]
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "warehouses_business_fk")
   branch   Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
@@ -548,20 +552,21 @@ model Product {
 }
 
 model ProductVariant {
-  id           String               @id @default(uuid())
-  businessId   String               @map("business_id")
-  productId    String               @map("product_id")
-  sku          String
-  status       ProductVariantStatus @default(ACTIVE)
-  cost         Decimal              @default(0) @db.Decimal(18, 4)
-  sellingPrice Decimal              @default(0) @map("selling_price") @db.Decimal(18, 4)
-  weight       Decimal?             @db.Decimal(18, 4)
-  dimensions   Json?
-  images       Json?
-  createdAt    DateTime             @default(now()) @map("created_at")
-  updatedAt    DateTime             @updatedAt @map("updated_at")
-  createdBy    String?              @map("created_by")
-  updatedBy    String?              @map("updated_by")
+  id            String               @id @default(uuid())
+  businessId    String               @map("business_id")
+  productId     String               @map("product_id")
+  sku           String
+  status        ProductVariantStatus @default(ACTIVE)
+  cost          Decimal              @default(0) @db.Decimal(18, 4)
+  sellingPrice  Decimal              @default(0) @map("selling_price") @db.Decimal(18, 4)
+  weight        Decimal?             @db.Decimal(18, 4)
+  dimensions    Json?
+  images        Json?
+  createdAt     DateTime             @default(now()) @map("created_at")
+  updatedAt     DateTime             @updatedAt @map("updated_at")
+  createdBy     String?              @map("created_by")
+  updatedBy     String?              @map("updated_by")
+  heldSaleItems HeldSaleItem[]
 
   business           Business                @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "variants_business_fk")
   product            Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -894,9 +899,17 @@ model StockBalance {
   warehouseId      String   @map("warehouse_id")
   variantId        String   @map("variant_id")
   quantityOnHand   Decimal  @default(0) @map("quantity_on_hand") @db.Decimal(18, 4)
-  /// Reserved for held/unconfirmed sales (Phase 5 POS "hold invoice").
-  /// Column exists now so the schema doesn't need reshaping later;
-  /// nothing writes a non-zero value yet in Phase 3.
+  /// Reserved for held baskets. Phase 10 gives this column its first
+  /// writer: parking a basket raises it, resuming or voiding lowers it.
+  ///
+  /// It is ADVISORY and nothing enforces it. The Inventory Engine's
+  /// insufficient-stock check reads `quantityOnHand` alone, so a held
+  /// basket can never stop a real customer at the till from buying the
+  /// goods in front of them - that is exactly what makes the hold SOFT
+  /// (the approved resolution of BLOCKING-2), and hard reservation is a
+  /// deliberately separate, deferred decision. What this column buys is
+  /// visibility: `availableQuantity = quantityOnHand - quantityReserved`
+  /// tells staff how much of the shelf is already spoken for.
   quantityReserved Decimal  @default(0) @map("quantity_reserved") @db.Decimal(18, 4)
   averageCost      Decimal  @default(0) @map("average_cost") @db.Decimal(18, 4)
   updatedAt        DateTime @updatedAt @map("updated_at")
@@ -1424,13 +1437,14 @@ model PurchasePayment {
 //
 // SCOPE DECISIONS (approved before implementation - see PROJECT_STATE.md
 // for the full rationale of each):
-//   - Held Invoices / stock reservation: OUT for v1. A Sale is created
-//     already-COMPLETED in one atomic call; the POS cart lives client-side
-//     until checkout. StockBalance.quantityReserved (Phase 3) remains
-//     unwritten - SaleStatus is deliberately a single-value enum today so
-//     a future DRAFT/HELD state can be added later (new enum value +
-//     status default stays COMPLETED for every existing row) without
-//     reshaping this schema.
+//   - Held Invoices / stock reservation: OUT for v1, DELIVERED in Phase 10
+//     as a SEPARATE entity (`HeldSale`), NOT as a new SaleStatus. The note
+//     that once stood here proposed adding a HELD value to SaleStatus;
+//     that would have been a defect. No reporting query filters on
+//     `Sale.status`, so a held basket stored as a Sale row would have been
+//     counted as revenue, as tax owed, and as sold stock from the moment
+//     it was parked. A basket nobody has bought is not a sale, and the
+//     data model now says so. See the `HeldSale` model for the rest.
 //   - Shift/Register: IN, minimal. A Sale requires the acting user to hold
 //     an OPEN Shift (enforced both in application code and by the Sale.shiftId
 //     FK being non-nullable) - no cash-count/reconciliation fields, no
@@ -1523,18 +1537,19 @@ enum ShiftStatus {
 }
 
 model Customer {
-  id         String   @id @default(uuid())
-  businessId String   @map("business_id")
+  id         String     @id @default(uuid())
+  businessId String     @map("business_id")
   name       String
   phone      String?
   email      String?
   address    String?
-  taxNumber  String?  @map("tax_number")
-  isActive   Boolean  @default(true) @map("is_active")
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
-  createdBy  String?  @map("created_by")
-  updatedBy  String?  @map("updated_by")
+  taxNumber  String?    @map("tax_number")
+  isActive   Boolean    @default(true) @map("is_active")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+  createdBy  String?    @map("created_by")
+  updatedBy  String?    @map("updated_by")
+  heldSales  HeldSale[]
 
   business     Business              @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "customers_business_fk")
   sales        Sale[]
@@ -1590,6 +1605,7 @@ model Shift {
   businessId         String      @map("business_id")
   branchId           String      @map("branch_id")
   warehouseId        String      @map("warehouse_id")
+  heldSales          HeldSale[]
   /// Phase 10 (BD-17): the physical till this shift is bound to.
   /// NULLABLE only so shifts opened before Phase 10 keep their history
   /// truthfully - no register is fabricated for them. Every NEW shift
@@ -1754,6 +1770,7 @@ model Sale {
   promotionApplications SalePromotionApplication[]
   SaleItemSerial        SaleItemSerial[]
   exchangeForReturn     SaleReturn?                @relation("SaleExchange", fields: [exchangeForReturnId], references: [id], onDelete: Restrict)
+  resumedFromHold       HeldSale[]                 @relation("HeldSaleResumed")
 
   @@unique([businessId, saleNumber])
   @@unique([businessId, idempotencyKey])
@@ -2624,4 +2641,105 @@ model SaleReturnItemSerial {
   @@index([saleReturnId])
   @@index([serialNumberId])
   @@map("sale_return_item_serials")
+}
+
+enum HeldSaleStatus {
+  OPEN
+  RESUMED
+  VOIDED
+}
+
+/// Phase 10 (approved resolution of BLOCKING-2) — a parked basket.
+///
+/// A SEPARATE ENTITY, deliberately, and never a `Sale` row with a HELD
+/// status. No reporting query in this codebase filters on `Sale.status`,
+/// so a held basket stored as a Sale would be counted as revenue, as tax
+/// owed, and as sold stock from the moment it was parked - silently, in
+/// every report, until someone noticed the books were wrong. A basket
+/// nobody has bought is not a sale.
+///
+/// Nothing here touches the ledger, the drawer, or stock ownership. A hold
+/// moves no goods and posts no journal entry: the only trace it leaves
+/// outside its own tables is the ADVISORY `StockBalance.quantityReserved`,
+/// which the Inventory Engine reads for nobody's decision.
+///
+/// RESUMING creates a real Sale through the UNCHANGED `CreateSaleUseCase`.
+/// The held rows are a draft of a request, not a half-built sale, so
+/// resuming runs the whole pipeline - promotions, loyalty, tax, serials -
+/// against the configuration in force AT CHECKOUT, exactly as if the
+/// cashier had typed the basket in fresh. Prices are re-resolved and never
+/// honoured from the hold, which is why parking a basket cannot lock in a
+/// price that has since changed.
+model HeldSale {
+  id            String         @id @default(uuid())
+  businessId    String         @map("business_id")
+  branchId      String         @map("branch_id")
+  warehouseId   String         @map("warehouse_id")
+  customerId    String?        @map("customer_id")
+  /// The shift the basket was parked in. A hold belongs to the till it was
+  /// taken at, so a shift can be closed knowing what it left behind.
+  shiftId       String         @map("shift_id")
+  holdNumber    String         @map("hold_number")
+  status        HeldSaleStatus @default(OPEN)
+  /// What the cashier called it - "blue coat lady", "table 4". The whole
+  /// point of a hold is being able to find it again.
+  label         String?
+  notes         String?
+  /// Set when the basket became a real sale. The link is the audit trail
+  /// answering "what happened to that hold?".
+  resumedSaleId String?        @map("resumed_sale_id")
+  resumedAt     DateTime?      @map("resumed_at")
+  resumedBy     String?        @map("resumed_by")
+  voidedAt      DateTime?      @map("voided_at")
+  voidedBy      String?        @map("voided_by")
+  voidReason    String?        @map("void_reason")
+  createdBy     String?        @map("created_by")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  business    Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "held_sales_business_fk")
+  branch      Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  warehouse   Warehouse      @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  customer    Customer?      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  shift       Shift          @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  resumedSale Sale?          @relation("HeldSaleResumed", fields: [resumedSaleId], references: [id], onDelete: Restrict)
+  items       HeldSaleItem[]
+
+  @@unique([businessId, holdNumber])
+  @@index([businessId])
+  @@index([businessId, status])
+  @@index([shiftId])
+  @@index([warehouseId])
+  @@map("held_sales")
+}
+
+/// One line of a parked basket - a DRAFT of a sale-line request, not a
+/// SaleItem. There is no `lineTotal`, no `taxAmount` and no cost: none of
+/// those exist until checkout computes them, and storing a guess here
+/// would invite someone to trust it.
+model HeldSaleItem {
+  id             String   @id @default(uuid())
+  businessId     String   @map("business_id")
+  heldSaleId     String   @map("held_sale_id")
+  variantId      String   @map("variant_id")
+  quantity       Decimal  @db.Decimal(18, 4)
+  /// The price the cashier had on screen. Kept so the basket round-trips
+  /// exactly as it was typed - NOT honoured at checkout, where the price
+  /// is re-resolved like any other sale.
+  unitPrice      Decimal  @map("unit_price") @db.Decimal(18, 4)
+  discountAmount Decimal  @default(0) @map("discount_amount") @db.Decimal(18, 4)
+  taxExempt      Boolean  @default(false) @map("tax_exempt")
+  /// The units already scanned into the basket, if any. Validated at
+  /// CHECKOUT by the unchanged BD-13 rules, never at hold time: a unit
+  /// scanned into a parked basket is not sold and must stay sellable.
+  serials        String[]
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  business Business       @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "held_sale_items_business_fk")
+  heldSale HeldSale       @relation(fields: [heldSaleId], references: [id], onDelete: Cascade)
+  variant  ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+  @@index([heldSaleId])
+  @@map("held_sale_items")
 }

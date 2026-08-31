@@ -103,6 +103,12 @@ export const PERMISSION_CODES = [
   'sales.create',
   'sales.return',
   'sales.pay',
+  // Sales (Phase 10, BLOCKING-2): park a basket and pick it up again.
+  // ONE code covers hold, resume and void: they are the same act from the
+  // till's point of view, and a cashier who can park a basket is exactly
+  // the person who has to be able to abandon it. Resuming ALSO requires
+  // `sales.create`, because resuming really does create a sale.
+  'sales.hold',
   // Sales (Phase 5): Shifts
   'shifts.view',
   'shifts.open',
@@ -375,6 +381,7 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'customers.create',
     'sales.view',
     'sales.create',
+    'sales.hold',
     'sales.return',
     'sales.pay',
     'shifts.view',
@@ -412,6 +419,7 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'customers.edit',
     'sales.view',
     'sales.create',
+    'sales.hold',
     'sales.return',
     'shifts.view',
     'shifts.open',
