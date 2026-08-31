@@ -155,6 +155,25 @@ export class GetSaleReceiptUseCase {
           lineTotal: i.lineTotal.toString(),
           quantityReturned: i.quantityReturned.toString(),
           serials: i.SaleItemSerial.map((x) => x.serialNumber.serial),
+          /**
+           * Phase 12 (Warranty) — the same units as `serials`, carrying the
+           * identity a warranty registration has to name.
+           *
+           * `POST /warranties` takes a `serialNumberId`, not a serial
+           * string, and deliberately so: it then verifies through
+           * `SaleItemSerial` that THIS line actually sold THAT unit (the
+           * rule that closed Known Issue #47). Without the id here, a till
+           * could only get one by listing every serial of the variant from
+           * `GET /inventory/serials` and matching the printed string in the
+           * browser — which is the pre-#47 proxy rebuilt client-side, hands
+           * a till the shop's whole serial inventory, and grows with the
+           * catalogue rather than the receipt.
+           *
+           * Purely ADDITIVE. `serials` keeps its exact shape (a string
+           * array) because Returns and Exchanges read it, and neither
+           * needed an identity to pick a unit off a receipt.
+           */
+          serialUnits: i.SaleItemSerial.map((x) => ({ id: x.serialNumberId, serial: x.serialNumber.serial })),
         })),
         taxBreakdown: [...taxByRate.values()]
           .sort((a, b) => Number(a.ratePercent) - Number(b.ratePercent))

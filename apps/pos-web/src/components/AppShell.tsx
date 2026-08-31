@@ -18,6 +18,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const clearShift = useShiftStore((s) => s.setActiveShift);
   const canReturn = usePermission('sales.return');
   const canHold = usePermission('sales.hold');
+  const canViewWarranty = usePermission('warranty.view');
   const canViewShift = usePermission('shifts.view');
   const canCloseShift = usePermission('shifts.close');
 
@@ -42,6 +43,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <ShellNavLink to="/pos">{t('nav.pos')}</ShellNavLink>
               {canHold && <ShellNavLink to="/holds">{t('nav.holds')}</ShellNavLink>}
               {canReturn && <ShellNavLink to="/returns">{t('nav.returns')}</ShellNavLink>}
+              {canViewWarranty && <ShellNavLink to="/warranty">{t('nav.warranty')}</ShellNavLink>}
               {canViewShift && <ShellNavLink to="/shift">{t('nav.shift')}</ShellNavLink>}
               {canCloseShift && <ShellNavLink to="/shift-close">{t('nav.closeShift')}</ShellNavLink>}
             </nav>

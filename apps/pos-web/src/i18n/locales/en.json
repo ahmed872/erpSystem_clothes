@@ -162,7 +162,8 @@
     "logout": "Log out",
     "language": "العربية",
     "holds": "Held sales",
-    "shift": "Shift"
+    "shift": "Shift",
+    "warranty": "Warranty"
   },
   "common": {
     "loading": "Loading...",
@@ -276,6 +277,39 @@
       "PAY_IN": "Pay in",
       "PAY_OUT": "Pay out",
       "EXPENSE": "Cash expense"
+    }
+  },
+  "warranty": {
+    "title": "Warranty",
+    "explainer": "Look up a sale to register or check the warranty on a serial-numbered item it sold.",
+    "unitsHeading": "Serial-numbered units on this sale",
+    "noSerialItems": "Nothing on this sale carries a serial number",
+    "noSerialItemsHint": "A warranty covers one specific physical unit, so only serial-numbered items can have one.",
+    "serial": "Serial",
+    "startDate": "Cover starts",
+    "endDate": "Cover ends",
+    "duration": "Length",
+    "durationDays": "{{days}} days",
+    "customer": "Customer",
+    "claims": "Claims",
+    "status": {
+      "UNREGISTERED": "Not registered",
+      "ACTIVE": "Under warranty",
+      "EXPIRED": "Expired",
+      "CLAIMED": "Claimed",
+      "VOID": "Void"
+    },
+    "voidedNotice": "This warranty was voided - usually because the unit was returned. It covers nothing and cannot be claimed against or registered again on this sale line.",
+    "registerAction": "Register warranty",
+    "claimAction": "Raise a claim",
+    "claimTitle": "Raise a warranty claim",
+    "claimExplainer": "Record what the customer reports. The claim is logged for the workshop to review and resolve; it is not decided here.",
+    "claimDescription": "What is wrong?",
+    "claimSubmit": "Log the claim",
+    "claimStatus": {
+      "OPEN": "Open",
+      "RESOLVED": "Resolved",
+      "REJECTED": "Rejected"
     }
   }
 }

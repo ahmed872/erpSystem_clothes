@@ -678,4 +678,397 @@ describe('Warranty (e2e, real Postgres)', () => {
       expect(JSON.stringify(res.body)).toMatch(/serial-tracked/i);
     });
   });
+  // ==================================================================
+  // Phase 12 (Warranty milestone) — the claims the POS workflow rests on
+  // that the Phase 8A/8E suite did not yet pin down.
+  //
+  // The headline gap: BD-15 (a return VOIDS any warranty still covering the
+  // returned unit) was implemented in `CreateSaleReturnUseCase` and tested
+  // nowhere. It is the single rule that decides what a cashier is shown
+  // about a unit that came back, so it is proved here.
+  // ==================================================================
+  describe('BD-15: returning a unit voids the warranty covering it', () => {
+    let seq = 0;
+
+    /** A serial-tracked product, received with `serials`, sold in one sale.
+     *  Its own product each time, so cases cannot interfere. */
+    async function soldSerialUnits(serials: string[], opts: { customerId?: string; unitPrice?: number } = {}) {
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, `WTY-BD15-${seq++}`, {
+        tracksSerialNumbers: true,
+        defaultCost: 100,
+        defaultSellingPrice: opts.unitPrice ?? 300,
+      });
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/receipts')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId, quantity: serials.length, unitCost: 100, serials })
+        .expect(201);
+
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          ...(opts.customerId ? { customerId: opts.customerId } : {}),
+          items: [{ variantId, quantity: serials.length, unitPrice: opts.unitPrice ?? 300, serials }],
+          payments: [{ amount: (opts.unitPrice ?? 300) * serials.length }],
+        })
+        .expect(201);
+
+      const rows = await admin.serialNumber.findMany({
+        where: { businessId: biz.businessId, serial: { in: serials } },
+        orderBy: { serial: 'asc' },
+      });
+      return {
+        variantId,
+        saleId: sale.body.data.id as string,
+        saleItemId: sale.body.data.items[0].id as string,
+        serialIds: rows.map((r) => r.id),
+        serialsByName: new Map(rows.map((r) => [r.serial, r.id])),
+      };
+    }
+
+    const registerFor = (saleItemId: string, serialNumberId: string) =>
+      request(app.getHttpServer()).post('/api/v1/warranties').set('Authorization', auth()).send({ saleItemId, serialNumberId });
+
+    it('VOIDS the covering warranty atomically with the return, and never deletes or rewrites it', async () => {
+      const sold = await soldSerialUnits([`BD15-A-${seq}`, `BD15-B-${seq}`]);
+      const kept = sold.serialIds[0];
+      const returned = sold.serialIds[1];
+
+      const wKept = await registerFor(sold.saleItemId, kept).expect(201);
+      const wReturned = await registerFor(sold.saleItemId, returned).expect(201);
+      const before = await admin.warranty.findUniqueOrThrow({ where: { id: wReturned.body.data.id } });
+
+      const returnedSerial = await admin.serialNumber.findUniqueOrThrow({ where: { id: returned } });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sold.saleId}/returns`)
+        .set('Authorization', auth())
+        .send({
+          items: [{ saleItemId: sold.saleItemId, quantity: 1, condition: 'SELLABLE', serials: [returnedSerial.serial] }],
+          refund: { method: 'CASH', amount: 300 },
+        })
+        .expect(201);
+
+      const after = await admin.warranty.findUniqueOrThrow({ where: { id: wReturned.body.data.id } });
+      expect(after.status).toBe('VOID');
+      // NEVER deleted, and the snapshot is untouched - a voided warranty
+      // stays a full record of what was once promised.
+      expect(after.startDate.toISOString()).toBe(before.startDate.toISOString());
+      expect(after.endDate.toISOString()).toBe(before.endDate.toISOString());
+      expect(after.durationDays).toBe(before.durationDays);
+      expect(after.createdAt.toISOString()).toBe(before.createdAt.toISOString());
+
+      // The unit that stayed with the customer keeps its cover. A return
+      // that voided the whole LINE would be a serious silent error.
+      const untouched = await admin.warranty.findUniqueOrThrow({ where: { id: wKept.body.data.id } });
+      expect(untouched.status).toBe('ACTIVE');
+    });
+
+    it('the POS reads the void as the server states it: EXPIRED/ACTIVE gives way to VOID', async () => {
+      const sold = await soldSerialUnits([`BD15-C-${seq}`]);
+      const w = await registerFor(sold.saleItemId, sold.serialIds[0]).expect(201);
+      const serial = await admin.serialNumber.findUniqueOrThrow({ where: { id: sold.serialIds[0] } });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sold.saleId}/returns`)
+        .set('Authorization', auth())
+        .send({
+          items: [{ saleItemId: sold.saleItemId, quantity: 1, condition: 'SELLABLE', serials: [serial.serial] }],
+          refund: { method: 'CASH', amount: 300 },
+        })
+        .expect(201);
+
+      // Exactly the query the POS runs for one unit.
+      const listed = await request(app.getHttpServer())
+        .get('/api/v1/warranties')
+        .set('Authorization', auth())
+        .query({ serialNumberId: sold.serialIds[0] })
+        .expect(200);
+      const row = listed.body.data.find((r: { id: string }) => r.id === w.body.data.id);
+      expect(row.status).toBe('VOID');
+      expect(row.effectiveStatus).toBe('VOID');
+      expect(row.saleItemId).toBe(sold.saleItemId);
+    });
+
+    it('a claim against an auto-voided warranty is refused', async () => {
+      const sold = await soldSerialUnits([`BD15-D-${seq}`]);
+      const w = await registerFor(sold.saleItemId, sold.serialIds[0]).expect(201);
+      const serial = await admin.serialNumber.findUniqueOrThrow({ where: { id: sold.serialIds[0] } });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sold.saleId}/returns`)
+        .set('Authorization', auth())
+        .send({
+          items: [{ saleItemId: sold.saleItemId, quantity: 1, condition: 'SELLABLE', serials: [serial.serial] }],
+          refund: { method: 'CASH', amount: 300 },
+        })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/warranties/${w.body.data.id}/claims`)
+        .set('Authorization', auth())
+        .send({ description: 'Screen cracked' })
+        .expect(409);
+      expect(JSON.stringify(res.body)).toMatch(/voided/i);
+    });
+
+    it('re-registering on the same line after an auto-void is still refused - which is why the POS says VOIDED, not "free"', async () => {
+      const sold = await soldSerialUnits([`BD15-E-${seq}`]);
+      await registerFor(sold.saleItemId, sold.serialIds[0]).expect(201);
+      const serial = await admin.serialNumber.findUniqueOrThrow({ where: { id: sold.serialIds[0] } });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/sales/${sold.saleId}/returns`)
+        .set('Authorization', auth())
+        .send({
+          items: [{ saleItemId: sold.saleItemId, quantity: 1, condition: 'SELLABLE', serials: [serial.serial] }],
+          refund: { method: 'CASH', amount: 300 },
+        })
+        .expect(201);
+
+      // The (businessId, saleItemId, serialNumberId) unique index still
+      // stands, so a screen offering "register" here would produce a 409
+      // the cashier could not explain.
+      await registerFor(sold.saleItemId, sold.serialIds[0]).expect(409);
+    });
+
+    it('AN EXCHANGE voids the returned unit\'s warranty, and the REPLACEMENT is warrantable on its own new sale line', async () => {
+      const customer = await request(app.getHttpServer())
+        .post('/api/v1/sales/customers')
+        .set('Authorization', auth())
+        .send({ name: `Warranty exchange ${seq++}` })
+        .expect(201);
+      const customerId: string = customer.body.data.id;
+
+      const original = await soldSerialUnits([`BD15-OLD-${seq}`], { customerId });
+      const w = await registerFor(original.saleItemId, original.serialIds[0]).expect(201);
+      const oldSerial = await admin.serialNumber.findUniqueOrThrow({ where: { id: original.serialIds[0] } });
+
+      // A replacement unit of a DIFFERENT serial-tracked product.
+      const { variantId: newVariantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, `WTY-BD15-NEW-${seq++}`, {
+        tracksSerialNumbers: true,
+        defaultCost: 100,
+        defaultSellingPrice: 300,
+      });
+      const newSerialName = `BD15-NEW-${seq}`;
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/receipts')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId: newVariantId, quantity: 1, unitCost: 100, serials: [newSerialName] })
+        .expect(201);
+
+      const exchange = await request(app.getHttpServer())
+        .post(`/api/v1/sales/${original.saleId}/exchanges`)
+        .set('Authorization', auth())
+        .send({
+          returnItems: [{ saleItemId: original.saleItemId, quantity: 1, condition: 'DAMAGED', serials: [oldSerial.serial] }],
+          newItems: [{ variantId: newVariantId, quantity: 1, unitPrice: 300, serials: [newSerialName] }],
+          payments: [],
+        })
+        .expect(201);
+
+      // The returned unit's cover is gone - the exchange composes the same
+      // return use-case, so BD-15 applies without a second code path.
+      expect((await admin.warranty.findUniqueOrThrow({ where: { id: w.body.data.id } })).status).toBe('VOID');
+
+      // THE REPLACEMENT NEEDS NO SECOND OWNERSHIP MODEL. It left on a real
+      // new sale line with its own SaleItemSerial link, so the ordinary
+      // registration path covers it - which is the whole answer to
+      // "replacement warranty behaviour".
+      const replacementSale = exchange.body.data.sale;
+      const newSerial = await admin.serialNumber.findFirstOrThrow({ where: { businessId: biz.businessId, serial: newSerialName } });
+      const replacement = await registerFor(replacementSale.items[0].id, newSerial.id).expect(201);
+      expect(replacement.body.data.customerId).toBe(customerId);
+      // Cover starts when the REPLACEMENT left the shop, not when the
+      // original sale did.
+      expect(new Date(replacement.body.data.startDate).toISOString()).toBe(new Date(replacementSale.createdAt).toISOString());
+    });
+  });
+
+  // ==================================================================
+  describe('Identity, customer context and concurrency', () => {
+    let seq = 0;
+
+    it('a serial sold on a DIFFERENT SALE of the same variant is refused', async () => {
+      // Sharper than the unsold-serial case already covered: this unit was
+      // genuinely sold, is genuinely in this tenant, and is genuinely the
+      // same variant. Only `SaleItemSerial` can tell the two apart.
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, `WTY-XSALE-${seq++}`, {
+        tracksSerialNumbers: true,
+        defaultCost: 100,
+        defaultSellingPrice: 300,
+      });
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/receipts')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: ['XSALE-1', 'XSALE-2'] })
+        .expect(201);
+
+      const saleA = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 300, serials: ['XSALE-1'] }],
+          payments: [{ amount: 300 }],
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 300, serials: ['XSALE-2'] }],
+          payments: [{ amount: 300 }],
+        })
+        .expect(201);
+
+      const otherSaleSerial = await admin.serialNumber.findFirstOrThrow({ where: { businessId: biz.businessId, serial: 'XSALE-2' } });
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/warranties')
+        .set('Authorization', auth())
+        .send({ saleItemId: saleA.body.data.items[0].id, serialNumberId: otherSaleSerial.id })
+        .expect(422);
+      expect(JSON.stringify(res.body)).toMatch(/not sold on this sale line/i);
+    });
+
+    it('CUSTOMER CONTEXT comes from the SALE: an account sale carries its customer, a walk-in carries none', async () => {
+      const customer = await request(app.getHttpServer())
+        .post('/api/v1/sales/customers')
+        .set('Authorization', auth())
+        .send({ name: `Warranty owner ${seq++}` })
+        .expect(201);
+      const customerId: string = customer.body.data.id;
+
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, `WTY-CUST-${seq++}`, {
+        tracksSerialNumbers: true,
+        defaultCost: 100,
+        defaultSellingPrice: 300,
+      });
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/receipts')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: ['CUST-1', 'CUST-2'] })
+        .expect(201);
+
+      const accountSale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          customerId,
+          items: [{ variantId, quantity: 1, unitPrice: 300, serials: ['CUST-1'] }],
+          payments: [{ amount: 300 }],
+        })
+        .expect(201);
+      const walkIn = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 300, serials: ['CUST-2'] }],
+          payments: [{ amount: 300 }],
+        })
+        .expect(201);
+
+      const s1 = await admin.serialNumber.findFirstOrThrow({ where: { businessId: biz.businessId, serial: 'CUST-1' } });
+      const s2 = await admin.serialNumber.findFirstOrThrow({ where: { businessId: biz.businessId, serial: 'CUST-2' } });
+
+      const wAccount = await request(app.getHttpServer())
+        .post('/api/v1/warranties')
+        .set('Authorization', auth())
+        .send({ saleItemId: accountSale.body.data.items[0].id, serialNumberId: s1.id })
+        .expect(201);
+      expect(wAccount.body.data.customerId).toBe(customerId);
+
+      // A WALK-IN warranty is valid with NO customer. Demanding one here
+      // would invent a registration requirement the backend does not have.
+      const wWalkIn = await request(app.getHttpServer())
+        .post('/api/v1/warranties')
+        .set('Authorization', auth())
+        .send({ saleItemId: walkIn.body.data.items[0].id, serialNumberId: s2.id })
+        .expect(201);
+      expect(wWalkIn.body.data.customerId).toBeNull();
+    });
+
+    it('CONCURRENCY: two simultaneous registrations for the same unit produce exactly ONE warranty', async () => {
+      const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, `WTY-RACE-${seq++}`, {
+        tracksSerialNumbers: true,
+        defaultCost: 100,
+        defaultSellingPrice: 300,
+      });
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/receipts')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId, quantity: 1, unitCost: 100, serials: ['RACE-1'] })
+        .expect(201);
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 300, serials: ['RACE-1'] }],
+          payments: [{ amount: 300 }],
+        })
+        .expect(201);
+      const serial = await admin.serialNumber.findFirstOrThrow({ where: { businessId: biz.businessId, serial: 'RACE-1' } });
+      const body = { saleItemId: sale.body.data.items[0].id, serialNumberId: serial.id };
+
+      const [a, b] = await Promise.all([
+        request(app.getHttpServer()).post('/api/v1/warranties').set('Authorization', auth()).send(body),
+        request(app.getHttpServer()).post('/api/v1/warranties').set('Authorization', auth()).send(body),
+      ]);
+      expect([a.status, b.status].filter((s) => s === 201)).toHaveLength(1);
+
+      // The unique index is the guarantee, not the application pre-check.
+      const rows = await admin.warranty.findMany({ where: { businessId: biz.businessId, serialNumberId: serial.id } });
+      expect(rows).toHaveLength(1);
+    });
+  });
+
+  // ==================================================================
+  describe('The receipt names the units a warranty can cover', () => {
+    it('carries serialUnits with the identity registration needs, alongside the unchanged serial strings', async () => {
+      const receipt = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${saleId}/receipt`)
+        .set('Authorization', auth())
+        .expect(200);
+
+      const line = receipt.body.data.items.find((i: { id: string }) => i.id === saleItemId);
+      // Unchanged: Returns and Exchanges pick units by these strings.
+      expect(line.serials.sort()).toEqual(['WTY-SN-001', 'WTY-SN-002', 'WTY-SN-003']);
+
+      // Additive: the same units, with the id `POST /warranties` names.
+      expect(line.serialUnits).toHaveLength(3);
+      expect(line.serialUnits.map((u: { serial: string }) => u.serial).sort()).toEqual(line.serials.sort());
+      expect(new Set(line.serialUnits.map((u: { id: string }) => u.id))).toEqual(new Set(serialIds));
+
+      // And a registration built from exactly what the receipt handed over
+      // is accepted - the round trip the POS actually performs.
+      const unit = line.serialUnits[0];
+      const existing = await admin.warranty.findFirst({
+        where: { businessId: biz.businessId, saleItemId: line.id, serialNumberId: unit.id },
+      });
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/warranties')
+        .set('Authorization', auth())
+        .send({ saleItemId: line.id, serialNumberId: unit.id });
+      // Already registered by an earlier case in this suite, or newly
+      // created here - either way the pair the receipt named is the pair
+      // the server recognises, and never a 422.
+      expect(existing ? [409] : [201]).toContain(res.status);
+    });
+
+    it('a non-serial line offers no units at all, so the POS shows nothing to warrant', async () => {
+      const plainItem = await admin.saleItem.findUniqueOrThrow({ where: { id: plainSaleItemId } });
+      const receipt = await request(app.getHttpServer())
+        .get(`/api/v1/sales/${plainItem.saleId}/receipt`)
+        .set('Authorization', auth())
+        .expect(200);
+      const line = receipt.body.data.items.find((i: { id: string }) => i.id === plainSaleItemId);
+      expect(line.serials).toEqual([]);
+      expect(line.serialUnits).toEqual([]);
+    });
+  });
 });

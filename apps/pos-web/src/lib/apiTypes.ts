@@ -438,7 +438,14 @@ export interface SaleReceipt {
     taxExempt: boolean;
     lineTotal: string;
     quantityReturned: string;
+    /** Serial STRINGS, as printed. Returns and Exchanges pick units by
+     * these; neither needs an identity. */
     serials: string[];
+    /** Phase 12 (Warranty): the same units, carrying the id
+     * `POST /warranties` must name. See the server-side comment in
+     * `get-sale-receipt.use-case.ts` for why the identity lives here and
+     * not behind a variant-wide serial lookup. */
+    serialUnits: Array<{ id: string; serial: string }>;
   }>;
   taxBreakdown: Array<{ ratePercent: string; taxableAmount: string; taxAmount: string }>;
   payments: Array<{ method: SalePaymentMethod | 'EXCHANGE_CREDIT'; amount: string; reference: string | null; receivedAt: string }>;
@@ -664,4 +671,68 @@ export interface ResumeHeldSaleResult {
 export interface HeldSaleList {
   data: HeldSale[];
   meta: { total: number; page: number; limit: number };
+}
+
+// ------------------------------------------------------------ Warranty ----
+
+/**
+ * Phase 8A/8E — a warranty covers ONE physical serial unit sold on ONE
+ * sale line. Everything about its validity is the server's answer.
+ *
+ * `status` is the STORED value (a human action set it); `effectiveStatus`
+ * is the time-aware one the server derives on read, because no scheduled
+ * job flips ACTIVE to EXPIRED. **Display `effectiveStatus`.** The dates are
+ * snapshotted at registration and never recomputed from current
+ * configuration, so a warranty's coverage cannot be widened or narrowed
+ * after the fact — which is also why the browser must never evaluate them
+ * itself.
+ */
+export type WarrantyStatus = 'ACTIVE' | 'EXPIRED' | 'CLAIMED' | 'VOID';
+export type WarrantyClaimStatus = 'OPEN' | 'RESOLVED' | 'REJECTED';
+
+export interface WarrantyClaim {
+  id: string;
+  warrantyId: string;
+  claimedAt: string;
+  description: string;
+  status: WarrantyClaimStatus;
+  resolution: string | null;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+  createdAt: string;
+}
+
+export interface WarrantyListRow {
+  id: string;
+  saleItemId: string;
+  serialNumberId: string;
+  customerId: string | null;
+  startDate: string;
+  endDate: string;
+  durationDays: number;
+  status: WarrantyStatus;
+  /** The one to show: date-aware, computed by the server on read. */
+  effectiveStatus: WarrantyStatus;
+  notes: string | null;
+  createdAt: string;
+  serialNumber: { id: string; serial: string };
+  customer: { id: string; name: string } | null;
+  saleItem: { id: string; variantId: string; sale: { id: string; saleNumber: string } };
+  claimCount: number;
+}
+
+export interface WarrantyDetail extends Omit<WarrantyListRow, 'claimCount' | 'saleItem' | 'customer'> {
+  customer: { id: string; name: string; phone: string | null } | null;
+  saleItem: { id: string; variantId: string; quantity: string; sale: { id: string; saleNumber: string; createdAt: string; branchId: string } };
+  claims: WarrantyClaim[];
+}
+
+/** Deliberately carries no dates: `startDate` is the SALE's own createdAt
+ * and `durationDays` falls back to the business default. A till does not
+ * invent warranty periods. */
+export interface RegisterWarrantyInput {
+  saleItemId: string;
+  serialNumberId: string;
+  durationDays?: number;
+  notes?: string;
 }

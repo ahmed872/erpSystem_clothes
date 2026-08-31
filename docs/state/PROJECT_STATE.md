@@ -1,7 +1,19 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 12 — POS Web (**Cash drawer milestone complete.** Warranty NOT started. ERP Web NOT started, offline sync NOT started.)
+Phase 12 — POS Web (**Warranty milestone complete.** ERP Web NOT started, offline sync NOT started.)
+
+### Warranty (Phase 12 milestone)
+
+The warranty BACKEND has existed and been correct since Phase 8A/8E: coverage dates are snapshotted at registration and never recomputed; `effectiveStatus` is derived on read; registration verifies through `SaleItemSerial` that THIS line actually sold THAT unit (the rule that closed Known Issue #47); BD-15 voids a covering warranty atomically with a return, never deleting it. **One additive backend change** was needed and made — no schema change, no migration, no permission (117, unchanged).
+
+**The gap.** `POST /warranties` takes a `serialNumberId`; the receipt handed the POS serial STRINGS only. A till could otherwise get an id only by listing every serial of the variant from `GET /inventory/serials` and matching the printed string in the browser — the pre-#47 proxy rebuilt client-side. `GET /sales/:id/receipt` now also returns `items[].serialUnits: [{id, serial}]`, purely additive: `serials` keeps its exact string-array shape because Returns and Exchanges read it.
+
+**The POS boundary, taken from the permission matrix rather than convenience.** A CASHIER holds `warranty.view`, `warranty.register` AND `warranty.claim`; a SALES_EMPLOYEE holds view + register. So registration and lodging a claim are POS acts and `/warranty` offers both, each behind its own permission. CLAIM RESOLUTION is deliberately not at the till — deciding to repair, replace or reject happens after inspection — and is documented as a boundary rather than assumed, since the permission would allow it.
+
+**Nothing about validity is decided in the browser.** `lib/warrantyUnits.ts` contains no coverage check and must never contain one: the till's clock is not evidence. It flattens a receipt into the units a warranty can name and pairs each with the status the SERVER gave. Registration sends no dates and no duration, so a till cannot invent a warranty period — where no business default is configured the server refuses, and the POS shows that refusal.
+
+**Replacement warranties need no second ownership model.** An exchange composes the unchanged return use-case, so BD-15 voids the returned unit's cover; the replacement leaves on a real new sale line with its own `SaleItemSerial` link and is warrantable through the ordinary path, with cover starting when the REPLACEMENT left the shop.
 
 ### Cash drawer (Phase 12 milestone)
 

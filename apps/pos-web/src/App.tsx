@@ -12,6 +12,7 @@ import { ReceiptPage } from './pages/ReceiptPage';
 import { ReturnsPage } from './pages/ReturnsPage';
 import { HeldSalesPage } from './pages/HeldSalesPage';
 import { ShiftPage } from './pages/ShiftPage';
+import { WarrantyPage } from './pages/WarrantyPage';
 import { ShiftClosePage } from './pages/ShiftClosePage';
 
 /** On a fresh page load with a persisted session, re-validate permissions
@@ -70,6 +71,9 @@ export function App() {
             {/* Parked baskets get their own route and never appear in a
                 sales list — a hold is not a sale. */}
             <Route path="/holds" element={<HeldSalesPage />} />
+            {/* Post-sale lifecycle: registering and looking up cover on
+                units this shop has already sold. */}
+            <Route path="/warranty" element={<WarrantyPage />} />
             {/* The till's own state and its drawer history. Deliberately
                 inside RequireShift: there is no drawer without a shift. */}
             <Route path="/shift" element={<ShiftPage />} />
