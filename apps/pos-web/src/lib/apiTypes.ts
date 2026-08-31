@@ -213,6 +213,66 @@ export interface CreateSaleInput {
   payments: SalePaymentInput[];
 }
 
+/**
+ * Phase 12 (Sale Quote) — what `POST /sales/quote` answers.
+ *
+ * Every money field is a decimal string, exactly as the sale will store
+ * it. `totals.amountDue` is the figure to tender on `POST /sales`: the
+ * server's exact-payment rule is satisfied by sending precisely this.
+ */
+export interface QuoteSaleInput {
+  warehouseId: string;
+  customerId?: string;
+  items: SaleItemInput[];
+  redeemPoints?: number;
+}
+
+export interface SaleQuoteLine {
+  variantId: string;
+  sku: string;
+  quantity: string;
+  unitPrice: string;
+  lineGross: string;
+  manualDiscount: string;
+  promotionDiscount: string;
+  loyaltyDiscount: string;
+  discountAmount: string;
+  taxId: string | null;
+  taxRatePercent: string | null;
+  taxExempt: boolean;
+  taxAmount: string;
+  lineTotal: string;
+  promotion: { id: string; name: string; type: string } | null;
+  requiresSerials: boolean;
+}
+
+export interface SaleQuote {
+  warehouseId: string;
+  customerId: string | null;
+  currency: string;
+  lines: SaleQuoteLine[];
+  totals: {
+    subtotal: string;
+    discountAmount: string;
+    taxAmount: string;
+    totalAmount: string;
+    /** Tender exactly this. */
+    amountDue: string;
+  };
+  loyalty: { pointsRequested: string; redemptionValue: string; redemptionRate: string | null };
+  availability: { variantId: string; availableQuantity: string; requestedQuantity: string; sufficient: boolean }[];
+  quotedAt: string;
+  /** The server saying, in the payload, what it is and is not promising. */
+  guarantees: {
+    authoritativePricing: boolean;
+    reservesStock: boolean;
+    holdsPrices: boolean;
+    holdsPromotions: boolean;
+    holdsLoyaltyBalance: boolean;
+    createsNothing: boolean;
+  };
+}
+
 export interface SaleItem {
   id: string;
   saleId: string;

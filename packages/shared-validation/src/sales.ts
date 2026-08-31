@@ -80,6 +80,31 @@ export const createSaleSchema = z.object({
 });
 export type CreateSaleInput = z.infer<typeof createSaleSchema>;
 
+/**
+ * Phase 12 (Sale Quote) — what the till asks before it asks for money.
+ *
+ * DELIBERATELY THE SALE REQUEST MINUS THE THINGS A QUOTE MUST NOT CARRY:
+ *
+ *   - no `idempotencyKey`. A quote creates nothing, so there is nothing to
+ *     deduplicate, and accepting one would invite a client to spend a key
+ *     on a request that never became a document.
+ *   - no `payments`. The whole point is to learn what to tender; asking
+ *     the caller to state it first would be circular. The exact-payment
+ *     rule stays on `POST /sales`, where the money actually moves.
+ *   - no `notes`. Nothing is being recorded.
+ *
+ * Everything else is identical to `createSaleSchema`, on purpose: the
+ * quote must be computed from the SAME request the sale will be given, or
+ * the figure it returns is a figure for a different sale.
+ */
+export const quoteSaleSchema = z.object({
+  warehouseId: z.string().uuid(),
+  customerId: z.string().uuid().optional(),
+  items: z.array(saleItemInputSchema).min(1).max(500),
+  redeemPoints: nonNegativeMoneySchema.optional(),
+});
+export type QuoteSaleInput = z.infer<typeof quoteSaleSchema>;
+
 export const createSalePaymentSchema = z.object({
   amount: positiveMoneySchema,
   method: z.enum(['CASH', 'CARD', 'WALLET', 'OTHER']).default('CASH'),

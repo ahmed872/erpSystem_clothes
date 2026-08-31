@@ -65,6 +65,37 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Phase 12 (Sale Quote) — the same tenant scoping as `withTenant`, in a
+   * transaction PostgreSQL itself will not let write.
+   *
+   * `SET TRANSACTION READ ONLY` is issued before any of the caller's work,
+   * so every `INSERT`, `UPDATE`, `DELETE` and `SELECT ... FOR UPDATE`
+   * inside it is refused by the database with
+   * `ERROR: cannot execute ... in a read-only transaction`.
+   *
+   * WHY THAT MATTERS HERE. The sale-quote endpoint runs the SAME pricing
+   * pipeline the real sale runs, so that the two can never disagree. That
+   * is the right design and it carries one risk: a future change to that
+   * shared code could add a write, and the quote would silently start
+   * having side effects on a path nobody re-reviews. A comment asking
+   * people not to do that is not a guarantee. This is: the write fails,
+   * loudly, at the database, whoever wrote it and whenever.
+   *
+   * It is not a substitute for the quote being read-only by construction -
+   * it is what makes that property enforced rather than promised.
+   */
+  async withTenantReadOnly<T>(tenantId: string, work: (tx: TenantTx) => Promise<T>): Promise<T> {
+    if (!UUID_RE.test(tenantId)) {
+      throw new Error(`Invalid tenant id format: ${tenantId}`);
+    }
+    return this.client.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+      await tx.$executeRawUnsafe(`SET LOCAL app.current_tenant_id = '${tenantId}'`);
+      return work(tx);
+    });
+  }
+
+  /**
    * Runs `work` in a transaction with NO tenant context set. Only the
    * `businesses` table's public SELECT policy is reachable here (see
    * migration 20260828121500_enable_row_level_security) - every other

@@ -1,5 +1,7 @@
 {
-  "app": { "title": "POS" },
+  "app": {
+    "title": "POS"
+  },
   "login": {
     "title": "Sign in",
     "subtitle": "Enter your account details to start a sales shift",
@@ -60,7 +62,16 @@
     "confirming": "Processing sale...",
     "creditSaleHint": "Credit sale to a registered customer — payments may be left empty",
     "serialsRequired": "This item requires serial numbers",
-    "serialsTitle": "Enter serial numbers"
+    "serialsTitle": "Enter serial numbers",
+    "quoting": "Getting the total…",
+    "amountDue": "Amount due",
+    "cashReceived": "Cash received",
+    "changeDue": "Change due",
+    "changeNotice": "Change is handed back from the drawer. The sale records the amount due only.",
+    "overTendered": "That is more than the amount due. Adjust the tender to match exactly.",
+    "retryQuote": "Get the total again",
+    "stockWarning": "Some lines may not have enough stock. The sale will confirm or refuse at checkout.",
+    "loyaltyApplied": "Loyalty applied: {{value}}"
   },
   "receipt": {
     "title": "Sale receipt",

@@ -1,7 +1,28 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 11 — Security / Operations Hardening (**Complete. Phase 12 NOT started.**)
+Phase 12 — POS Web (**Sale Quote milestone complete.** ERP Web NOT started, offline sync NOT started.)
+
+Phase 12 delivered the two blocking contracts (`GET /permissions/me`, `GET /sales/shifts/available-warehouses`), then the POS Web vertical slice — login through blind shift close, exercised against the real backend in a browser.
+
+**This milestone closes the last contract limitation that slice exposed.** `POST /sales` requires the tender to equal the sale total *exactly*, and that total only exists after the server has resolved tax, promotions and loyalty from the tenant's own configuration. The till therefore could not tell a customer what to pay: it priced the cart itself, guessed, and the server rejected the sale whenever the guess was wrong.
+
+**`POST /sales/quote`** answers the cart with the authoritative figure before any money moves.
+
+- **It is not a second pricing engine.** It calls `CreateSaleUseCase.quotePricing`, which is the *same* private pipeline `executeInTx` runs before it writes a row — the same BD-18 tax resolution, BD-12 cap, BD-10/BD-11 promotion selection and BD-2/BD-3 redemption, in the same approved order. One implementation, two callers.
+- **Side-effect freedom is enforced by PostgreSQL, not by review.** The handler runs inside `PrismaService.withTenantReadOnly`, which issues `SET TRANSACTION READ ONLY`, so any INSERT/UPDATE/DELETE or `SELECT … FOR UPDATE` reaching it — today or after some future edit to the shared pipeline — fails with SQLSTATE 25006. Proven by test, and by five live quotes leaving every counter identical.
+- **A quote is not a reservation, and says so in its own payload.** `guarantees` reports `reservesStock: false`, `holdsPrices: false`, `holdsPromotions: false`, `holdsLoyaltyBalance: false`, `createsNothing: true`. `POST /sales` re-resolves everything under its existing locks and remains the only authority.
+- **The exact-payment rule was kept, not relaxed.** The quote makes it satisfiable rather than removing it.
+
+**No schema change, no migration, no new permission (117, unchanged), no new business rule.** Gated on `sales.create`.
+
+**Frontend:** the existing checkout was integrated, not rebuilt. It quotes on open, tenders `amountDue`, and adds cash-received → change. The only arithmetic in the browser is `cashReceived − cashTendered`, isolated in `lib/tender.ts` and unit-tested; change is never sent anywhere, because the server records only what the sale was worth.
+
+**Verification:** 689/689 backend e2e across 54 files (30 new) · 37/37 backend unit · 19/19 frontend unit (8 new) · build, `tsc --noEmit` and lint clean across api + ui-kit + pos-web · 54 migrations, no drift · `ops/verify-security.sh` PASS. Browser-verified end to end: a 2 × 100 cart with a 20% promotion and 14% default tax quoted **182.40**, took 200 cash, showed **17.60** change, and produced a sale and receipt reading 182.40 — the cart's own estimate was 200.00, which is exactly the sale the old build would have had rejected.
+
+---
+
+## Phase 11 — Security / Operations Hardening (**Complete.**)
 
 Phase 11 added no product feature. It closed the gap between "the backend is correct" and "the backend is safe to run", which are different claims: every finding below is a real gap found in live code, and each was fixed, demonstrated, or recorded as an accepted limitation with the reasoning that made it acceptable.
 

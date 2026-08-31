@@ -245,298 +245,55 @@ export class CreateSaleUseCase {
       }
     }
 
-    const warehouse = await tx.warehouse.findFirst({ where: { id: input.warehouseId, businessId: actor.tenantId } });
-    if (!warehouse) throw new NotFoundDomainError('Warehouse', input.warehouseId);
-
-    const shift = await findActiveShift(tx, actor.tenantId, actor.id);
-    if (!shift) throw new ConflictDomainError('An open shift is required to complete a sale');
-    if (shift.warehouseId !== input.warehouseId) {
-      throw new ValidationFailedError('Your open shift is for a different warehouse - close it and open a new one to sell from this warehouse');
-    }
-
-    let customer = null;
+    // ---------------------------------------------------------------
+    // THE PRICING PIPELINE, shared with the quote.
+    //
+    // Everything from here to `totalAmount` is resolution and arithmetic
+    // over stored configuration - warehouse, shift, customer, variants,
+    // serial rules, tax, promotions, loyalty redemption - and reads
+    // nothing the caller supplied beyond the request itself. It lives in
+    // `resolveSalePricing` so `QuoteSaleUseCase` can run the SAME code and
+    // get the SAME numbers, rather than a second engine agreeing with this
+    // one by inspection.
+    //
+    // THE CUSTOMER LOCK STAYS HERE, in the write path, and is taken BEFORE
+    // that call. Canonical lock order across the whole system is
+    // Customer -> Sale -> StockBalance; the customer row is locked before
+    // any StockBalance lock below, and CreateSaleReturnUseCase takes the
+    // same lock before lockSale, so a sale and a return can never form a
+    // cycle by grabbing a customer and a stock row in opposite orders.
+    //
+    // The lock is taken for every customer sale, not only redeeming ones:
+    // the loyalty balance is read and written under it, and taking it
+    // conditionally would mean two different lock orders depending on the
+    // request payload.
+    // ---------------------------------------------------------------
     if (input.customerId) {
-      // Canonical lock order across the whole system is
-      // Customer -> Sale -> StockBalance. The customer row is locked
-      // BEFORE any StockBalance lock is taken below, and
-      // CreateSaleReturnUseCase takes the same lock before lockSale, so
-      // a sale and a return can never form a cycle by grabbing a
-      // customer and a stock row in opposite orders.
-      //
-      // The lock is taken for every customer sale, not only redeeming
-      // ones: the loyalty balance is read and written under it, and
-      // taking it conditionally would mean two different lock orders
-      // depending on the request payload.
       await lockCustomer(tx, actor.tenantId, input.customerId);
-      customer = await tx.customer.findFirst({ where: { id: input.customerId, businessId: actor.tenantId } });
-      if (!customer) throw new NotFoundDomainError('Customer', input.customerId);
-      if (!customer.isActive) throw new ValidationFailedError('Cannot sell to an inactive customer');
     }
 
-    const redeemPoints = new Prisma.Decimal(input.redeemPoints ?? 0);
-    if (redeemPoints.greaterThan(0) && !input.customerId) {
-      throw new ValidationFailedError('Loyalty points can only be redeemed on a sale attached to a customer', {
-        redeemPoints: redeemPoints.toString(),
-      });
-    }
-
-    const variantIds = input.items.map((i) => i.variantId);
-    if (new Set(variantIds).size !== variantIds.length) {
-      throw new ValidationFailedError('Duplicate variantId in sale items');
-    }
-    const variants = await tx.productVariant.findMany({
-      where: { id: { in: variantIds }, businessId: actor.tenantId },
-      // `product.categoryId` is needed so a CATEGORY-targeted promotion
-      // can be matched without a second query per line.
-      // Phase 10 (BD-18): the product's own tax and explicit exemption are
-      // loaded here so tax resolves from stored configuration, never from
-      // anything the caller sent.
-      include: { product: { select: { id: true, categoryId: true, tracksSerialNumbers: true, taxId: true, taxExempt: true } } },
-    });
-    if (variants.length !== variantIds.length) {
-      const found = new Set(variants.map((v) => v.id));
-      throw new NotFoundDomainError('ProductVariant', variantIds.filter((id) => !found.has(id)).join(', '));
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 8E / BD-13: serial identity is MANDATORY at sale creation
-    // for a serial-tracked variant. Before this, selling such a product
-    // recorded no serial at all, so nothing in the system knew which
-    // physical unit the customer walked out with - the gap that made
-    // warranty registration unverifiable (Known Issue #47).
-    //
-    // Whether serials are required is decided by the PRODUCT's own
-    // tracking flag, never by the request: a client cannot opt out by
-    // omitting the field, and cannot smuggle serials onto a line whose
-    // product does not track them.
-    // ---------------------------------------------------------------
-    const variantsById = new Map(variants.map((v) => [v.id, v]));
-    for (const item of input.items) {
-      const tracks = variantsById.get(item.variantId)!.product.tracksSerialNumbers;
-      const supplied = item.serials ?? [];
-      if (tracks && supplied.length === 0) {
-        throw new ValidationFailedError(
-          'This product is serial-tracked - the serial number(s) being sold must be supplied for this line',
-          { variantId: item.variantId, quantity: new Prisma.Decimal(item.quantity).toString() },
-        );
-      }
-      if (!tracks && supplied.length > 0) {
-        throw new ValidationFailedError('This product is not serial-tracked - serial numbers cannot be supplied for this line', {
-          variantId: item.variantId,
-        });
-      }
-      if (tracks && !new Prisma.Decimal(item.quantity).equals(supplied.length)) {
-        throw new ValidationFailedError('The number of serials supplied must equal the quantity sold for this line', {
-          variantId: item.variantId,
-          quantity: new Prisma.Decimal(item.quantity).toString(),
-          serialsSupplied: supplied.length,
-        });
-      }
-    }
-
-    // Each line's gross is rounded to the monetary scale BEFORE being
-    // summed, so that SUM(line merchandise value) equals
-    // `subtotal - discountAmount` exactly. That equality is what lets a
-    // full return claw back and restore loyalty exactly (see
-    // return-credit.ts). For integer quantities the rounding is the
-    // identity, so no pre-existing sale's arithmetic changes; it only
-    // bites for fractional quantities at 4-dp prices.
-    // ---------------------------------------------------------------
-    // Phase 10 (BD-18): TAX, resolved and computed SERVER-SIDE.
-    //
-    // The request no longer carries `taxAmount` at all - a client cannot
-    // state what tax it would like to pay. Everything below derives from
-    // the tenant's own tax configuration.
-    //
-    // In INCLUSIVE mode the unit price and the manual discount arrive
-    // expressed in shelf terms and are converted to net HERE, at the line
-    // boundary. From this point on the pipeline is byte-identical to
-    // EXCLUSIVE mode, which is what keeps BD-1, BD-2, BD-3, BD-11 and
-    // BD-12 operating on exactly the values they were approved for.
-    // ---------------------------------------------------------------
-    const taxCtx = await this.tax.loadContext(tx, actor.tenantId);
-    const taxCache = new Map<string, { id: string; ratePercent: Prisma.Decimal; isActive: boolean } | null>();
-    const lineTaxByVariant = new Map<string, ResolvedLineTax>();
-    const netUnitPrice = new Map<string, Prisma.Decimal>();
-    const netManualInput = new Map<string, Prisma.Decimal>();
-    for (const item of input.items) {
-      const product = variantsById.get(item.variantId)!.product;
-      const resolved = await this.tax.resolveLineTax(tx, actor.tenantId, taxCtx, product, item.taxExempt ?? false, taxCache);
-      lineTaxByVariant.set(item.variantId, resolved);
-      netUnitPrice.set(item.variantId, this.tax.toNet(item.unitPrice, resolved, taxCtx));
-      netManualInput.set(item.variantId, this.tax.toNet(item.discountAmount, resolved, taxCtx));
-    }
-
-    const lineGross = new Map<string, Prisma.Decimal>();
-    // Approved decision BD-12: the manual discount is capped at the
-    // line gross UNIVERSALLY, so net merchandise value can never go
-    // negative on any line - not only on lines a promotion reached.
-    // For a well-formed line this is the identity.
-    const cappedManual = new Map<string, Prisma.Decimal>();
-    let subtotal = new Prisma.Decimal(0);
-    let discountAmount = new Prisma.Decimal(0);
-    let taxAmount = new Prisma.Decimal(0);
-    for (const item of input.items) {
-      const gross = round4(netUnitPrice.get(item.variantId)!.times(item.quantity));
-      lineGross.set(item.variantId, gross);
-      const manual = capManualDiscount(netManualInput.get(item.variantId)!, gross);
-      cappedManual.set(item.variantId, manual);
-      subtotal = subtotal.plus(gross);
-      discountAmount = discountAmount.plus(manual);
-    }
-    // `taxAmount` is now computed AFTER every discount is known, once the
-    // final net value of each line is settled - see below.
-
-    // ---------------------------------------------------------------
-    // Phase 8D: PROMOTIONS, resolved server-side inside this same
-    // transaction and BEFORE loyalty (the approved ordering:
-    // promotion -> redemption -> earning).
-    //
-    // The client never supplies promotional pricing: it supplies only
-    // its own manual `discountAmount`, and everything below is computed
-    // from the promotion rules stored in this tenant.
-    //
-    // Evaluation is PER LINE (approved decision BD-10) - quantities are
-    // never aggregated across variants, products or category lines, so
-    // a category "Buy 1 Get 1" over two one-unit lines yields nothing.
-    // At most ONE promotion applies per line (best applicable only);
-    // different lines may carry different promotions.
-    // ---------------------------------------------------------------
-    const saleInstant = new Date();
-    const activePromotions = await resolveActivePromotions(tx, actor.tenantId, saleInstant);
-
-    const promotionByVariant = new Map<string, SelectedPromotion>();
-    const effectivePromotionByVariant = new Map<string, Prisma.Decimal>();
-    const cappedByVariant = new Map<string, boolean>();
-    const manualDiscountByVariant = new Map<string, Prisma.Decimal>();
-
-    if (activePromotions.length > 0) {
-      for (const item of input.items) {
-        const variant = variantsById.get(item.variantId)!;
-        const gross = lineGross.get(item.variantId)!;
-        const best = selectBestPromotion(activePromotions, {
-          variantId: item.variantId,
-          productId: variant.product.id,
-          categoryId: variant.product.categoryId,
-          quantity: new Prisma.Decimal(item.quantity),
-          unitPrice: new Prisma.Decimal(item.unitPrice),
-          lineGross: gross,
-        });
-        if (!best) continue;
-
-        // Approved decision BD-11: a manual discount and a promotion are
-        // ADDITIVE, capped at the line gross. The promotion is computed
-        // on the GROSS, never on the post-manual price, and exceeding
-        // the gross is capped rather than rejected - the line's net
-        // merchandise value can never go negative.
-        const manual = cappedManual.get(item.variantId)!;
-        const combined = combineManualAndPromotion(manual, best.discount, gross);
-        if (combined.effectivePromotionDiscount.lessThanOrEqualTo(0)) {
-          // The manual discount already consumed the whole line, so the
-          // promotion contributed nothing. No provenance row is written
-          // for money that was never given.
-          continue;
-        }
-
-        promotionByVariant.set(item.variantId, best);
-        effectivePromotionByVariant.set(item.variantId, combined.effectivePromotionDiscount);
-        cappedByVariant.set(item.variantId, combined.cappedAtLineGross);
-        manualDiscountByVariant.set(item.variantId, manual);
-        discountAmount = discountAmount.plus(combined.effectivePromotionDiscount);
-      }
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 8C: LOYALTY REDEMPTION, resolved server-side inside this
-    // same transaction and BEFORE totals are finalised (approved
-    // ordering). Any failure below throws and rolls the whole sale
-    // back - there is no committed redemption without a sale.
-    // ---------------------------------------------------------------
-    const loyaltyDiscountByVariant = new Map<string, Prisma.Decimal>();
-    let redemptionValue = new Prisma.Decimal(0);
-    let redemptionRate: Prisma.Decimal | null = null;
-
-    if (redeemPoints.greaterThan(0)) {
-      redemptionRate = await resolveLoyaltyRedeemRate(tx, actor.tenantId);
-      if (!redemptionRate) {
-        throw new ValidationFailedError(
-          'Loyalty redemption is not configured for this business - no valid redemption rate is set',
-          { setting: 'loyalty.currency_per_point' },
-        );
-      }
-
-      // Balance is read UNDER the customer lock taken above, so two
-      // concurrent redemptions cannot each see the same balance and
-      // together overspend it.
-      const balance = await getCustomerPointsBalance(tx, actor.tenantId, input.customerId!);
-      if (redeemPoints.greaterThan(balance)) {
-        throw new ConflictDomainError(
-          `Cannot redeem ${redeemPoints.toString()} points - the customer's balance is only ${balance.toString()}`,
-          { requested: redeemPoints.toString(), balance: balance.toString() },
-        );
-      }
-
-      redemptionValue = computeRedemptionValue(redeemPoints, redemptionRate);
-      if (redemptionValue.lessThanOrEqualTo(0)) {
-        // Approved decision: an explicit request to spend points is
-        // never silently turned into a no-op that consumes points for
-        // nothing. No minimum threshold is invented and the configured
-        // rate is not adjusted - the request is simply refused.
-        throw new ValidationFailedError(
-          'The requested points convert to no monetary value at the configured redemption rate',
-          { redeemPoints: redeemPoints.toString(), rate: redemptionRate.toString() },
-        );
-      }
-
-      const eligibleLines = input.items.map((item) => ({
-        variantId: item.variantId,
-        // Net of BOTH the manual discount and any promotion already
-        // applied - you cannot redeem points against value that has
-        // already been discounted away.
-        eligible: lineGross
-          .get(item.variantId)!
-          .minus(cappedManual.get(item.variantId)!)
-          .minus(effectivePromotionByVariant.get(item.variantId) ?? 0),
-      }));
-      const totalEligible = eligibleLines.reduce((sum, l) => sum.plus(l.eligible), new Prisma.Decimal(0));
-      if (redemptionValue.greaterThan(totalEligible)) {
-        throw new ValidationFailedError(
-          `Redemption value ${redemptionValue.toString()} exceeds the sale's remaining merchandise value ${totalEligible.toString()}`,
-          { redemptionValue: redemptionValue.toString(), eligible: totalEligible.toString() },
-        );
-      }
-
-      for (const [variantId, amount] of allocateRedemption(eligibleLines, redemptionValue)) {
-        loyaltyDiscountByVariant.set(variantId, amount);
-      }
-      // Redemption is folded into LINE discounts, never added at sale
-      // level, so `Sale.discountAmount = SUM(SaleItem.discountAmount)`
-      // still holds and Phase 6's netRevenue keeps working untouched.
-      discountAmount = discountAmount.plus(redemptionValue);
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 10 (BD-18): the tax on each line, computed from the tenant's
-    // configuration on the line's FINAL net value - after the manual
-    // discount, the promotion and the loyalty redemption. The customer is
-    // taxed on what they actually pay.
-    //
-    // This is the ONE place a tax figure comes into existence for a sale,
-    // and it derives entirely from stored configuration.
-    // ---------------------------------------------------------------
-    const lineTaxAmount = new Map<string, Prisma.Decimal>();
-    for (const item of input.items) {
-      const lineDiscount = cappedManual
-        .get(item.variantId)!
-        .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
-        .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
-      const netLineValue = lineGross.get(item.variantId)!.minus(lineDiscount);
-      const lineTax = this.tax.computeLineTax(netLineValue, lineTaxByVariant.get(item.variantId)!);
-      lineTaxAmount.set(item.variantId, lineTax);
-      taxAmount = taxAmount.plus(lineTax);
-    }
-
-    const totalAmount = subtotal.minus(discountAmount).plus(taxAmount);
+    const priced = await this.resolveSalePricing(tx, actor, input);
+    const {
+      warehouse,
+      shift,
+      redeemPoints,
+      netUnitPrice,
+      lineGross,
+      cappedManual,
+      lineTaxByVariant,
+      lineTaxAmount,
+      promotionByVariant,
+      effectivePromotionByVariant,
+      cappedByVariant,
+      manualDiscountByVariant,
+      loyaltyDiscountByVariant,
+      redemptionValue,
+      redemptionRate,
+      subtotal,
+      discountAmount,
+      taxAmount,
+      totalAmount,
+    } = priced;
 
     // ---------------------------------------------------------------
     // Phase 10.2 (Exchanges): PROVING THE REFUND.
@@ -901,4 +658,363 @@ export class CreateSaleUseCase {
 
     return finalSale;
   }
+
+  /**
+   * Phase 12 (Sale Quote) — the read-only entry point into the pricing
+   * pipeline, for `QuoteSaleUseCase` and nothing else.
+   *
+   * It exists so the quote runs the SAME code the sale runs rather than a
+   * second implementation of it. It takes no lock, writes nothing, and its
+   * caller runs it inside a READ ONLY transaction, so the database refuses
+   * a write from this path even if one were ever added below.
+   *
+   * It is NOT an alternative way to price a sale for the write path:
+   * `executeInTx` calls the pipeline itself, after taking the customer
+   * lock, exactly as before.
+   */
+  async quotePricing(tx: TenantTx, actor: RequestUser, input: CreateSaleInput) {
+    return this.resolveSalePricing(tx, actor, input);
+  }
+
+  /**
+   * Phase 12 (Sale Quote) — THE ONE PRICING PIPELINE.
+   *
+   * Resolves everything a sale's money depends on and computes the
+   * authoritative totals, WITHOUT writing anything. Every statement in
+   * here is a read: warehouse and shift validation, customer validation,
+   * variant loading, the BD-13 serial rules, BD-18 tax resolution, the
+   * BD-12 manual-discount cap, BD-10/BD-11 promotion selection, and
+   * BD-2/BD-3 loyalty redemption - in exactly the approved order
+   * (promotion -> redemption -> tax on the final net value).
+   *
+   * WHY IT EXISTS. `POST /sales` requires the tendered amount to equal the
+   * total exactly, and the total is knowable only after tax, promotions
+   * and loyalty have been resolved server-side. A till therefore cannot
+   * tell a customer what to pay without asking the server first. The
+   * alternative to this extraction would be a second pricing engine in the
+   * quote endpoint or in the client - two implementations of the most
+   * delicate arithmetic in the product, free to disagree the first time
+   * either changed. There is one implementation, and both callers run it.
+   *
+   * NOTHING WAS REINTERPRETED IN THE MOVE. The body is the code that stood
+   * inline in `executeInTx`, unchanged apart from the customer lock, which
+   * belongs to the write path and stays there.
+   */
+  private async resolveSalePricing(tx: TenantTx, actor: RequestUser, input: CreateSaleInput) {
+    const warehouse = await tx.warehouse.findFirst({ where: { id: input.warehouseId, businessId: actor.tenantId } });
+    if (!warehouse) throw new NotFoundDomainError('Warehouse', input.warehouseId);
+
+    const shift = await findActiveShift(tx, actor.tenantId, actor.id);
+    if (!shift) throw new ConflictDomainError('An open shift is required to complete a sale');
+    if (shift.warehouseId !== input.warehouseId) {
+      throw new ValidationFailedError('Your open shift is for a different warehouse - close it and open a new one to sell from this warehouse');
+    }
+
+    let customer = null;
+    if (input.customerId) {
+      // The pessimistic customer lock is deliberately NOT taken here. It
+      // belongs to the WRITE path and is taken by `executeInTx` before
+      // this method runs - see the lock-order note there. A quote runs in
+      // a READ ONLY transaction, where PostgreSQL refuses `FOR UPDATE`
+      // outright, which is exactly right: a quote is not a reservation and
+      // must never block a real sale.
+      customer = await tx.customer.findFirst({ where: { id: input.customerId, businessId: actor.tenantId } });
+      if (!customer) throw new NotFoundDomainError('Customer', input.customerId);
+      if (!customer.isActive) throw new ValidationFailedError('Cannot sell to an inactive customer');
+    }
+
+    const redeemPoints = new Prisma.Decimal(input.redeemPoints ?? 0);
+    if (redeemPoints.greaterThan(0) && !input.customerId) {
+      throw new ValidationFailedError('Loyalty points can only be redeemed on a sale attached to a customer', {
+        redeemPoints: redeemPoints.toString(),
+      });
+    }
+
+    const variantIds = input.items.map((i) => i.variantId);
+    if (new Set(variantIds).size !== variantIds.length) {
+      throw new ValidationFailedError('Duplicate variantId in sale items');
+    }
+    const variants = await tx.productVariant.findMany({
+      where: { id: { in: variantIds }, businessId: actor.tenantId },
+      // `product.categoryId` is needed so a CATEGORY-targeted promotion
+      // can be matched without a second query per line.
+      // Phase 10 (BD-18): the product's own tax and explicit exemption are
+      // loaded here so tax resolves from stored configuration, never from
+      // anything the caller sent.
+      include: { product: { select: { id: true, categoryId: true, tracksSerialNumbers: true, taxId: true, taxExempt: true } } },
+    });
+    if (variants.length !== variantIds.length) {
+      const found = new Set(variants.map((v) => v.id));
+      throw new NotFoundDomainError('ProductVariant', variantIds.filter((id) => !found.has(id)).join(', '));
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 8E / BD-13: serial identity is MANDATORY at sale creation
+    // for a serial-tracked variant. Before this, selling such a product
+    // recorded no serial at all, so nothing in the system knew which
+    // physical unit the customer walked out with - the gap that made
+    // warranty registration unverifiable (Known Issue #47).
+    //
+    // Whether serials are required is decided by the PRODUCT's own
+    // tracking flag, never by the request: a client cannot opt out by
+    // omitting the field, and cannot smuggle serials onto a line whose
+    // product does not track them.
+    // ---------------------------------------------------------------
+    const variantsById = new Map(variants.map((v) => [v.id, v]));
+    for (const item of input.items) {
+      const tracks = variantsById.get(item.variantId)!.product.tracksSerialNumbers;
+      const supplied = item.serials ?? [];
+      if (tracks && supplied.length === 0) {
+        throw new ValidationFailedError(
+          'This product is serial-tracked - the serial number(s) being sold must be supplied for this line',
+          { variantId: item.variantId, quantity: new Prisma.Decimal(item.quantity).toString() },
+        );
+      }
+      if (!tracks && supplied.length > 0) {
+        throw new ValidationFailedError('This product is not serial-tracked - serial numbers cannot be supplied for this line', {
+          variantId: item.variantId,
+        });
+      }
+      if (tracks && !new Prisma.Decimal(item.quantity).equals(supplied.length)) {
+        throw new ValidationFailedError('The number of serials supplied must equal the quantity sold for this line', {
+          variantId: item.variantId,
+          quantity: new Prisma.Decimal(item.quantity).toString(),
+          serialsSupplied: supplied.length,
+        });
+      }
+    }
+
+    // Each line's gross is rounded to the monetary scale BEFORE being
+    // summed, so that SUM(line merchandise value) equals
+    // `subtotal - discountAmount` exactly. That equality is what lets a
+    // full return claw back and restore loyalty exactly (see
+    // return-credit.ts). For integer quantities the rounding is the
+    // identity, so no pre-existing sale's arithmetic changes; it only
+    // bites for fractional quantities at 4-dp prices.
+    // ---------------------------------------------------------------
+    // Phase 10 (BD-18): TAX, resolved and computed SERVER-SIDE.
+    //
+    // The request no longer carries `taxAmount` at all - a client cannot
+    // state what tax it would like to pay. Everything below derives from
+    // the tenant's own tax configuration.
+    //
+    // In INCLUSIVE mode the unit price and the manual discount arrive
+    // expressed in shelf terms and are converted to net HERE, at the line
+    // boundary. From this point on the pipeline is byte-identical to
+    // EXCLUSIVE mode, which is what keeps BD-1, BD-2, BD-3, BD-11 and
+    // BD-12 operating on exactly the values they were approved for.
+    // ---------------------------------------------------------------
+    const taxCtx = await this.tax.loadContext(tx, actor.tenantId);
+    const taxCache = new Map<string, { id: string; ratePercent: Prisma.Decimal; isActive: boolean } | null>();
+    const lineTaxByVariant = new Map<string, ResolvedLineTax>();
+    const netUnitPrice = new Map<string, Prisma.Decimal>();
+    const netManualInput = new Map<string, Prisma.Decimal>();
+    for (const item of input.items) {
+      const product = variantsById.get(item.variantId)!.product;
+      const resolved = await this.tax.resolveLineTax(tx, actor.tenantId, taxCtx, product, item.taxExempt ?? false, taxCache);
+      lineTaxByVariant.set(item.variantId, resolved);
+      netUnitPrice.set(item.variantId, this.tax.toNet(item.unitPrice, resolved, taxCtx));
+      netManualInput.set(item.variantId, this.tax.toNet(item.discountAmount, resolved, taxCtx));
+    }
+
+    const lineGross = new Map<string, Prisma.Decimal>();
+    // Approved decision BD-12: the manual discount is capped at the
+    // line gross UNIVERSALLY, so net merchandise value can never go
+    // negative on any line - not only on lines a promotion reached.
+    // For a well-formed line this is the identity.
+    const cappedManual = new Map<string, Prisma.Decimal>();
+    let subtotal = new Prisma.Decimal(0);
+    let discountAmount = new Prisma.Decimal(0);
+    let taxAmount = new Prisma.Decimal(0);
+    for (const item of input.items) {
+      const gross = round4(netUnitPrice.get(item.variantId)!.times(item.quantity));
+      lineGross.set(item.variantId, gross);
+      const manual = capManualDiscount(netManualInput.get(item.variantId)!, gross);
+      cappedManual.set(item.variantId, manual);
+      subtotal = subtotal.plus(gross);
+      discountAmount = discountAmount.plus(manual);
+    }
+    // `taxAmount` is now computed AFTER every discount is known, once the
+    // final net value of each line is settled - see below.
+
+    // ---------------------------------------------------------------
+    // Phase 8D: PROMOTIONS, resolved server-side inside this same
+    // transaction and BEFORE loyalty (the approved ordering:
+    // promotion -> redemption -> earning).
+    //
+    // The client never supplies promotional pricing: it supplies only
+    // its own manual `discountAmount`, and everything below is computed
+    // from the promotion rules stored in this tenant.
+    //
+    // Evaluation is PER LINE (approved decision BD-10) - quantities are
+    // never aggregated across variants, products or category lines, so
+    // a category "Buy 1 Get 1" over two one-unit lines yields nothing.
+    // At most ONE promotion applies per line (best applicable only);
+    // different lines may carry different promotions.
+    // ---------------------------------------------------------------
+    const saleInstant = new Date();
+    const activePromotions = await resolveActivePromotions(tx, actor.tenantId, saleInstant);
+
+    const promotionByVariant = new Map<string, SelectedPromotion>();
+    const effectivePromotionByVariant = new Map<string, Prisma.Decimal>();
+    const cappedByVariant = new Map<string, boolean>();
+    const manualDiscountByVariant = new Map<string, Prisma.Decimal>();
+
+    if (activePromotions.length > 0) {
+      for (const item of input.items) {
+        const variant = variantsById.get(item.variantId)!;
+        const gross = lineGross.get(item.variantId)!;
+        const best = selectBestPromotion(activePromotions, {
+          variantId: item.variantId,
+          productId: variant.product.id,
+          categoryId: variant.product.categoryId,
+          quantity: new Prisma.Decimal(item.quantity),
+          unitPrice: new Prisma.Decimal(item.unitPrice),
+          lineGross: gross,
+        });
+        if (!best) continue;
+
+        // Approved decision BD-11: a manual discount and a promotion are
+        // ADDITIVE, capped at the line gross. The promotion is computed
+        // on the GROSS, never on the post-manual price, and exceeding
+        // the gross is capped rather than rejected - the line's net
+        // merchandise value can never go negative.
+        const manual = cappedManual.get(item.variantId)!;
+        const combined = combineManualAndPromotion(manual, best.discount, gross);
+        if (combined.effectivePromotionDiscount.lessThanOrEqualTo(0)) {
+          // The manual discount already consumed the whole line, so the
+          // promotion contributed nothing. No provenance row is written
+          // for money that was never given.
+          continue;
+        }
+
+        promotionByVariant.set(item.variantId, best);
+        effectivePromotionByVariant.set(item.variantId, combined.effectivePromotionDiscount);
+        cappedByVariant.set(item.variantId, combined.cappedAtLineGross);
+        manualDiscountByVariant.set(item.variantId, manual);
+        discountAmount = discountAmount.plus(combined.effectivePromotionDiscount);
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 8C: LOYALTY REDEMPTION, resolved server-side inside this
+    // same transaction and BEFORE totals are finalised (approved
+    // ordering). Any failure below throws and rolls the whole sale
+    // back - there is no committed redemption without a sale.
+    // ---------------------------------------------------------------
+    const loyaltyDiscountByVariant = new Map<string, Prisma.Decimal>();
+    let redemptionValue = new Prisma.Decimal(0);
+    let redemptionRate: Prisma.Decimal | null = null;
+
+    if (redeemPoints.greaterThan(0)) {
+      redemptionRate = await resolveLoyaltyRedeemRate(tx, actor.tenantId);
+      if (!redemptionRate) {
+        throw new ValidationFailedError(
+          'Loyalty redemption is not configured for this business - no valid redemption rate is set',
+          { setting: 'loyalty.currency_per_point' },
+        );
+      }
+
+      // On the WRITE path the balance is read under the customer lock
+      // `executeInTx` took before calling this, so two concurrent
+      // redemptions cannot each see the same balance and together
+      // overspend it. On the QUOTE path there is no lock and none is
+      // wanted: the figure is advisory, and the sale re-reads it under the
+      // lock before a single point is spent.
+      const balance = await getCustomerPointsBalance(tx, actor.tenantId, input.customerId!);
+      if (redeemPoints.greaterThan(balance)) {
+        throw new ConflictDomainError(
+          `Cannot redeem ${redeemPoints.toString()} points - the customer's balance is only ${balance.toString()}`,
+          { requested: redeemPoints.toString(), balance: balance.toString() },
+        );
+      }
+
+      redemptionValue = computeRedemptionValue(redeemPoints, redemptionRate);
+      if (redemptionValue.lessThanOrEqualTo(0)) {
+        // Approved decision: an explicit request to spend points is
+        // never silently turned into a no-op that consumes points for
+        // nothing. No minimum threshold is invented and the configured
+        // rate is not adjusted - the request is simply refused.
+        throw new ValidationFailedError(
+          'The requested points convert to no monetary value at the configured redemption rate',
+          { redeemPoints: redeemPoints.toString(), rate: redemptionRate.toString() },
+        );
+      }
+
+      const eligibleLines = input.items.map((item) => ({
+        variantId: item.variantId,
+        // Net of BOTH the manual discount and any promotion already
+        // applied - you cannot redeem points against value that has
+        // already been discounted away.
+        eligible: lineGross
+          .get(item.variantId)!
+          .minus(cappedManual.get(item.variantId)!)
+          .minus(effectivePromotionByVariant.get(item.variantId) ?? 0),
+      }));
+      const totalEligible = eligibleLines.reduce((sum, l) => sum.plus(l.eligible), new Prisma.Decimal(0));
+      if (redemptionValue.greaterThan(totalEligible)) {
+        throw new ValidationFailedError(
+          `Redemption value ${redemptionValue.toString()} exceeds the sale's remaining merchandise value ${totalEligible.toString()}`,
+          { redemptionValue: redemptionValue.toString(), eligible: totalEligible.toString() },
+        );
+      }
+
+      for (const [variantId, amount] of allocateRedemption(eligibleLines, redemptionValue)) {
+        loyaltyDiscountByVariant.set(variantId, amount);
+      }
+      // Redemption is folded into LINE discounts, never added at sale
+      // level, so `Sale.discountAmount = SUM(SaleItem.discountAmount)`
+      // still holds and Phase 6's netRevenue keeps working untouched.
+      discountAmount = discountAmount.plus(redemptionValue);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 10 (BD-18): the tax on each line, computed from the tenant's
+    // configuration on the line's FINAL net value - after the manual
+    // discount, the promotion and the loyalty redemption. The customer is
+    // taxed on what they actually pay.
+    //
+    // This is the ONE place a tax figure comes into existence for a sale,
+    // and it derives entirely from stored configuration.
+    // ---------------------------------------------------------------
+    const lineTaxAmount = new Map<string, Prisma.Decimal>();
+    for (const item of input.items) {
+      const lineDiscount = cappedManual
+        .get(item.variantId)!
+        .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
+        .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
+      const netLineValue = lineGross.get(item.variantId)!.minus(lineDiscount);
+      const lineTax = this.tax.computeLineTax(netLineValue, lineTaxByVariant.get(item.variantId)!);
+      lineTaxAmount.set(item.variantId, lineTax);
+      taxAmount = taxAmount.plus(lineTax);
+    }
+
+    const totalAmount = subtotal.minus(discountAmount).plus(taxAmount);
+
+    return {
+      warehouse,
+      shift,
+      customer,
+      variantsById,
+      redeemPoints,
+      netUnitPrice,
+      lineGross,
+      cappedManual,
+      lineTaxByVariant,
+      lineTaxAmount,
+      promotionByVariant,
+      effectivePromotionByVariant,
+      cappedByVariant,
+      manualDiscountByVariant,
+      loyaltyDiscountByVariant,
+      redemptionValue,
+      redemptionRate,
+      subtotal,
+      discountAmount,
+      taxAmount,
+      totalAmount,
+      saleInstant,
+    };
+  }
+
 }

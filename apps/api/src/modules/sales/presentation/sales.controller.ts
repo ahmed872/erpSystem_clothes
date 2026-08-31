@@ -1,11 +1,13 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import {
   createSaleSchema,
+  quoteSaleSchema,
   createSaleReturnSchema,
   createExchangeSchema,
   createSalePaymentSchema,
   saleListQuerySchema,
   CreateSaleInput,
+  QuoteSaleInput,
   CreateSaleReturnInput,
   CreateExchangeInput,
   CreateSalePaymentInput,
@@ -15,6 +17,7 @@ import { ZodValidationPipe } from '../../../common/pipes/zod-validation.pipe';
 import { RequirePermissions } from '../../../common/decorators/require-permissions.decorator';
 import { CurrentUser, RequestUser } from '../../../common/decorators/current-user.decorator';
 import { CreateSaleUseCase } from '../application/sales/create-sale.use-case';
+import { QuoteSaleUseCase } from '../application/sales/quote-sale.use-case';
 import { GetSaleUseCase } from '../application/sales/get-sale.use-case';
 import { ListSalesUseCase } from '../application/sales/list-sales.use-case';
 import { CreateSaleReturnUseCase } from '../application/returns/create-sale-return.use-case';
@@ -26,6 +29,7 @@ import { GetSaleReceiptUseCase } from '../application/sales/get-sale-receipt.use
 export class SalesController {
   constructor(
     private readonly createSale: CreateSaleUseCase,
+    private readonly quoteSale: QuoteSaleUseCase,
     private readonly getSale: GetSaleUseCase,
     private readonly listSales: ListSalesUseCase,
     private readonly createReturn: CreateSaleReturnUseCase,
@@ -44,6 +48,29 @@ export class SalesController {
   @Post()
   async create(@CurrentUser() user: RequestUser, @Body(new ZodValidationPipe(createSaleSchema)) body: CreateSaleInput) {
     return { data: await this.createSale.execute(user, body) };
+  }
+
+  /**
+   * Phase 12 (Sale Quote): what this cart will cost, computed by the same
+   * pipeline the sale itself runs, before any money is taken.
+   *
+   * POST rather than GET because the request is a cart - many lines, each
+   * with serials and discounts - which does not belong in a query string.
+   * It creates nothing: the whole handler runs in a READ ONLY transaction
+   * (see QuoteSaleUseCase), so the database itself refuses a write from
+   * this path.
+   *
+   * Gated on `sales.create`, not a new permission: quoting a sale is part
+   * of making one, and anyone who may not sell has no use for the figure.
+   * Deliberately NOT `sales.view` - reading past sales is a different act
+   * from pricing a new one, and a Branch Manager (view + return, no
+   * create) has no reason to reach this.
+   */
+  @RequirePermissions('sales.create')
+  @Post('quote')
+  @HttpCode(HttpStatus.OK)
+  async quote(@CurrentUser() user: RequestUser, @Body(new ZodValidationPipe(quoteSaleSchema)) body: QuoteSaleInput) {
+    return { data: await this.quoteSale.execute(user, body) };
   }
 
   @RequirePermissions('sales.view')
