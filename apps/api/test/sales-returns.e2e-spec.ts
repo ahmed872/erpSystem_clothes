@@ -138,7 +138,13 @@ describe('Sales: sale returns (e2e, real Postgres)', () => {
       .expect(409);
     expect(overOnce.body.error.code).toBe('CONFLICT');
 
-    await request(app.getHttpServer()).post(`/api/v1/sales/${saleId}/returns`).set('Authorization', auth()).send({ items: [{ saleItemId, quantity: 5 }] }).expect(201);
+    // Phase 10 (BD-23): a walk-in return must be refunded in full - there
+    // is no customer account for a remainder to sit on. 5 x 10 = 50.
+    await request(app.getHttpServer())
+      .post(`/api/v1/sales/${saleId}/returns`)
+      .set('Authorization', auth())
+      .send({ items: [{ saleItemId, quantity: 5 }], refund: { method: 'CASH', amount: 50 } })
+      .expect(201);
 
     const overCumulative = await request(app.getHttpServer())
       .post(`/api/v1/sales/${saleId}/returns`)
@@ -200,12 +206,12 @@ describe('Sales: sale returns (e2e, real Postgres)', () => {
     const first = await request(app.getHttpServer())
       .post(`/api/v1/sales/${saleId}/returns`)
       .set('Authorization', auth())
-      .send({ items: [{ saleItemId, quantity: 2 }], idempotencyKey })
+      .send({ items: [{ saleItemId, quantity: 2 }], idempotencyKey, refund: { method: 'CASH', amount: 20 } })
       .expect(201);
     const second = await request(app.getHttpServer())
       .post(`/api/v1/sales/${saleId}/returns`)
       .set('Authorization', auth())
-      .send({ items: [{ saleItemId, quantity: 2 }], idempotencyKey })
+      .send({ items: [{ saleItemId, quantity: 2 }], idempotencyKey, refund: { method: 'CASH', amount: 20 } })
       .expect(201);
     expect(second.body.data.id).toBe(first.body.data.id);
 
@@ -222,13 +228,13 @@ describe('Sales: sale returns (e2e, real Postgres)', () => {
     const first = await request(app.getHttpServer())
       .post(`/api/v1/sales/${saleId}/returns`)
       .set('Authorization', auth())
-      .send({ items: [{ saleItemId, quantity: 2 }], idempotencyKey })
+      .send({ items: [{ saleItemId, quantity: 2 }], idempotencyKey, refund: { method: 'CASH', amount: 20 } })
       .expect(201);
 
     const mismatch = await request(app.getHttpServer())
       .post(`/api/v1/sales/${saleId}/returns`)
       .set('Authorization', auth())
-      .send({ items: [{ saleItemId, quantity: 3 }], idempotencyKey }) // different quantity
+      .send({ items: [{ saleItemId, quantity: 3 }], idempotencyKey, refund: { method: 'CASH', amount: 30 } }) // different quantity
       .expect(409);
     expect(mismatch.body.error.code).toBe('CONFLICT');
 

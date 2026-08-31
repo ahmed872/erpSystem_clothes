@@ -26,10 +26,9 @@ export const customerListQuerySchema = z.object({
 });
 export type CustomerListQuery = z.infer<typeof customerListQuerySchema>;
 
-export const openShiftSchema = z.object({
-  warehouseId: z.string().uuid(),
-});
-export type OpenShiftInput = z.infer<typeof openShiftSchema>;
+/// Phase 10 (BD-17): openShiftSchema / closeShiftSchema moved to
+/// ./finance.ts, where they sit alongside the cash-register and
+/// reconciliation contracts they now belong to.
 
 const saleItemInputSchema = z.object({
   variantId: z.string().uuid(),
@@ -84,6 +83,21 @@ export type CreateSalePaymentInput = z.infer<typeof createSalePaymentSchema>;
 export const createSaleReturnSchema = z.object({
   reason: notesSchema.optional(),
   idempotencyKey: z.string().trim().min(1).max(120).optional(),
+  /// Phase 10 (BD-23): the money actually handed back, recorded as a real
+  /// operational fact at the moment it happens.
+  ///
+  /// Optional for an account customer (omitting it leaves the credit on
+  /// their ledger, the pre-Phase-10 behaviour). MANDATORY for a WALK-IN,
+  /// because a walk-in has no ledger the credit could sit on - that is
+  /// forced by the data model, not an invented policy, and mirrors the
+  /// existing rule that a walk-in SALE must be paid in full.
+  refund: z
+    .object({
+      method: z.enum(['CASH', 'CARD', 'WALLET', 'OTHER']),
+      amount: positiveMoneySchema,
+      reference: z.string().trim().max(200).optional(),
+    })
+    .optional(),
   items: z
     .array(
       z.object({

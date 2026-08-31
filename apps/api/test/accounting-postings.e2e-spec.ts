@@ -172,7 +172,23 @@ describe('Accounting: exact postings and reconciliation (e2e, real Postgres)', (
     expect(sumSide(lines, ar.id, 'credit')).toBe(20);
   });
 
-  it('a walk-in sale return corrects Inventory/COGS but posts NO Revenue/AR reversal (documented limitation)', async () => {
+  /**
+   * BEHAVIOURAL CORRECTION (Phase 10, BD-23) - reported, not absorbed.
+   *
+   * This test previously asserted the OPPOSITE: that a walk-in return
+   * corrected Inventory/COGS but posted NO Revenue reversal and NO cash
+   * credit. That was correct for Phases 6-9 and was recorded as Known
+   * Issue #32, whose own text set the condition for any future fix - the
+   * reversal "MUST be driven by a real operational business fact newly
+   * recorded at the source" and never reconstructed from the documents.
+   *
+   * Phase 10 records exactly that fact: the refund tender, keyed in by the
+   * person handing the money back. So the limitation is now CLOSED and the
+   * expectation is inverted deliberately. The assertions below are strictly
+   * stronger than the ones they replace - they check the revenue reversal,
+   * the cash credit, the absence of an AR line, and that the entry balances.
+   */
+  it('a walk-in sale return WITH a refund tender reverses Revenue and credits Cash (closes Known Issue #32)', async () => {
     const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'ACCT-RET-2');
     await request(app.getHttpServer())
       .post('/api/v1/inventory/opening-stock')
@@ -186,20 +202,45 @@ describe('Accounting: exact postings and reconciliation (e2e, real Postgres)', (
       .expect(201);
     const saleItemId = sale.body.data.items[0].id;
 
-    const ret = await request(app.getHttpServer())
+    // A walk-in has no ledger for a remainder to sit on, so the refund must
+    // settle the whole credit - omitting it is now rejected outright.
+    const noRefund = await request(app.getHttpServer())
       .post(`/api/v1/sales/${sale.body.data.id}/returns`)
       .set('Authorization', auth())
       .send({ items: [{ saleItemId, quantity: 1, condition: 'SELLABLE' }] })
+      .expect(422);
+    expect(noRefund.body.error.code).toBe('VALIDATION_FAILED');
+
+    const ret = await request(app.getHttpServer())
+      .post(`/api/v1/sales/${sale.body.data.id}/returns`)
+      .set('Authorization', auth())
+      .send({
+        items: [{ saleItemId, quantity: 1, condition: 'SELLABLE' }],
+        refund: { method: 'CASH', amount: 10 },
+      })
       .expect(201);
 
     const revenue = await accountByCode('4100');
     const ar = await accountByCode('1100');
     const inventory = await accountByCode('1200');
+    const cash = await accountByCode('1010');
 
     const lines = await linesForSource('SaleReturn', ret.body.data.id);
-    expect(lineCountFor(lines, revenue.id)).toBe(0);
+    // Revenue now reverses, and the money leaves through Cash.
+    expect(lineCountFor(lines, revenue.id)).toBeGreaterThan(0);
+    expect(lineCountFor(lines, cash.id)).toBeGreaterThan(0);
+    // Still no AR line: there is no customer, and none was invented.
     expect(lineCountFor(lines, ar.id)).toBe(0);
     expect(lineCountFor(lines, inventory.id)).toBeGreaterThan(0);
+
+    const revenueLine = lines.find((l) => l.accountId === revenue.id)!;
+    const cashLine = lines.find((l) => l.accountId === cash.id)!;
+    expect(Number(revenueLine.debit)).toBeCloseTo(10, 4);
+    expect(Number(cashLine.credit)).toBeCloseTo(10, 4);
+
+    const debits = lines.reduce((t, l) => t + Number(l.debit), 0);
+    const credits = lines.reduce((t, l) => t + Number(l.credit), 0);
+    expect(debits).toBeCloseTo(credits, 4);
   });
 
   it('a DAMAGED sale return posts both the Inventory-return-in leg AND the Shrinkage write-off leg', async () => {

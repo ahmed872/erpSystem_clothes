@@ -90,11 +90,22 @@ describe('Phase 8E: cross-feature integration, serials and concurrency (e2e, rea
       .send({ warehouseId: biz.warehouseId, ...body });
   }
 
-  function returnItems(saleId: string, items: Record<string, unknown>[], idempotencyKey?: string) {
+  /**
+   * Phase 10 (BD-23): a walk-in return must be refunded in full, so this
+   * helper takes the refund alongside the lines. Passing `refund` through
+   * rather than deriving it keeps each test explicit about the money it
+   * expects to hand back.
+   */
+  function returnItems(
+    saleId: string,
+    items: Record<string, unknown>[],
+    idempotencyKey?: string,
+    refund?: { method: string; amount: number },
+  ) {
     return request(app.getHttpServer())
       .post(`/api/v1/sales/${saleId}/returns`)
       .set('Authorization', auth())
-      .send({ items, idempotencyKey });
+      .send({ items, idempotencyKey, refund });
   }
 
   async function promo(body: Record<string, unknown>) {
@@ -304,10 +315,10 @@ describe('Phase 8E: cross-feature integration, serials and concurrency (e2e, rea
       const sale = await sell({ items: [{ variantId, quantity: 1, unitPrice: 50, serials: ['DBL-1'] }], payments: [{ amount: 50 }] }).expect(201);
       const saleItemId = sale.body.data.items[0].id;
 
-      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['DBL-1'] }]).expect(201);
+      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['DBL-1'] }], undefined, { method: 'CASH', amount: 50 }).expect(201);
       // Second return of the same unit: the quantity bound stops it first,
       // and the serial guard would stop it regardless.
-      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['DBL-1'] }]).expect(409);
+      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['DBL-1'] }], undefined, { method: 'CASH', amount: 50 }).expect(409);
 
       const sale2 = await sell({ items: [{ variantId: other, quantity: 1, unitPrice: 50, serials: ['DBL-2'] }], payments: [{ amount: 50 }] }).expect(201);
       await returnItems(sale2.body.data.id, [
@@ -323,9 +334,9 @@ describe('Phase 8E: cross-feature integration, serials and concurrency (e2e, rea
       }).expect(201);
       const saleItemId = sale.body.data.items[0].id;
 
-      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE' }]).expect(422);
-      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 2, condition: 'SELLABLE', serials: ['RV-1'] }]).expect(422);
-      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['RV-1'] }]).expect(201);
+      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE' }], undefined, { method: 'CASH', amount: 50 }).expect(422);
+      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 2, condition: 'SELLABLE', serials: ['RV-1'] }], undefined, { method: 'CASH', amount: 100 }).expect(422);
+      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['RV-1'] }], undefined, { method: 'CASH', amount: 50 }).expect(201);
     });
   });
 
@@ -355,8 +366,8 @@ describe('Phase 8E: cross-feature integration, serials and concurrency (e2e, rea
       const saleItemId = sale.body.data.items[0].id;
 
       const results = await Promise.all([
-        returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['CR-1'] }]),
-        returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['CR-1'] }]),
+        returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['CR-1'] }], undefined, { method: 'CASH', amount: 100 }),
+        returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['CR-1'] }], undefined, { method: 'CASH', amount: 100 }),
       ]);
       expect(results.filter((r) => r.status === 201).length).toBe(1);
 
@@ -462,11 +473,11 @@ describe('Phase 8E: cross-feature integration, serials and concurrency (e2e, rea
       const saleItemId = sale.body.data.items[0].id;
       const k = key('ret8e');
 
-      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['IR-1'] }], k).expect(201);
+      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['IR-1'] }], k, { method: 'CASH', amount: 100 }).expect(201);
       // Same key, same shape, DIFFERENT physical unit.
-      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['IR-2'] }], k).expect(409);
+      await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['IR-2'] }], k, { method: 'CASH', amount: 100 }).expect(409);
       // Same key, identical payload -> safe replay.
-      const replay = await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['IR-1'] }], k).expect(201);
+      const replay = await returnItems(sale.body.data.id, [{ saleItemId, quantity: 1, condition: 'SELLABLE', serials: ['IR-1'] }], k, { method: 'CASH', amount: 100 }).expect(201);
       expect(await admin.saleReturnItemSerial.count({ where: { saleReturnId: replay.body.data.id } })).toBe(1);
     });
   });

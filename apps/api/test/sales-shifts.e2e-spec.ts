@@ -7,11 +7,19 @@ import { setupInventoryFixture, createSimpleProduct, InventoryFixture } from './
 describe('Sales: shifts (e2e, real Postgres)', () => {
   let app: INestApplication;
   let biz: InventoryFixture;
+  let cashRegisterId: string;
 
   beforeAll(async () => {
     await resetDatabase();
     app = await createTestApp();
     biz = await setupInventoryFixture(app, 'sales-shifts');
+    // Phase 10 (BD-17): every business is onboarded with a default register
+    // (Phase 0 §11), so opening a shift needs no separate setup step.
+    const registers = await request(app.getHttpServer())
+      .get('/api/v1/cash-registers')
+      .set('Authorization', `Bearer ${biz.accessToken}`)
+      .expect(200);
+    cashRegisterId = registers.body.data[0].id;
   });
 
   afterAll(async () => {
@@ -27,31 +35,31 @@ describe('Sales: shifts (e2e, real Postgres)', () => {
     const opened = await request(app.getHttpServer())
       .post('/api/v1/sales/shifts/open')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId })
+      .send({ warehouseId: biz.warehouseId, cashRegisterId, openingFloat: 0 })
       .expect(201);
     expect(opened.body.data.status).toBe('OPEN');
 
     const active = await request(app.getHttpServer()).get('/api/v1/sales/shifts/active').set('Authorization', auth()).expect(200);
     expect(active.body.data.id).toBe(opened.body.data.id);
 
-    await request(app.getHttpServer()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).expect(200);
+    await request(app.getHttpServer()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).send({ countedCash: 0 }).expect(200);
   });
 
   it('rejects opening a second shift while one is already open (app pre-check AND DB partial unique index)', async () => {
-    await request(app.getHttpServer()).post('/api/v1/sales/shifts/open').set('Authorization', auth()).send({ warehouseId: biz.warehouseId }).expect(201);
+    await request(app.getHttpServer()).post('/api/v1/sales/shifts/open').set('Authorization', auth()).send({ warehouseId: biz.warehouseId, cashRegisterId, openingFloat: 0 }).expect(201);
 
     const second = await request(app.getHttpServer())
       .post('/api/v1/sales/shifts/open')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId })
+      .send({ warehouseId: biz.warehouseId, cashRegisterId, openingFloat: 0 })
       .expect(409);
     expect(second.body.error.code).toBe('CONFLICT');
 
-    await request(app.getHttpServer()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).expect(200);
+    await request(app.getHttpServer()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).send({ countedCash: 0 }).expect(200);
   });
 
   it('rejects closing when there is no open shift', async () => {
-    const res = await request(app.getHttpServer()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).expect(409);
+    const res = await request(app.getHttpServer()).post('/api/v1/sales/shifts/close').set('Authorization', auth()).send({ countedCash: 0 }).expect(409);
     expect(res.body.error.code).toBe('CONFLICT');
   });
 
@@ -59,7 +67,7 @@ describe('Sales: shifts (e2e, real Postgres)', () => {
     const res = await request(app.getHttpServer())
       .post('/api/v1/sales/shifts/open')
       .set('Authorization', auth())
-      .send({ warehouseId: '00000000-0000-0000-0000-000000000000' })
+      .send({ warehouseId: '00000000-0000-0000-0000-000000000000', cashRegisterId, openingFloat: 0 })
       .expect(404);
     expect(res.body.error.code).toBe('NOT_FOUND');
   });

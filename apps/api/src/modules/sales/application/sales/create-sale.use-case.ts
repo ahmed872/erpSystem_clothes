@@ -18,6 +18,7 @@ import { AccountingEngineService } from '../../../../engines/accounting/accounti
 import { buildSaleJournalLines } from '../../../accounting/domain/sale-journal-lines';
 import { round4 } from '../../../../common/domain/money';
 import { capManualDiscount } from '../../domain/line-discount';
+import { recordCashTransaction } from '../../../finance/domain/record-cash-transaction';
 import { lockCustomer } from '../../../loyalty/domain/lock-customer';
 import { getCustomerPointsBalance } from '../../../loyalty/domain/customer-points-balance';
 import { computePointsEarned, resolveLoyaltyEarnRate } from '../../../loyalty/domain/loyalty-earning';
@@ -568,6 +569,29 @@ export class CreateSaleUseCase {
             receivedBy: actor.id,
           },
         });
+
+        // Phase 10 (BD-17 rule 3): a CASH tender is also a movement of
+        // physical money, so it enters the shift's drawer ledger in the
+        // SAME transaction as the sale that collected it. That is what
+        // makes expected cash derivable and trustworthy - the drawer can
+        // never disagree with the documents, because neither can exist
+        // without the other.
+        //
+        // Only CASH. Card, wallet and the rest post to their own clearing
+        // accounts and never enter the drawer; including them would
+        // overstate expected cash by exactly the card takings.
+        if (p.method === 'CASH') {
+          await recordCashTransaction(tx, {
+            businessId: actor.tenantId,
+            shiftId: shift.id,
+            type: 'SALE_TENDER',
+            amount: p.amount,
+            referenceType: 'Sale',
+            referenceId: sale.id,
+            reason: `Sale ${sale.saleNumber}`,
+            createdBy: actor.id,
+          });
+        }
       }
 
       // `totalAmount` can legitimately be ZERO once loyalty redemption is

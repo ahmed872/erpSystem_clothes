@@ -143,7 +143,8 @@ describe('Reporting: sales and purchasing reports (e2e, real Postgres)', () => {
     await request(app.getHttpServer())
       .post(`/api/v1/sales/${sale.body.data.id}/returns`)
       .set('Authorization', auth())
-      .send({ items: [{ saleItemId, quantity: 2, condition: 'SELLABLE' }] })
+      // Phase 10 (BD-23): walk-in return refunded in full (2 x 20).
+      .send({ items: [{ saleItemId, quantity: 2, condition: 'SELLABLE' }], refund: { method: 'CASH', amount: 40 } })
       .expect(201);
 
     const res = await request(app.getHttpServer()).get('/api/v1/reports/sales/returns').set('Authorization', auth()).expect(200);
@@ -152,9 +153,17 @@ describe('Reporting: sales and purchasing reports (e2e, real Postgres)', () => {
     // This sale had no customer, so its return value is walk-in.
     expect(Number(res.body.summary.walkInReturnValue)).toBe(40);
     expect(res.body.data[0].isWalkIn).toBe(true);
-    // The documented divergence must be surfaced, not hidden.
+    // BEHAVIOURAL CORRECTION (Phase 10, BD-23) - reported, not absorbed.
+    // This previously asserted the note said walk-in returns "do NOT
+    // reverse Sales Revenue". That was true for Phases 6-9 (Known Issue
+    // #32) and is now false: the refund tender is a recorded operational
+    // fact, so revenue does reverse. The note must now say so, while still
+    // explaining the one case that can still diverge - returns recorded
+    // BEFORE Phase 10, whose historical entries are never rewritten.
     expect(res.body.summary.glRevenueReversalNote).toMatch(/walk-in/i);
-    expect(res.body.summary.glRevenueReversalNote).toMatch(/do NOT reverse Sales Revenue/i);
+    expect(res.body.summary.glRevenueReversalNote).toMatch(/DO reverse Sales Revenue|reverse Sales Revenue in the General Ledger/i);
+    expect(res.body.summary.glRevenueReversalNote).not.toMatch(/do NOT reverse Sales Revenue/i);
+    expect(res.body.summary.glRevenueReversalNote).toMatch(/before Phase 10/i);
   });
 
   it('PURCHASING SUMMARY: receipts/returns/payments match the source documents, cost gated behind products.view_cost', async () => {

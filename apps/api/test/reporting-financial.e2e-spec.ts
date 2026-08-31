@@ -122,7 +122,12 @@ describe('Reporting: financial reports - GL, P&L, Balance Sheet, AR/AP (e2e, rea
     expect(res.body.limitations.operatingExpensesScope).toMatch(/INVENTORY-RELATED ONLY/i);
     expect(res.body.limitations.operatingExpensesScope).toMatch(/rent, salaries, utilities/i);
     expect(res.body.limitations.discounts).toMatch(/not a P&L line/i);
-    expect(res.body.limitations.walkInReturns).toMatch(/do NOT reverse revenue/i);
+    // BEHAVIOURAL CORRECTION (Phase 10, BD-23): walk-in returns DO reverse
+    // revenue now that the refund tender is recorded. See BD-23 and the
+    // closure of Known Issue #32.
+    expect(res.body.limitations.walkInReturns).toMatch(/DO reverse revenue/i);
+    expect(res.body.limitations.walkInReturns).not.toMatch(/do NOT reverse revenue/i);
+    expect(res.body.limitations.walkInReturns).toMatch(/before Phase 10/i);
     // The expense line must NOT be labelled as total business expenses.
     expect(res.body.data).toHaveProperty('inventoryRelatedOperatingExpenses');
     expect(res.body.data).not.toHaveProperty('totalExpenses');

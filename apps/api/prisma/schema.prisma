@@ -109,6 +109,8 @@ model Business {
   salePromotionApplications SalePromotionApplication[]
   SaleItemSerial            SaleItemSerial[]
   SaleReturnItemSerial      SaleReturnItemSerial[]
+  cashRegisters             CashRegister[]
+  cashTransactions          CashTransaction[]
 
   @@map("businesses")
 }
@@ -132,6 +134,7 @@ model Branch {
   purchases      Purchase[]
   shifts         Shift[]
   sales          Sale[]
+  cashRegisters  CashRegister[]
 
   @@unique([businessId, name])
   @@index([businessId])
@@ -1440,6 +1443,18 @@ enum SaleReturnCondition {
   DAMAGED
 }
 
+/// Phase 10 (BD-17). Sign convention enforced by
+/// `cash_transactions_amount_sign_matches_type`:
+/// SALE_TENDER and PAY_IN are positive; SALE_REFUND, PAY_OUT and
+/// EXPENSE are negative. Zero is never a valid cash movement.
+enum CashTransactionType {
+  SALE_TENDER
+  SALE_REFUND
+  PAY_IN
+  PAY_OUT
+  EXPENSE
+}
+
 enum ShiftStatus {
   OPEN
   CLOSED
@@ -1509,25 +1524,97 @@ model CustomerTransaction {
 /// express a WHERE-qualified unique index) - the database provides this
 /// guarantee, not just an application pre-check.
 model Shift {
-  id          String      @id @default(uuid())
-  businessId  String      @map("business_id")
-  branchId    String      @map("branch_id")
-  warehouseId String      @map("warehouse_id")
-  openedBy    String      @map("opened_by")
-  openedAt    DateTime    @default(now()) @map("opened_at")
-  closedBy    String?     @map("closed_by")
-  closedAt    DateTime?   @map("closed_at")
-  status      ShiftStatus @default(OPEN)
+  id                 String      @id @default(uuid())
+  businessId         String      @map("business_id")
+  branchId           String      @map("branch_id")
+  warehouseId        String      @map("warehouse_id")
+  /// Phase 10 (BD-17): the physical till this shift is bound to.
+  /// NULLABLE only so shifts opened before Phase 10 keep their history
+  /// truthfully - no register is fabricated for them. Every NEW shift
+  /// must name one (enforced in OpenShiftUseCase and the zod schema).
+  cashRegisterId     String?     @map("cash_register_id")
+  openedBy           String      @map("opened_by")
+  openedAt           DateTime    @default(now()) @map("opened_at")
+  /// Cash physically in the drawer when the shift opened. A fact,
+  /// supplied by the cashier, never derived.
+  openingFloat       Decimal     @default(0) @map("opening_float") @db.Decimal(18, 4)
+  closedBy           String?     @map("closed_by")
+  closedAt           DateTime?   @map("closed_at")
+  /// BLIND CLOSE (BD-17 rule 4/6): what the cashier actually counted.
+  /// Written exactly once at close and NEVER altered afterwards - the
+  /// manager's reconciliation records an acknowledgement, not an
+  /// overwrite. Expected cash and variance are DERIVED from
+  /// openingFloat + CashTransaction rows and are deliberately NOT
+  /// stored: storing them would be a second source of truth.
+  countedCash        Decimal?    @map("counted_cash") @db.Decimal(18, 4)
+  reconciledBy       String?     @map("reconciled_by")
+  reconciledAt       DateTime?   @map("reconciled_at")
+  reconciliationNote String?     @map("reconciliation_note")
+  status             ShiftStatus @default(OPEN)
 
-  business  Business  @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "shifts_business_fk")
-  branch    Branch    @relation(fields: [branchId], references: [id], onDelete: Restrict)
-  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
-  sales     Sale[]
+  business         Business          @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "shifts_business_fk")
+  branch           Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  warehouse        Warehouse         @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  cashRegister     CashRegister?     @relation(fields: [cashRegisterId], references: [id], onDelete: Restrict)
+  sales            Sale[]
+  cashTransactions CashTransaction[]
 
   @@index([businessId])
   @@index([openedBy])
   @@index([status])
+  @@index([businessId, cashRegisterId])
   @@map("shifts")
+}
+
+/// Phase 10 (BD-17): a physical till. `Branch 1---* CashRegister 1---* Shift`,
+/// exactly as the Phase 0 ERD specifies. Generic across a single-register
+/// shop, a multi-register branch, and many branches.
+model CashRegister {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  branchId   String   @map("branch_id")
+  name       String
+  code       String
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  createdBy  String?  @map("created_by")
+  updatedBy  String?  @map("updated_by")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "cash_registers_business_fk")
+  branch   Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  shifts   Shift[]
+
+  @@unique([businessId, code])
+  @@index([businessId])
+  @@index([businessId, branchId])
+  @@map("cash_registers")
+}
+
+/// Phase 10 (BD-17): every movement of physical cash inside a shift.
+/// APPEND-ONLY (SELECT + INSERT grants only) - this is the ledger that
+/// makes expected cash derivable rather than stored. `amount` is SIGNED
+/// and its sign must agree with `type`, enforced by a CHECK constraint.
+model CashTransaction {
+  id            String              @id @default(uuid())
+  businessId    String              @map("business_id")
+  shiftId       String              @map("shift_id")
+  type          CashTransactionType
+  /// Signed: positive = cash into the drawer, negative = cash out.
+  amount        Decimal             @db.Decimal(18, 4)
+  referenceType String?             @map("reference_type")
+  referenceId   String?             @map("reference_id")
+  reason        String?
+  createdBy     String?             @map("created_by")
+  createdAt     DateTime            @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "cash_transactions_business_fk")
+  shift    Shift    @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+  @@index([businessId, shiftId])
+  @@index([businessId, referenceType, referenceId])
+  @@map("cash_transactions")
 }
 
 model Sale {
@@ -1650,15 +1737,27 @@ model SalePayment {
 /// workflow), exactly mirroring PurchaseReturn - but WITH idempotencyKey
 /// from day one, correcting Known Issue #23 rather than reproducing it.
 model SaleReturn {
-  id             String   @id @default(uuid())
-  businessId     String   @map("business_id")
-  saleId         String   @map("sale_id")
-  warehouseId    String   @map("warehouse_id")
-  returnNumber   String   @map("return_number")
-  idempotencyKey String?  @map("idempotency_key")
-  reason         String?
-  createdBy      String?  @map("created_by")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id              String             @id @default(uuid())
+  businessId      String             @map("business_id")
+  saleId          String             @map("sale_id")
+  warehouseId     String             @map("warehouse_id")
+  returnNumber    String             @map("return_number")
+  idempotencyKey  String?            @map("idempotency_key")
+  /// Phase 10 (BD-23): the REAL tender handed back to the customer. This
+  /// is the operational fact Known Issue #32 demanded before a walk-in
+  /// refund could ever reach the ledger - recorded at source, never
+  /// reconstructed afterwards from the documents.
+  ///
+  /// NULL means no money moved at this moment: for an account customer
+  /// that is the ordinary case (the credit sits on their ledger). For a
+  /// WALK-IN it is impossible, because there is no ledger to hold the
+  /// credit - enforced in CreateSaleReturnUseCase.
+  refundMethod    SalePaymentMethod? @map("refund_method")
+  refundAmount    Decimal?           @map("refund_amount") @db.Decimal(18, 4)
+  refundReference String?            @map("refund_reference")
+  reason          String?
+  createdBy       String?            @map("created_by")
+  createdAt       DateTime           @default(now()) @map("created_at")
 
   business    Business               @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_returns_business_fk")
   sale        Sale                   @relation(fields: [saleId], references: [id], onDelete: Restrict)
@@ -1783,6 +1882,9 @@ enum AccountingMappingKey {
   INVENTORY_SHRINKAGE
   INVENTORY_GAIN
   INTERNAL_CONSUMPTION_EXPENSE
+  /// Phase 10 (BD-17 rule 8): the configurable account a blind-close
+  /// cash variance posts to. Shortage debits it, overage credits it.
+  CASH_VARIANCE
   TENDER_CASH
   TENDER_CARD
   TENDER_WALLET

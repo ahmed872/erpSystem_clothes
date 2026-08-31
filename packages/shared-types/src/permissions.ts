@@ -147,6 +147,16 @@ export const PERMISSION_CODES = [
   'promotions.create',
   'promotions.edit',
   'promotions.deactivate',
+  // Cash registers & till (Phase 10, BD-17)
+  'cash_registers.view',
+  'cash_registers.manage',
+  'shifts.reconcile',
+  /// Gates the EXPECTED cash figure itself. Without this permission the
+  /// server OMITS expected/variance from every shift response - which is
+  /// what makes BLIND CLOSE real rather than a screen that chooses not to
+  /// look. Same server-side stripping posture as products.view_cost.
+  'shifts.view_expected',
+  'cash.movement',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -221,6 +231,14 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // Phase 8 (branch-scoped promotions are deferred), so authoring one
     // is not a branch-level act.
     'promotions.view',
+    // Cash/till (Phase 10, BD-17): the Branch Manager is the reconciling
+    // authority for their branch's tills - they define registers, see the
+    // expected figure, and acknowledge variances.
+    'cash_registers.view',
+    'cash_registers.manage',
+    'shifts.reconcile',
+    'shifts.view_expected',
+    'cash.movement',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -270,6 +288,15 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // Promotions (Phase 8D): read-only oversight - an Accountant needs to
     // explain a discounted sale, not to author discount rules.
     'promotions.view',
+    // Cash/till (Phase 10, BD-17): full oversight including the expected
+    // figure and variance acknowledgement - a cash variance is a value
+    // decision of the same kind as the ledger corrections this role owns.
+    // NOT cash_registers.manage: defining a physical till is a branch
+    // operations act, not an accounting one.
+    'cash_registers.view',
+    'shifts.reconcile',
+    'shifts.view_expected',
+    'cash.movement',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',
@@ -358,6 +385,13 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     // needs no promotion permission at all: resolution is server-side
     // inside CreateSaleUseCase and is gated by `sales.create`.
     'promotions.view',
+    // Cash/till (Phase 10, BD-17): a cashier picks their register, records
+    // drawer movements, and closes BLIND. Deliberately NOT
+    // shifts.view_expected - seeing the expected figure before counting is
+    // exactly what blind close exists to prevent - and NOT shifts.reconcile,
+    // which is the reviewing manager's act, not the counted party's.
+    'cash_registers.view',
+    'cash.movement',
   ],
   SALES_EMPLOYEE: [
     'branches.view',
@@ -384,5 +418,10 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'loyalty.view',
     // Promotions (Phase 8D): read-only, same reasoning as the Cashier.
     'promotions.view',
+    // Cash/till (Phase 10, BD-17): can select a register and close blind,
+    // like a Cashier. NOT cash.movement - recording a pay-in or pay-out is
+    // a till-custody act reserved for the Cashier in this template set,
+    // matching this role's existing exclusion from sales.pay.
+    'cash_registers.view',
   ],
 };

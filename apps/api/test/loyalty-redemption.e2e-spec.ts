@@ -745,10 +745,19 @@ describe('Loyalty redemption, earning, clawback and restoration (e2e, real Postg
         .expect(200);
       const token = `Bearer ${login.body.data.accessToken}`;
 
+      // Phase 10 (BD-17 rule 10): one open shift per register, so this
+      // second user takes a register of their own rather than the default
+      // one the fixture's owner shift already holds.
+      const reg2 = await request(app.getHttpServer())
+        .post('/api/v1/cash-registers')
+        .set('Authorization', `Bearer ${biz.accessToken}`)
+        .send({ branchId: biz.branchId, name: 'Till 2', code: 'TILL-2-LOY' })
+        .expect(201);
+
       await request(app.getHttpServer())
         .post('/api/v1/sales/shifts/open')
         .set('Authorization', token)
-        .send({ warehouseId: biz.warehouseId })
+        .send({ warehouseId: biz.warehouseId, cashRegisterId: reg2.body.data.id, openingFloat: 0 })
         .expect(201);
 
       const customerId = await createCustomer('Till Customer');

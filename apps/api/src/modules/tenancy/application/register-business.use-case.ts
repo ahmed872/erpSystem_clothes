@@ -76,6 +76,20 @@ export class RegisterBusinessUseCase {
         },
       });
 
+      // Phase 10 (BD-17): the default cash register. Phase 0 §11 defines
+      // onboarding as "Business -> default Branch/Warehouse/Register", so a
+      // new business can open a shift and sell immediately rather than
+      // hitting a "no register configured" wall on its first POS request.
+      await tx.cashRegister.create({
+        data: {
+          businessId,
+          branchId,
+          name: input.defaultCashRegisterName,
+          code: 'MAIN',
+          createdBy: ownerUserId,
+        },
+      });
+
       // Seed every built-in role template so an owner can start assigning
       // Branch Manager / Accountant / Cashier / ... immediately, without a
       // separate "set up roles" step.

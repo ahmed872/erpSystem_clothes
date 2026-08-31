@@ -99,7 +99,11 @@ describe('Sales: WAC / historical cost reconciliation across Inventory + Purchas
     const ret = await request(app.getHttpServer())
       .post(`/api/v1/sales/${sale2.body.data.id}/returns`)
       .set('Authorization', auth())
-      .send({ items: [{ saleItemId: sale2ItemId, quantity: 2, condition: 'SELLABLE' }] })
+      // Phase 10 (BD-23): walk-in return refunded in full at the SELLING
+      // price (2 x 60 = 120). Note this is deliberately not the 12.5 unit
+      // COST the assertions below are about - the refund is what the
+      // customer paid, the movement cost is what the goods cost us.
+      .send({ items: [{ saleItemId: sale2ItemId, quantity: 2, condition: 'SELLABLE' }], refund: { method: 'CASH', amount: 120 } })
       .expect(201);
     const returnMovement = await admin.stockMovement.findFirstOrThrow({
       where: { businessId: biz.businessId, variantId, movementType: 'SALES_RETURN', referenceType: 'SaleReturn', referenceId: ret.body.data.id },

@@ -11,6 +11,7 @@ export * from './reporting';
 export * from './warranty';
 export * from './loyalty';
 export * from './promotions';
+export * from './finance';
 
 export const registerBusinessSchema = z.object({
   businessName: nameSchema,
@@ -22,6 +23,10 @@ export const registerBusinessSchema = z.object({
   ownerPassword: passwordSchema,
   defaultBranchName: nameSchema.default('الفرع الرئيسي'),
   defaultWarehouseName: nameSchema.default('المخزن الرئيسي'),
+  /// Phase 10: Phase 0 §11 specifies onboarding as
+  /// "Business -> default Branch/Warehouse/Register", so a business is
+  /// usable from the first request without a separate setup step.
+  defaultCashRegisterName: nameSchema.default('الخزينة الرئيسية'),
 });
 export type RegisterBusinessInput = z.infer<typeof registerBusinessSchema>;
 

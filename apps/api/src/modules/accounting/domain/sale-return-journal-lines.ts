@@ -1,4 +1,4 @@
-import { AccountingMappingKey, Prisma } from '@prisma/client';
+import { AccountingMappingKey, Prisma, SalePaymentMethod } from '@prisma/client';
 import { TenantTx } from '../../../common/prisma/prisma.service';
 import { PostEntryLineInput } from '../../../engines/accounting/accounting-engine.service';
 import { resolveMappedAccounts } from './resolve-mapped-account';
@@ -25,21 +25,49 @@ export interface SaleReturnJournalInput {
    * WAC costing, not a bug - see PROJECT_STATE.md.
    */
   damageWriteOff: Prisma.Decimal;
+  /**
+   * Phase 10 (BD-23): the tender actually handed back, if any. NULL means
+   * no money moved and the whole credit stays on the customer's ledger.
+   */
+  refund: { method: SalePaymentMethod; amount: Prisma.Decimal } | null;
 }
 
+const SALE_TENDER_KEY: Record<SalePaymentMethod, AccountingMappingKey> = {
+  CASH: 'TENDER_CASH',
+  CARD: 'TENDER_CARD',
+  WALLET: 'TENDER_WALLET',
+  OTHER: 'TENDER_OTHER',
+};
+
 /**
- * Up to three independent sub-groups: (a) Inventory in / COGS reversal
- * for the returned cost, (b) Inventory out / Shrinkage for the damaged
- * portion, (c) Revenue reversal / AR credit for a customer-attached
- * return only. Walk-in (customerId=null) returns deliberately do NOT
- * post (c) - CreateSaleReturnUseCase itself posts no CustomerTransaction
- * for a walk-in return (there is no customer ledger to credit), and
- * Sales' Phase 5 design records no cash-refund event for a walk-in
- * return either - Accounting has no operational fact to post a Cash
- * credit from without inventing one, so it deliberately does not. This
- * is a documented, known limitation (see PROJECT_STATE.md Known Issues),
- * not a silent gap: a walk-in return corrects Inventory/COGS accurately
- * but does NOT reduce Sales Revenue in the GL.
+ * Up to three independent sub-groups: (a) Inventory in / COGS reversal for
+ * the returned cost, (b) Inventory out / Shrinkage for the damaged portion,
+ * (c) the revenue reversal and its credit side.
+ *
+ * PHASE 10 (BD-23) — KNOWN ISSUE #32 IS CLOSED HERE.
+ *
+ * Until Phase 10 a walk-in return posted only (a) and (b): Sales recorded
+ * no refund event of any kind, so Accounting had no operational fact from
+ * which to credit Cash or reverse Revenue, and inventing one was
+ * forbidden. #32 stated the condition for any future fix precisely - it
+ * "MUST be driven by a real operational business fact newly recorded at the
+ * source... and must NOT be implemented by re-deriving, inferring, or
+ * reconstructing the refund from the Sale/SaleReturn documents after the
+ * fact." `SaleReturn.refundMethod/refundAmount` is exactly that fact, keyed
+ * in by the person handing the money over, and it is what this function now
+ * posts from. Nothing is inferred.
+ *
+ * The credit side splits between the two places the value can go:
+ *
+ *   refundAmount        -> the tender account (money left the business)
+ *   totalCredit - refund -> Accounts Receivable (credit stays on the
+ *                           customer's ledger)
+ *
+ * For a walk-in the refund necessarily equals the whole credit (there is no
+ * ledger to hold a remainder - CreateSaleReturnUseCase enforces it), so the
+ * AR line simply does not arise. For an account customer with no refund the
+ * behaviour is byte-identical to Phase 6's, which is what keeps every
+ * existing return test valid.
  */
 export async function buildSaleReturnJournalLines(tx: TenantTx, businessId: string, input: SaleReturnJournalInput): Promise<PostEntryLineInput[]> {
   // Rounded to the monetary scale before being tested or posted - see
@@ -54,8 +82,18 @@ export async function buildSaleReturnJournalLines(tx: TenantTx, businessId: stri
   const neededKeys: AccountingMappingKey[] = [];
   if (returnInCost.greaterThan(0)) neededKeys.push('INVENTORY_ASSET', 'COGS');
   if (damageWriteOff.greaterThan(0)) neededKeys.push('INVENTORY_SHRINKAGE');
-  const postRevenueReversal = Boolean(input.customerId) && totalCredit.greaterThan(0);
-  if (postRevenueReversal) neededKeys.push('SALES_REVENUE', 'ACCOUNTS_RECEIVABLE');
+  const refundAmount = input.refund ? round4(input.refund.amount) : new Prisma.Decimal(0);
+  const ledgerCredit = round4(totalCredit.minus(refundAmount));
+
+  // Revenue now reverses whenever the value went SOMEWHERE real - either
+  // onto a customer's ledger or back out as a tender. A walk-in return with
+  // a recorded refund therefore reverses revenue for the first time.
+  const postRevenueReversal = totalCredit.greaterThan(0) && (Boolean(input.customerId) || refundAmount.greaterThan(0));
+  if (postRevenueReversal) {
+    neededKeys.push('SALES_REVENUE');
+    if (refundAmount.greaterThan(0)) neededKeys.push(SALE_TENDER_KEY[input.refund!.method]);
+    if (ledgerCredit.greaterThan(0)) neededKeys.push('ACCOUNTS_RECEIVABLE');
+  }
 
   const accounts = await resolveMappedAccounts(tx, businessId, neededKeys);
   const lines: PostEntryLineInput[] = [];
@@ -70,7 +108,16 @@ export async function buildSaleReturnJournalLines(tx: TenantTx, businessId: stri
   }
   if (postRevenueReversal) {
     lines.push({ accountId: accounts.get('SALES_REVENUE')!, debit: totalCredit, description: 'Reverse sales revenue' });
-    lines.push({ accountId: accounts.get('ACCOUNTS_RECEIVABLE')!, credit: totalCredit, description: 'Customer credit for return' });
+    if (refundAmount.greaterThan(0)) {
+      lines.push({
+        accountId: accounts.get(SALE_TENDER_KEY[input.refund!.method])!,
+        credit: refundAmount,
+        description: `Refund tendered: ${input.refund!.method}`,
+      });
+    }
+    if (ledgerCredit.greaterThan(0)) {
+      lines.push({ accountId: accounts.get('ACCOUNTS_RECEIVABLE')!, credit: ledgerCredit, description: 'Customer credit for return' });
+    }
   }
 
   return lines;

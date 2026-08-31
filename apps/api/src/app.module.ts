@@ -15,6 +15,7 @@ import { AccountingModule } from './modules/accounting/accounting.module';
 import { ReportingModule } from './modules/reporting/reporting.module';
 import { WarrantyModule } from './modules/warranty/warranty.module';
 import { LoyaltyModule } from './modules/loyalty/loyalty.module';
+import { FinanceModule } from './modules/finance/finance.module';
 import { PromotionsModule } from './modules/promotions/promotions.module';
 import { InventoryEngineModule } from './engines/inventory/inventory-engine.module';
 import { AccountingEngineModule } from './engines/accounting/accounting-engine.module';
@@ -41,6 +42,7 @@ import { PermissionsGuard } from './common/guards/permissions.guard';
     WarrantyModule,
     LoyaltyModule,
     PromotionsModule,
+    FinanceModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

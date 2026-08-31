@@ -12,15 +12,19 @@ import { dateRangeWhere } from '../../domain/date-range';
  * Sale returns as an OPERATIONAL report - what physically came back, in
  * what condition, against which sale.
  *
- * IMPORTANT (PROJECT_STATE.md Known Issue #32): for a WALK-IN return
- * (no customer), Phase 6 posts an Inventory/COGS correction but NO
- * Revenue/AR reversal, because no operational refund fact exists to post
- * one from. That means the operational return value shown here will NOT
- * always be reflected as a revenue reduction in the GL-derived P&L. The
- * response therefore surfaces `walkInReturnValue` explicitly and carries
- * a `glRevenueReversalNote`, so the divergence reads as the documented,
- * expected limitation it is - not as a reporting bug. This report never
- * re-derives a GL revenue figure from these documents.
+ * CORRECTED IN PHASE 10 (BD-23). This report previously carried a note
+ * saying walk-in returns never reverse Revenue in the General Ledger -
+ * true for Phases 6-9 (Known Issue #32), and now FALSE. Phase 10 records
+ * the refund tender as a real operational fact at the moment the money is
+ * handed back, which is precisely the condition #32 set for closing it, so
+ * a walk-in return with a refund does reverse Revenue.
+ *
+ * `walkInReturnValue` is still surfaced, because it stays operationally
+ * useful, and the note now describes the ONE case that can still diverge:
+ * returns recorded BEFORE Phase 10, which carry no refund fact and were
+ * posted under the old rule. Historical entries are never rewritten.
+ * This report still never re-derives a GL revenue figure from these
+ * documents.
  */
 @Injectable()
 export class SalesReturnsReportUseCase {
@@ -96,7 +100,7 @@ export class SalesReturnsReportUseCase {
           customerReturnValue: customerReturnValue.toString(),
           walkInReturnValue: walkInReturnValue.toString(),
           glRevenueReversalNote:
-            'Walk-in returns correct Inventory and COGS in the General Ledger but do NOT reverse Sales Revenue or Accounts Receivable, because no operational refund fact is recorded for a walk-in return (documented limitation #32). The GL-derived P&L will therefore show revenue that this operational figure does not reduce. This is expected, not a discrepancy.',
+            'Returns recorded from Phase 10 onward reverse Sales Revenue in the General Ledger, including walk-in returns, because the refund tender is now recorded as a real operational fact (this closed limitation #32). Returns recorded BEFORE Phase 10 carry no refund fact and were posted under the previous rule - a walk-in return from that period corrected Inventory and COGS but did not reduce Revenue. Historical entries are never rewritten, so that difference persists in the GL-derived P&L for older periods only, and is expected rather than a discrepancy.',
         },
         pagination: { page: query.page, limit: query.limit, total, totalPages: Math.ceil(total / query.limit) },
         range: { from: ctx.range.from.toISOString(), to: ctx.range.toExclusive.toISOString(), timezone: ctx.range.timezone },

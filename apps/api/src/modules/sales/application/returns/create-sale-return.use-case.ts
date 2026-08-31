@@ -15,7 +15,10 @@ import { assertIdempotentReplayMatches } from '../../../../common/domain/idempot
 import { AccountingEngineService } from '../../../../engines/accounting/accounting-engine.service';
 import { buildSaleReturnJournalLines } from '../../../accounting/domain/sale-return-journal-lines';
 import { lineReturnCredit, saleCumulativeReturnCredit } from '../../domain/return-credit';
+import { round4 } from '../../../../common/domain/money';
 import { lockCustomer } from '../../../loyalty/domain/lock-customer';
+import { findActiveShift } from '../../domain/find-active-shift';
+import { recordCashTransaction } from '../../../finance/domain/record-cash-transaction';
 import { getCustomerPointsBalance } from '../../../loyalty/domain/customer-points-balance';
 import { computeCumulativeClawback, computeCumulativeRestoration } from '../../../loyalty/domain/loyalty-returns';
 import { returnSerialsToQuarantine } from '../../../inventory/domain/return-serials';
@@ -23,9 +26,16 @@ import { returnSerialsToQuarantine } from '../../../inventory/domain/return-seri
 function saleReturnFingerprint(
   saleId: string,
   items: { saleItemId: string; quantity: Prisma.Decimal.Value; condition: string; serials?: string[] }[],
+  refund?: { method: string; amount: Prisma.Decimal.Value; reference?: string },
 ) {
   return {
     saleId,
+    // Phase 10 (BD-23): the tender handed back is part of the request, so
+    // replaying a key that refunded 50 in CASH with one refunding 50 by
+    // CARD - or refunding nothing at all - must be rejected rather than
+    // silently returning the first return. Money leaving the drawer and
+    // money leaving a card terminal are not the same event.
+    refund: refund ? { method: refund.method, amount: new Prisma.Decimal(refund.amount).toString() } : null,
     items: items
       .map((i) => ({
         saleItemId: i.saleItemId,
@@ -92,8 +102,14 @@ export class CreateSaleReturnUseCase {
               // physical units is rejected rather than silently handed
               // the original return.
               existing.items.map((i) => ({ ...i, serials: i.serials.map((x) => x.serialNumber.serial) })),
+              // Rebuilt from what was STORED, so the comparison is against
+              // the refund that actually happened, never a re-read of the
+              // incoming request.
+              existing.refundMethod && existing.refundAmount
+                ? { method: existing.refundMethod, amount: existing.refundAmount }
+                : undefined,
             ),
-            saleReturnFingerprint(saleId, input.items),
+            saleReturnFingerprint(saleId, input.items, input.refund),
           );
           return existing;
         }
@@ -184,6 +200,16 @@ export class CreateSaleReturnUseCase {
           returnNumber: documentNumberFromId('SRET', returnId),
           idempotencyKey: input.idempotencyKey,
           reason: input.reason,
+          // Phase 10 (BD-23): the refund tender is written HERE, in the
+          // insert, not patched on afterwards - `sale_returns` is
+          // append-only at the grant level (SELECT + INSERT, no UPDATE) and
+          // that guarantee is preserved rather than relaxed to make this
+          // feature fit. The amount is validated against the return credit
+          // further down; a failure there rolls back this insert with it,
+          // so an invalid refund can never persist.
+          refundMethod: input.refund?.method,
+          refundAmount: input.refund?.amount,
+          refundReference: input.refund?.reference,
           createdBy: actor.id,
         },
       });
@@ -443,13 +469,63 @@ export class CreateSaleReturnUseCase {
         }
       }
 
-      if (sale.customerId && totalCredit.greaterThan(0)) {
+      // ---------------------------------------------------------------
+      // Phase 10 (BD-23): the refund tender.
+      // ---------------------------------------------------------------
+      const refundAmount = input.refund ? round4(new Prisma.Decimal(input.refund.amount)) : new Prisma.Decimal(0);
+
+      if (refundAmount.greaterThan(totalCredit)) {
+        throw new ValidationFailedError('The refund cannot exceed the credit due for this return', {
+          refundAmount: refundAmount.toString(),
+          returnCredit: totalCredit.toString(),
+        });
+      }
+
+      // A walk-in has no ledger for a remainder to sit on, so the refund
+      // must settle the whole credit. This is FORCED BY THE DATA MODEL,
+      // not an invented policy - it is the same shape as the existing rule
+      // that a walk-in SALE must be paid in full. Without it, the
+      // difference would simply vanish.
+      if (!sale.customerId && totalCredit.greaterThan(0) && !refundAmount.equals(totalCredit)) {
+        throw new ValidationFailedError(
+          'A walk-in return must be refunded in full - there is no customer account for the balance to sit on',
+          { returnCredit: totalCredit.toString(), refundAmount: refundAmount.toString() },
+        );
+      }
+
+      if (input.refund && refundAmount.greaterThan(0)) {
+        // A CASH refund is physical money leaving the drawer, so it enters
+        // the shift's ledger in this same transaction - the counterpart of
+        // the SALE_TENDER row a cash sale writes. Without this, every
+        // refunding shift would show a phantom shortage its cashier could
+        // not explain.
+        if (input.refund.method === 'CASH') {
+          const shift = await findActiveShift(tx, actor.tenantId, actor.id);
+          if (!shift) {
+            throw new ConflictDomainError('An open shift is required to refund cash');
+          }
+          await recordCashTransaction(tx, {
+            businessId: actor.tenantId,
+            shiftId: shift.id,
+            type: 'SALE_REFUND',
+            amount: refundAmount,
+            referenceType: 'SaleReturn',
+            referenceId: saleReturn.id,
+            reason: `Refund on return ${saleReturn.returnNumber}`,
+            createdBy: actor.id,
+          });
+        }
+      }
+
+      // The customer's ledger takes only what was NOT handed back in cash.
+      const ledgerCredit = round4(totalCredit.minus(refundAmount));
+      if (sale.customerId && ledgerCredit.greaterThan(0)) {
         await tx.customerTransaction.create({
           data: {
             businessId: actor.tenantId,
             customerId: sale.customerId,
             type: 'SALE_RETURN',
-            amount: totalCredit.negated(),
+            amount: ledgerCredit.negated(),
             referenceType: 'SaleReturn',
             referenceId: saleReturn.id,
             description: `Sale return credit against ${sale.saleNumber}`,
@@ -466,6 +542,7 @@ export class CreateSaleReturnUseCase {
         totalCredit,
         returnInCost,
         damageWriteOff,
+        refund: input.refund && refundAmount.greaterThan(0) ? { method: input.refund.method, amount: refundAmount } : null,
       });
       if (returnJournalLines.length > 0) {
         await this.accounting.postEntry(tx, {

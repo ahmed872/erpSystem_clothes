@@ -41,6 +41,14 @@ const SYSTEM_ACCOUNTS: SystemAccountSeed[] = [
   { code: '5100', name: 'Cost of Goods Sold', type: 'EXPENSE', normalBalance: 'DEBIT', parentCode: '5000', mappingKey: 'COGS' },
   { code: '5200', name: 'Inventory Shrinkage / Write-off', type: 'EXPENSE', normalBalance: 'DEBIT', parentCode: '5000', mappingKey: 'INVENTORY_SHRINKAGE' },
   { code: '5300', name: 'Internal Consumption Expense', type: 'EXPENSE', normalBalance: 'DEBIT', parentCode: '5000', mappingKey: 'INTERNAL_CONSUMPTION_EXPENSE' },
+  // Phase 10 (BD-17 rule 8): the CONFIGURABLE cash variance account. A
+  // shortage debits it, an overage credits it. One account for both
+  // directions, matching the approved policy's wording ("a configurable
+  // accounting account", singular) and standard cash over/short practice -
+  // deliberately unlike the shrinkage/gain PAIR used for inventory, where
+  // the two directions carry genuinely different operational meaning.
+  // Businesses that want their own account only have to remap the key.
+  { code: '5400', name: 'Cash Over / Short', type: 'EXPENSE', normalBalance: 'DEBIT', parentCode: '5000', mappingKey: 'CASH_VARIANCE' },
 ];
 
 /**

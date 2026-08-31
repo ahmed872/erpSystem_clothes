@@ -132,7 +132,7 @@ export class FinancialReportsUseCase {
             'Operating expenses here are INVENTORY-RELATED ONLY (shrinkage, internal consumption). No expense-management module exists, so rent, salaries, utilities and similar costs cannot be recorded and are NOT represented. Net Profit carries the same limitation and is not a complete business profit figure.',
           discounts: 'Discounts are not a P&L line: revenue is posted already net of discount, so no General Ledger fact backs a separate discount figure. See the sales reports for discount metrics.',
           walkInReturns:
-            'Walk-in (no-customer) sale returns do NOT reverse revenue in the General Ledger (documented limitation #32), so this net revenue figure is not reduced by them.',
+            'Walk-in (no-customer) sale returns DO reverse revenue from Phase 10 onward, because the refund tender handed back is recorded as a real operational fact (this closed limitation #32). Walk-in returns recorded BEFORE Phase 10 carry no refund fact and did not reduce revenue; those historical entries are never rewritten, so periods spanning that change may show the older treatment.',
         },
         range: { from: ctx.range.from.toISOString(), to: ctx.range.toExclusive.toISOString(), timezone: ctx.range.timezone },
       };

@@ -147,7 +147,8 @@ describe('Sales: concurrency, permissions, tenant isolation (e2e, real Postgres)
         request(app.getHttpServer())
           .post(`/api/v1/sales/${earlier.body.data.id}/returns`)
           .set('Authorization', auth())
-          .send({ items: [{ saleItemId: earlierItemId, quantity: 2, condition: 'SELLABLE' }] }),
+          // Phase 10 (BD-23): walk-in returns are refunded in full. 2 x 10.
+          .send({ items: [{ saleItemId: earlierItemId, quantity: 2, condition: 'SELLABLE' }], refund: { method: 'CASH', amount: 20 } }),
       ]);
       expect(newSaleRes.status).toBe(201);
       expect(returnRes.status).toBe(201);
@@ -175,7 +176,10 @@ describe('Sales: concurrency, permissions, tenant isolation (e2e, real Postgres)
           request(app.getHttpServer())
             .post(`/api/v1/sales/${sale.body.data.id}/returns`)
             .set('Authorization', auth())
-            .send({ items: [{ saleItemId, quantity: qty }] }),
+            // Phase 10 (BD-23): each concurrent walk-in return refunds its
+            // own full credit (qty x 10) - the loser is still rejected on
+            // quantity, which is what this test is actually about.
+            .send({ items: [{ saleItemId, quantity: qty }], refund: { method: 'CASH', amount: qty * 10 } }),
         ),
       );
       const succeeded = results.filter((r) => r.status === 201);
@@ -231,10 +235,19 @@ describe('Sales: concurrency, permissions, tenant isolation (e2e, real Postgres)
     });
 
     it('a Cashier CAN sell (has sales.create + shifts.open/close) but is FORBIDDEN from actions outside their template (e.g. editing another user)', async () => {
+      // Phase 10 (BD-17 rule 10): the Cashier takes their own register -
+      // one open shift per register, and the fixture owner already holds
+      // the default one.
+      const cashierRegister = await request(app.getHttpServer())
+        .post('/api/v1/cash-registers')
+        .set('Authorization', auth())
+        .send({ branchId: biz.branchId, name: 'Till 2', code: 'TILL-2-CONC' })
+        .expect(201);
+
       const openShift = await request(app.getHttpServer())
         .post('/api/v1/sales/shifts/open')
         .set('Authorization', `Bearer ${cashierToken}`)
-        .send({ warehouseId: biz.warehouseId })
+        .send({ warehouseId: biz.warehouseId, cashRegisterId: cashierRegister.body.data.id, openingFloat: 0 })
         .expect(201);
       expect(openShift.body.data.status).toBe('OPEN');
 
@@ -245,7 +258,15 @@ describe('Sales: concurrency, permissions, tenant isolation (e2e, real Postgres)
         .expect(201);
       expect(sale.body.data.status).toBe('COMPLETED');
 
-      await request(app.getHttpServer()).post('/api/v1/sales/shifts/close').set('Authorization', `Bearer ${cashierToken}`).expect(200);
+      // Phase 10 (BD-17 rule 4): closing is a BLIND COUNT, so the cashier
+      // submits what they counted. Counting zero against a cash sale
+      // deliberately produces a shortage here, which incidentally proves a
+      // Cashier can close with a variance and no approval (rule 9).
+      await request(app.getHttpServer())
+        .post('/api/v1/sales/shifts/close')
+        .set('Authorization', `Bearer ${cashierToken}`)
+        .send({ countedCash: 0 })
+        .expect(200);
 
       const forbidden = await request(app.getHttpServer())
         .post('/api/v1/users')
