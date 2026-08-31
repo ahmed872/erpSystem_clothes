@@ -17,6 +17,7 @@ import { GetSaleUseCase } from './application/sales/get-sale.use-case';
 import { ListSalesUseCase } from './application/sales/list-sales.use-case';
 import { CreateSaleReturnUseCase } from './application/returns/create-sale-return.use-case';
 import { CreateSalePaymentUseCase } from './application/payments/create-sale-payment.use-case';
+import { CreateExchangeUseCase } from './application/exchanges/create-exchange.use-case';
 import { FinanceModule } from '../finance/finance.module';
 
 @Module({
@@ -40,6 +41,7 @@ import { FinanceModule } from '../finance/finance.module';
     ListSalesUseCase,
     CreateSaleReturnUseCase,
     CreateSalePaymentUseCase,
+    CreateExchangeUseCase,
   ],
 })
 export class SalesModule {}

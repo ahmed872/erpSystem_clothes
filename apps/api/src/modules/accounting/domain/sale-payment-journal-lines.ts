@@ -8,6 +8,10 @@ const SALE_TENDER_KEY: Record<SalePaymentMethod, AccountingMappingKey> = {
   CARD: 'TENDER_CARD',
   WALLET: 'TENDER_WALLET',
   OTHER: 'TENDER_OTHER',
+  // Phase 10 (Exchanges): not a tender at all. No money moves; the value
+  // of the goods handed back is parked in a clearing account that the
+  // matching return credits by the same figure, so the pair nets to zero.
+  EXCHANGE_CREDIT: 'EXCHANGE_CLEARING',
 };
 
 /** A later payment against a credit sale: Dr the tender account, Cr

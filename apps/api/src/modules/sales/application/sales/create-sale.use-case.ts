@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { Prisma } from '@prisma/client';
 import type { CreateSaleInput } from '@retail/shared-validation';
-import { PrismaService } from '../../../../common/prisma/prisma.service';
+import { PrismaService, TenantTx } from '../../../../common/prisma/prisma.service';
 import { AuditService } from '../../../audit/audit.service';
 import { InventoryEngineService } from '../../../../engines/inventory/inventory-engine.service';
 import { EffectivePermissionsService } from '../../../../common/authorization/effective-permissions.service';
@@ -131,679 +131,737 @@ export class CreateSaleUseCase {
   ) {}
 
   async execute(actor: RequestUser, input: CreateSaleInput) {
-    return this.prisma.withTenant(actor.tenantId, async (tx) => {
-      if (input.idempotencyKey) {
-        const existing = await tx.sale.findFirst({
-          where: { businessId: actor.tenantId, idempotencyKey: input.idempotencyKey },
-          include: { items: true, payments: true },
-        });
-        // The REDEEM row is the record of what was redeemed - nothing is
-        // stored on the Sale itself, so a replay reads it back from the
-        // ledger to rebuild the original request's fingerprint.
-        const existingEvents = existing
-          ? await tx.customerPoints.findMany({
-              where: { businessId: actor.tenantId, referenceType: 'Sale', referenceId: existing.id, type: 'REDEEM' },
-            })
-          : [];
-        // Phase 8D: promotions ALSO contribute to `Sale.discountAmount`,
-        // so the client's own requested discount is what remains after
-        // BOTH server contributions are removed. Without this, every
-        // replay of a promoted sale would be misread as a mismatched
-        // payload and rejected 409. `discountApplied` is the EFFECTIVE
-        // contribution after the BD-11 cap, which is exactly what makes
-        // this subtraction exact.
-        // Rebuilds each line's sold serials from the append-only link
-        // rows, so a replay is compared against what was actually sold.
-        const existingSerialsByItem = new Map<string, string[]>();
-        if (existing) {
-          const links = await tx.saleItemSerial.findMany({
-            where: { businessId: actor.tenantId, saleId: existing.id },
-            include: { serialNumber: { select: { serial: true } } },
-          });
-          for (const link of links) {
-            const list = existingSerialsByItem.get(link.saleItemId) ?? [];
-            list.push(link.serialNumber.serial);
-            existingSerialsByItem.set(link.saleItemId, list);
-          }
-        }
-        const existingPromotionDiscount = existing
-          ? (
-              await tx.salePromotionApplication.findMany({
-                where: { businessId: actor.tenantId, saleId: existing.id },
-                select: { discountApplied: true },
-              })
-            ).reduce((sum, a) => sum.plus(a.discountApplied), new Prisma.Decimal(0))
-          : new Prisma.Decimal(0);
-        if (existing) {
-          assertIdempotentReplayMatches(
-            saleFingerprint(
-              existing.warehouseId,
-              existing.customerId,
-              existing.items.map((i) => ({ ...i, serials: existingSerialsByItem.get(i.id) ?? [] })),
-              existing.payments,
-              existingRedeemedPoints(existingEvents),
-              // The stored sale discount minus what the server itself
-              // contributed (loyalty redemption + promotions) = what the
-              // client asked for.
-              existing.discountAmount.minus(existingEvents[0]?.basisAmount ?? 0).minus(existingPromotionDiscount),
-            ),
-            saleFingerprint(
-              input.warehouseId,
-              input.customerId ?? null,
-              input.items,
-              input.payments,
-              input.redeemPoints ?? null,
-              // The CAPPED manual total, because that is what the stored
-              // `Sale.discountAmount` reflects after BD-12. Comparing the
-              // raw request against a capped stored value would reject
-              // every legitimate replay of an over-discounted line.
-              input.items.reduce(
-                (sum, i) =>
-                  sum.plus(capManualDiscount(i.discountAmount, round4(new Prisma.Decimal(i.unitPrice).times(i.quantity)))),
-                new Prisma.Decimal(0),
-              ),
-            ),
-          );
-          return existing;
-        }
-      }
+    return this.prisma.withTenant(actor.tenantId, (tx) => this.executeInTx(tx, actor, input));
+  }
 
-      const warehouse = await tx.warehouse.findFirst({ where: { id: input.warehouseId, businessId: actor.tenantId } });
-      if (!warehouse) throw new NotFoundDomainError('Warehouse', input.warehouseId);
-
-      const shift = await findActiveShift(tx, actor.tenantId, actor.id);
-      if (!shift) throw new ConflictDomainError('An open shift is required to complete a sale');
-      if (shift.warehouseId !== input.warehouseId) {
-        throw new ValidationFailedError('Your open shift is for a different warehouse - close it and open a new one to sell from this warehouse');
-      }
-
-      let customer = null;
-      if (input.customerId) {
-        // Canonical lock order across the whole system is
-        // Customer -> Sale -> StockBalance. The customer row is locked
-        // BEFORE any StockBalance lock is taken below, and
-        // CreateSaleReturnUseCase takes the same lock before lockSale, so
-        // a sale and a return can never form a cycle by grabbing a
-        // customer and a stock row in opposite orders.
-        //
-        // The lock is taken for every customer sale, not only redeeming
-        // ones: the loyalty balance is read and written under it, and
-        // taking it conditionally would mean two different lock orders
-        // depending on the request payload.
-        await lockCustomer(tx, actor.tenantId, input.customerId);
-        customer = await tx.customer.findFirst({ where: { id: input.customerId, businessId: actor.tenantId } });
-        if (!customer) throw new NotFoundDomainError('Customer', input.customerId);
-        if (!customer.isActive) throw new ValidationFailedError('Cannot sell to an inactive customer');
-      }
-
-      const redeemPoints = new Prisma.Decimal(input.redeemPoints ?? 0);
-      if (redeemPoints.greaterThan(0) && !input.customerId) {
-        throw new ValidationFailedError('Loyalty points can only be redeemed on a sale attached to a customer', {
-          redeemPoints: redeemPoints.toString(),
-        });
-      }
-
-      const variantIds = input.items.map((i) => i.variantId);
-      if (new Set(variantIds).size !== variantIds.length) {
-        throw new ValidationFailedError('Duplicate variantId in sale items');
-      }
-      const variants = await tx.productVariant.findMany({
-        where: { id: { in: variantIds }, businessId: actor.tenantId },
-        // `product.categoryId` is needed so a CATEGORY-targeted promotion
-        // can be matched without a second query per line.
-        // Phase 10 (BD-18): the product's own tax and explicit exemption are
-        // loaded here so tax resolves from stored configuration, never from
-        // anything the caller sent.
-        include: { product: { select: { id: true, categoryId: true, tracksSerialNumbers: true, taxId: true, taxExempt: true } } },
+  /**
+   * The whole of a sale, inside a transaction the CALLER owns.
+   *
+   * Split out in Phase 10 so an exchange can run a return and a sale as
+   * ONE atomic event. Nothing about the sale changed in the split: the
+   * body is byte-identical, and `execute` above is now the only thing
+   * that opens a transaction. An exchange that half-succeeded - goods
+   * back, replacement not out - is exactly the failure this prevents.
+   */
+  async executeInTx(
+    tx: TenantTx,
+    actor: RequestUser,
+    input: CreateSaleInput,
+    /**
+     * Phase 10 (Exchanges): SERVER-SET, never reachable from a request.
+     * The credit of the return this sale replaces, tendered against it as
+     * an EXCHANGE_CREDIT payment. A client that could set this could pay
+     * for anything with nothing, which is why it is a parameter and not a
+     * request field - and why `salePaymentInputSchema` does not admit the
+     * EXCHANGE_CREDIT method at all.
+     */
+    exchange?: { returnId: string; credit: Prisma.Decimal },
+  ) {
+    if (input.idempotencyKey) {
+      const existing = await tx.sale.findFirst({
+        where: { businessId: actor.tenantId, idempotencyKey: input.idempotencyKey },
+        include: { items: true, payments: true },
       });
-      if (variants.length !== variantIds.length) {
-        const found = new Set(variants.map((v) => v.id));
-        throw new NotFoundDomainError('ProductVariant', variantIds.filter((id) => !found.has(id)).join(', '));
-      }
-
-      // ---------------------------------------------------------------
-      // Phase 8E / BD-13: serial identity is MANDATORY at sale creation
-      // for a serial-tracked variant. Before this, selling such a product
-      // recorded no serial at all, so nothing in the system knew which
-      // physical unit the customer walked out with - the gap that made
-      // warranty registration unverifiable (Known Issue #47).
-      //
-      // Whether serials are required is decided by the PRODUCT's own
-      // tracking flag, never by the request: a client cannot opt out by
-      // omitting the field, and cannot smuggle serials onto a line whose
-      // product does not track them.
-      // ---------------------------------------------------------------
-      const variantsById = new Map(variants.map((v) => [v.id, v]));
-      for (const item of input.items) {
-        const tracks = variantsById.get(item.variantId)!.product.tracksSerialNumbers;
-        const supplied = item.serials ?? [];
-        if (tracks && supplied.length === 0) {
-          throw new ValidationFailedError(
-            'This product is serial-tracked - the serial number(s) being sold must be supplied for this line',
-            { variantId: item.variantId, quantity: new Prisma.Decimal(item.quantity).toString() },
-          );
-        }
-        if (!tracks && supplied.length > 0) {
-          throw new ValidationFailedError('This product is not serial-tracked - serial numbers cannot be supplied for this line', {
-            variantId: item.variantId,
-          });
-        }
-        if (tracks && !new Prisma.Decimal(item.quantity).equals(supplied.length)) {
-          throw new ValidationFailedError('The number of serials supplied must equal the quantity sold for this line', {
-            variantId: item.variantId,
-            quantity: new Prisma.Decimal(item.quantity).toString(),
-            serialsSupplied: supplied.length,
-          });
+      // The REDEEM row is the record of what was redeemed - nothing is
+      // stored on the Sale itself, so a replay reads it back from the
+      // ledger to rebuild the original request's fingerprint.
+      const existingEvents = existing
+        ? await tx.customerPoints.findMany({
+            where: { businessId: actor.tenantId, referenceType: 'Sale', referenceId: existing.id, type: 'REDEEM' },
+          })
+        : [];
+      // Phase 8D: promotions ALSO contribute to `Sale.discountAmount`,
+      // so the client's own requested discount is what remains after
+      // BOTH server contributions are removed. Without this, every
+      // replay of a promoted sale would be misread as a mismatched
+      // payload and rejected 409. `discountApplied` is the EFFECTIVE
+      // contribution after the BD-11 cap, which is exactly what makes
+      // this subtraction exact.
+      // Rebuilds each line's sold serials from the append-only link
+      // rows, so a replay is compared against what was actually sold.
+      const existingSerialsByItem = new Map<string, string[]>();
+      if (existing) {
+        const links = await tx.saleItemSerial.findMany({
+          where: { businessId: actor.tenantId, saleId: existing.id },
+          include: { serialNumber: { select: { serial: true } } },
+        });
+        for (const link of links) {
+          const list = existingSerialsByItem.get(link.saleItemId) ?? [];
+          list.push(link.serialNumber.serial);
+          existingSerialsByItem.set(link.saleItemId, list);
         }
       }
-
-      // Each line's gross is rounded to the monetary scale BEFORE being
-      // summed, so that SUM(line merchandise value) equals
-      // `subtotal - discountAmount` exactly. That equality is what lets a
-      // full return claw back and restore loyalty exactly (see
-      // return-credit.ts). For integer quantities the rounding is the
-      // identity, so no pre-existing sale's arithmetic changes; it only
-      // bites for fractional quantities at 4-dp prices.
-      // ---------------------------------------------------------------
-      // Phase 10 (BD-18): TAX, resolved and computed SERVER-SIDE.
-      //
-      // The request no longer carries `taxAmount` at all - a client cannot
-      // state what tax it would like to pay. Everything below derives from
-      // the tenant's own tax configuration.
-      //
-      // In INCLUSIVE mode the unit price and the manual discount arrive
-      // expressed in shelf terms and are converted to net HERE, at the line
-      // boundary. From this point on the pipeline is byte-identical to
-      // EXCLUSIVE mode, which is what keeps BD-1, BD-2, BD-3, BD-11 and
-      // BD-12 operating on exactly the values they were approved for.
-      // ---------------------------------------------------------------
-      const taxCtx = await this.tax.loadContext(tx, actor.tenantId);
-      const taxCache = new Map<string, { id: string; ratePercent: Prisma.Decimal; isActive: boolean } | null>();
-      const lineTaxByVariant = new Map<string, ResolvedLineTax>();
-      const netUnitPrice = new Map<string, Prisma.Decimal>();
-      const netManualInput = new Map<string, Prisma.Decimal>();
-      for (const item of input.items) {
-        const product = variantsById.get(item.variantId)!.product;
-        const resolved = await this.tax.resolveLineTax(tx, actor.tenantId, taxCtx, product, item.taxExempt ?? false, taxCache);
-        lineTaxByVariant.set(item.variantId, resolved);
-        netUnitPrice.set(item.variantId, this.tax.toNet(item.unitPrice, resolved, taxCtx));
-        netManualInput.set(item.variantId, this.tax.toNet(item.discountAmount, resolved, taxCtx));
+      const existingPromotionDiscount = existing
+        ? (
+            await tx.salePromotionApplication.findMany({
+              where: { businessId: actor.tenantId, saleId: existing.id },
+              select: { discountApplied: true },
+            })
+          ).reduce((sum, a) => sum.plus(a.discountApplied), new Prisma.Decimal(0))
+        : new Prisma.Decimal(0);
+      if (existing) {
+        assertIdempotentReplayMatches(
+          saleFingerprint(
+            existing.warehouseId,
+            existing.customerId,
+            existing.items.map((i) => ({ ...i, serials: existingSerialsByItem.get(i.id) ?? [] })),
+            // Phase 10 (Exchanges): the EXCHANGE_CREDIT tender is produced
+            // by the SERVER, never sent by a client, so it is no part of
+            // the request being replayed - the same reasoning that keeps
+            // promotion and redemption discounts out of the comparison
+            // below. Leaving it in would make every exchange replay look
+            // like a mismatch.
+            existing.payments.filter((p) => p.method !== 'EXCHANGE_CREDIT'),
+            existingRedeemedPoints(existingEvents),
+            // The stored sale discount minus what the server itself
+            // contributed (loyalty redemption + promotions) = what the
+            // client asked for.
+            existing.discountAmount.minus(existingEvents[0]?.basisAmount ?? 0).minus(existingPromotionDiscount),
+          ),
+          saleFingerprint(
+            input.warehouseId,
+            input.customerId ?? null,
+            input.items,
+            input.payments,
+            input.redeemPoints ?? null,
+            // The CAPPED manual total, because that is what the stored
+            // `Sale.discountAmount` reflects after BD-12. Comparing the
+            // raw request against a capped stored value would reject
+            // every legitimate replay of an over-discounted line.
+            input.items.reduce(
+              (sum, i) =>
+                sum.plus(capManualDiscount(i.discountAmount, round4(new Prisma.Decimal(i.unitPrice).times(i.quantity)))),
+              new Prisma.Decimal(0),
+            ),
+          ),
+        );
+        return existing;
       }
+    }
 
-      const lineGross = new Map<string, Prisma.Decimal>();
-      // Approved decision BD-12: the manual discount is capped at the
-      // line gross UNIVERSALLY, so net merchandise value can never go
-      // negative on any line - not only on lines a promotion reached.
-      // For a well-formed line this is the identity.
-      const cappedManual = new Map<string, Prisma.Decimal>();
-      let subtotal = new Prisma.Decimal(0);
-      let discountAmount = new Prisma.Decimal(0);
-      let taxAmount = new Prisma.Decimal(0);
-      for (const item of input.items) {
-        const gross = round4(netUnitPrice.get(item.variantId)!.times(item.quantity));
-        lineGross.set(item.variantId, gross);
-        const manual = capManualDiscount(netManualInput.get(item.variantId)!, gross);
-        cappedManual.set(item.variantId, manual);
-        subtotal = subtotal.plus(gross);
-        discountAmount = discountAmount.plus(manual);
-      }
-      // `taxAmount` is now computed AFTER every discount is known, once the
-      // final net value of each line is settled - see below.
+    const warehouse = await tx.warehouse.findFirst({ where: { id: input.warehouseId, businessId: actor.tenantId } });
+    if (!warehouse) throw new NotFoundDomainError('Warehouse', input.warehouseId);
 
-      // ---------------------------------------------------------------
-      // Phase 8D: PROMOTIONS, resolved server-side inside this same
-      // transaction and BEFORE loyalty (the approved ordering:
-      // promotion -> redemption -> earning).
+    const shift = await findActiveShift(tx, actor.tenantId, actor.id);
+    if (!shift) throw new ConflictDomainError('An open shift is required to complete a sale');
+    if (shift.warehouseId !== input.warehouseId) {
+      throw new ValidationFailedError('Your open shift is for a different warehouse - close it and open a new one to sell from this warehouse');
+    }
+
+    let customer = null;
+    if (input.customerId) {
+      // Canonical lock order across the whole system is
+      // Customer -> Sale -> StockBalance. The customer row is locked
+      // BEFORE any StockBalance lock is taken below, and
+      // CreateSaleReturnUseCase takes the same lock before lockSale, so
+      // a sale and a return can never form a cycle by grabbing a
+      // customer and a stock row in opposite orders.
       //
-      // The client never supplies promotional pricing: it supplies only
-      // its own manual `discountAmount`, and everything below is computed
-      // from the promotion rules stored in this tenant.
-      //
-      // Evaluation is PER LINE (approved decision BD-10) - quantities are
-      // never aggregated across variants, products or category lines, so
-      // a category "Buy 1 Get 1" over two one-unit lines yields nothing.
-      // At most ONE promotion applies per line (best applicable only);
-      // different lines may carry different promotions.
-      // ---------------------------------------------------------------
-      const saleInstant = new Date();
-      const activePromotions = await resolveActivePromotions(tx, actor.tenantId, saleInstant);
+      // The lock is taken for every customer sale, not only redeeming
+      // ones: the loyalty balance is read and written under it, and
+      // taking it conditionally would mean two different lock orders
+      // depending on the request payload.
+      await lockCustomer(tx, actor.tenantId, input.customerId);
+      customer = await tx.customer.findFirst({ where: { id: input.customerId, businessId: actor.tenantId } });
+      if (!customer) throw new NotFoundDomainError('Customer', input.customerId);
+      if (!customer.isActive) throw new ValidationFailedError('Cannot sell to an inactive customer');
+    }
 
-      const promotionByVariant = new Map<string, SelectedPromotion>();
-      const effectivePromotionByVariant = new Map<string, Prisma.Decimal>();
-      const cappedByVariant = new Map<string, boolean>();
-      const manualDiscountByVariant = new Map<string, Prisma.Decimal>();
+    const redeemPoints = new Prisma.Decimal(input.redeemPoints ?? 0);
+    if (redeemPoints.greaterThan(0) && !input.customerId) {
+      throw new ValidationFailedError('Loyalty points can only be redeemed on a sale attached to a customer', {
+        redeemPoints: redeemPoints.toString(),
+      });
+    }
 
-      if (activePromotions.length > 0) {
-        for (const item of input.items) {
-          const variant = variantsById.get(item.variantId)!;
-          const gross = lineGross.get(item.variantId)!;
-          const best = selectBestPromotion(activePromotions, {
-            variantId: item.variantId,
-            productId: variant.product.id,
-            categoryId: variant.product.categoryId,
-            quantity: new Prisma.Decimal(item.quantity),
-            unitPrice: new Prisma.Decimal(item.unitPrice),
-            lineGross: gross,
-          });
-          if (!best) continue;
+    const variantIds = input.items.map((i) => i.variantId);
+    if (new Set(variantIds).size !== variantIds.length) {
+      throw new ValidationFailedError('Duplicate variantId in sale items');
+    }
+    const variants = await tx.productVariant.findMany({
+      where: { id: { in: variantIds }, businessId: actor.tenantId },
+      // `product.categoryId` is needed so a CATEGORY-targeted promotion
+      // can be matched without a second query per line.
+      // Phase 10 (BD-18): the product's own tax and explicit exemption are
+      // loaded here so tax resolves from stored configuration, never from
+      // anything the caller sent.
+      include: { product: { select: { id: true, categoryId: true, tracksSerialNumbers: true, taxId: true, taxExempt: true } } },
+    });
+    if (variants.length !== variantIds.length) {
+      const found = new Set(variants.map((v) => v.id));
+      throw new NotFoundDomainError('ProductVariant', variantIds.filter((id) => !found.has(id)).join(', '));
+    }
 
-          // Approved decision BD-11: a manual discount and a promotion are
-          // ADDITIVE, capped at the line gross. The promotion is computed
-          // on the GROSS, never on the post-manual price, and exceeding
-          // the gross is capped rather than rejected - the line's net
-          // merchandise value can never go negative.
-          const manual = cappedManual.get(item.variantId)!;
-          const combined = combineManualAndPromotion(manual, best.discount, gross);
-          if (combined.effectivePromotionDiscount.lessThanOrEqualTo(0)) {
-            // The manual discount already consumed the whole line, so the
-            // promotion contributed nothing. No provenance row is written
-            // for money that was never given.
-            continue;
-          }
-
-          promotionByVariant.set(item.variantId, best);
-          effectivePromotionByVariant.set(item.variantId, combined.effectivePromotionDiscount);
-          cappedByVariant.set(item.variantId, combined.cappedAtLineGross);
-          manualDiscountByVariant.set(item.variantId, manual);
-          discountAmount = discountAmount.plus(combined.effectivePromotionDiscount);
-        }
+    // ---------------------------------------------------------------
+    // Phase 8E / BD-13: serial identity is MANDATORY at sale creation
+    // for a serial-tracked variant. Before this, selling such a product
+    // recorded no serial at all, so nothing in the system knew which
+    // physical unit the customer walked out with - the gap that made
+    // warranty registration unverifiable (Known Issue #47).
+    //
+    // Whether serials are required is decided by the PRODUCT's own
+    // tracking flag, never by the request: a client cannot opt out by
+    // omitting the field, and cannot smuggle serials onto a line whose
+    // product does not track them.
+    // ---------------------------------------------------------------
+    const variantsById = new Map(variants.map((v) => [v.id, v]));
+    for (const item of input.items) {
+      const tracks = variantsById.get(item.variantId)!.product.tracksSerialNumbers;
+      const supplied = item.serials ?? [];
+      if (tracks && supplied.length === 0) {
+        throw new ValidationFailedError(
+          'This product is serial-tracked - the serial number(s) being sold must be supplied for this line',
+          { variantId: item.variantId, quantity: new Prisma.Decimal(item.quantity).toString() },
+        );
       }
-
-      // ---------------------------------------------------------------
-      // Phase 8C: LOYALTY REDEMPTION, resolved server-side inside this
-      // same transaction and BEFORE totals are finalised (approved
-      // ordering). Any failure below throws and rolls the whole sale
-      // back - there is no committed redemption without a sale.
-      // ---------------------------------------------------------------
-      const loyaltyDiscountByVariant = new Map<string, Prisma.Decimal>();
-      let redemptionValue = new Prisma.Decimal(0);
-      let redemptionRate: Prisma.Decimal | null = null;
-
-      if (redeemPoints.greaterThan(0)) {
-        redemptionRate = await resolveLoyaltyRedeemRate(tx, actor.tenantId);
-        if (!redemptionRate) {
-          throw new ValidationFailedError(
-            'Loyalty redemption is not configured for this business - no valid redemption rate is set',
-            { setting: 'loyalty.currency_per_point' },
-          );
-        }
-
-        // Balance is read UNDER the customer lock taken above, so two
-        // concurrent redemptions cannot each see the same balance and
-        // together overspend it.
-        const balance = await getCustomerPointsBalance(tx, actor.tenantId, input.customerId!);
-        if (redeemPoints.greaterThan(balance)) {
-          throw new ConflictDomainError(
-            `Cannot redeem ${redeemPoints.toString()} points - the customer's balance is only ${balance.toString()}`,
-            { requested: redeemPoints.toString(), balance: balance.toString() },
-          );
-        }
-
-        redemptionValue = computeRedemptionValue(redeemPoints, redemptionRate);
-        if (redemptionValue.lessThanOrEqualTo(0)) {
-          // Approved decision: an explicit request to spend points is
-          // never silently turned into a no-op that consumes points for
-          // nothing. No minimum threshold is invented and the configured
-          // rate is not adjusted - the request is simply refused.
-          throw new ValidationFailedError(
-            'The requested points convert to no monetary value at the configured redemption rate',
-            { redeemPoints: redeemPoints.toString(), rate: redemptionRate.toString() },
-          );
-        }
-
-        const eligibleLines = input.items.map((item) => ({
+      if (!tracks && supplied.length > 0) {
+        throw new ValidationFailedError('This product is not serial-tracked - serial numbers cannot be supplied for this line', {
           variantId: item.variantId,
-          // Net of BOTH the manual discount and any promotion already
-          // applied - you cannot redeem points against value that has
-          // already been discounted away.
-          eligible: lineGross
-            .get(item.variantId)!
-            .minus(cappedManual.get(item.variantId)!)
-            .minus(effectivePromotionByVariant.get(item.variantId) ?? 0),
-        }));
-        const totalEligible = eligibleLines.reduce((sum, l) => sum.plus(l.eligible), new Prisma.Decimal(0));
-        if (redemptionValue.greaterThan(totalEligible)) {
-          throw new ValidationFailedError(
-            `Redemption value ${redemptionValue.toString()} exceeds the sale's remaining merchandise value ${totalEligible.toString()}`,
-            { redemptionValue: redemptionValue.toString(), eligible: totalEligible.toString() },
-          );
-        }
-
-        for (const [variantId, amount] of allocateRedemption(eligibleLines, redemptionValue)) {
-          loyaltyDiscountByVariant.set(variantId, amount);
-        }
-        // Redemption is folded into LINE discounts, never added at sale
-        // level, so `Sale.discountAmount = SUM(SaleItem.discountAmount)`
-        // still holds and Phase 6's netRevenue keeps working untouched.
-        discountAmount = discountAmount.plus(redemptionValue);
+        });
       }
+      if (tracks && !new Prisma.Decimal(item.quantity).equals(supplied.length)) {
+        throw new ValidationFailedError('The number of serials supplied must equal the quantity sold for this line', {
+          variantId: item.variantId,
+          quantity: new Prisma.Decimal(item.quantity).toString(),
+          serialsSupplied: supplied.length,
+        });
+      }
+    }
 
-      // ---------------------------------------------------------------
-      // Phase 10 (BD-18): the tax on each line, computed from the tenant's
-      // configuration on the line's FINAL net value - after the manual
-      // discount, the promotion and the loyalty redemption. The customer is
-      // taxed on what they actually pay.
-      //
-      // This is the ONE place a tax figure comes into existence for a sale,
-      // and it derives entirely from stored configuration.
-      // ---------------------------------------------------------------
-      const lineTaxAmount = new Map<string, Prisma.Decimal>();
+    // Each line's gross is rounded to the monetary scale BEFORE being
+    // summed, so that SUM(line merchandise value) equals
+    // `subtotal - discountAmount` exactly. That equality is what lets a
+    // full return claw back and restore loyalty exactly (see
+    // return-credit.ts). For integer quantities the rounding is the
+    // identity, so no pre-existing sale's arithmetic changes; it only
+    // bites for fractional quantities at 4-dp prices.
+    // ---------------------------------------------------------------
+    // Phase 10 (BD-18): TAX, resolved and computed SERVER-SIDE.
+    //
+    // The request no longer carries `taxAmount` at all - a client cannot
+    // state what tax it would like to pay. Everything below derives from
+    // the tenant's own tax configuration.
+    //
+    // In INCLUSIVE mode the unit price and the manual discount arrive
+    // expressed in shelf terms and are converted to net HERE, at the line
+    // boundary. From this point on the pipeline is byte-identical to
+    // EXCLUSIVE mode, which is what keeps BD-1, BD-2, BD-3, BD-11 and
+    // BD-12 operating on exactly the values they were approved for.
+    // ---------------------------------------------------------------
+    const taxCtx = await this.tax.loadContext(tx, actor.tenantId);
+    const taxCache = new Map<string, { id: string; ratePercent: Prisma.Decimal; isActive: boolean } | null>();
+    const lineTaxByVariant = new Map<string, ResolvedLineTax>();
+    const netUnitPrice = new Map<string, Prisma.Decimal>();
+    const netManualInput = new Map<string, Prisma.Decimal>();
+    for (const item of input.items) {
+      const product = variantsById.get(item.variantId)!.product;
+      const resolved = await this.tax.resolveLineTax(tx, actor.tenantId, taxCtx, product, item.taxExempt ?? false, taxCache);
+      lineTaxByVariant.set(item.variantId, resolved);
+      netUnitPrice.set(item.variantId, this.tax.toNet(item.unitPrice, resolved, taxCtx));
+      netManualInput.set(item.variantId, this.tax.toNet(item.discountAmount, resolved, taxCtx));
+    }
+
+    const lineGross = new Map<string, Prisma.Decimal>();
+    // Approved decision BD-12: the manual discount is capped at the
+    // line gross UNIVERSALLY, so net merchandise value can never go
+    // negative on any line - not only on lines a promotion reached.
+    // For a well-formed line this is the identity.
+    const cappedManual = new Map<string, Prisma.Decimal>();
+    let subtotal = new Prisma.Decimal(0);
+    let discountAmount = new Prisma.Decimal(0);
+    let taxAmount = new Prisma.Decimal(0);
+    for (const item of input.items) {
+      const gross = round4(netUnitPrice.get(item.variantId)!.times(item.quantity));
+      lineGross.set(item.variantId, gross);
+      const manual = capManualDiscount(netManualInput.get(item.variantId)!, gross);
+      cappedManual.set(item.variantId, manual);
+      subtotal = subtotal.plus(gross);
+      discountAmount = discountAmount.plus(manual);
+    }
+    // `taxAmount` is now computed AFTER every discount is known, once the
+    // final net value of each line is settled - see below.
+
+    // ---------------------------------------------------------------
+    // Phase 8D: PROMOTIONS, resolved server-side inside this same
+    // transaction and BEFORE loyalty (the approved ordering:
+    // promotion -> redemption -> earning).
+    //
+    // The client never supplies promotional pricing: it supplies only
+    // its own manual `discountAmount`, and everything below is computed
+    // from the promotion rules stored in this tenant.
+    //
+    // Evaluation is PER LINE (approved decision BD-10) - quantities are
+    // never aggregated across variants, products or category lines, so
+    // a category "Buy 1 Get 1" over two one-unit lines yields nothing.
+    // At most ONE promotion applies per line (best applicable only);
+    // different lines may carry different promotions.
+    // ---------------------------------------------------------------
+    const saleInstant = new Date();
+    const activePromotions = await resolveActivePromotions(tx, actor.tenantId, saleInstant);
+
+    const promotionByVariant = new Map<string, SelectedPromotion>();
+    const effectivePromotionByVariant = new Map<string, Prisma.Decimal>();
+    const cappedByVariant = new Map<string, boolean>();
+    const manualDiscountByVariant = new Map<string, Prisma.Decimal>();
+
+    if (activePromotions.length > 0) {
       for (const item of input.items) {
-        const lineDiscount = cappedManual
+        const variant = variantsById.get(item.variantId)!;
+        const gross = lineGross.get(item.variantId)!;
+        const best = selectBestPromotion(activePromotions, {
+          variantId: item.variantId,
+          productId: variant.product.id,
+          categoryId: variant.product.categoryId,
+          quantity: new Prisma.Decimal(item.quantity),
+          unitPrice: new Prisma.Decimal(item.unitPrice),
+          lineGross: gross,
+        });
+        if (!best) continue;
+
+        // Approved decision BD-11: a manual discount and a promotion are
+        // ADDITIVE, capped at the line gross. The promotion is computed
+        // on the GROSS, never on the post-manual price, and exceeding
+        // the gross is capped rather than rejected - the line's net
+        // merchandise value can never go negative.
+        const manual = cappedManual.get(item.variantId)!;
+        const combined = combineManualAndPromotion(manual, best.discount, gross);
+        if (combined.effectivePromotionDiscount.lessThanOrEqualTo(0)) {
+          // The manual discount already consumed the whole line, so the
+          // promotion contributed nothing. No provenance row is written
+          // for money that was never given.
+          continue;
+        }
+
+        promotionByVariant.set(item.variantId, best);
+        effectivePromotionByVariant.set(item.variantId, combined.effectivePromotionDiscount);
+        cappedByVariant.set(item.variantId, combined.cappedAtLineGross);
+        manualDiscountByVariant.set(item.variantId, manual);
+        discountAmount = discountAmount.plus(combined.effectivePromotionDiscount);
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 8C: LOYALTY REDEMPTION, resolved server-side inside this
+    // same transaction and BEFORE totals are finalised (approved
+    // ordering). Any failure below throws and rolls the whole sale
+    // back - there is no committed redemption without a sale.
+    // ---------------------------------------------------------------
+    const loyaltyDiscountByVariant = new Map<string, Prisma.Decimal>();
+    let redemptionValue = new Prisma.Decimal(0);
+    let redemptionRate: Prisma.Decimal | null = null;
+
+    if (redeemPoints.greaterThan(0)) {
+      redemptionRate = await resolveLoyaltyRedeemRate(tx, actor.tenantId);
+      if (!redemptionRate) {
+        throw new ValidationFailedError(
+          'Loyalty redemption is not configured for this business - no valid redemption rate is set',
+          { setting: 'loyalty.currency_per_point' },
+        );
+      }
+
+      // Balance is read UNDER the customer lock taken above, so two
+      // concurrent redemptions cannot each see the same balance and
+      // together overspend it.
+      const balance = await getCustomerPointsBalance(tx, actor.tenantId, input.customerId!);
+      if (redeemPoints.greaterThan(balance)) {
+        throw new ConflictDomainError(
+          `Cannot redeem ${redeemPoints.toString()} points - the customer's balance is only ${balance.toString()}`,
+          { requested: redeemPoints.toString(), balance: balance.toString() },
+        );
+      }
+
+      redemptionValue = computeRedemptionValue(redeemPoints, redemptionRate);
+      if (redemptionValue.lessThanOrEqualTo(0)) {
+        // Approved decision: an explicit request to spend points is
+        // never silently turned into a no-op that consumes points for
+        // nothing. No minimum threshold is invented and the configured
+        // rate is not adjusted - the request is simply refused.
+        throw new ValidationFailedError(
+          'The requested points convert to no monetary value at the configured redemption rate',
+          { redeemPoints: redeemPoints.toString(), rate: redemptionRate.toString() },
+        );
+      }
+
+      const eligibleLines = input.items.map((item) => ({
+        variantId: item.variantId,
+        // Net of BOTH the manual discount and any promotion already
+        // applied - you cannot redeem points against value that has
+        // already been discounted away.
+        eligible: lineGross
           .get(item.variantId)!
-          .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
-          .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
-        const netLineValue = lineGross.get(item.variantId)!.minus(lineDiscount);
-        const lineTax = this.tax.computeLineTax(netLineValue, lineTaxByVariant.get(item.variantId)!);
-        lineTaxAmount.set(item.variantId, lineTax);
-        taxAmount = taxAmount.plus(lineTax);
+          .minus(cappedManual.get(item.variantId)!)
+          .minus(effectivePromotionByVariant.get(item.variantId) ?? 0),
+      }));
+      const totalEligible = eligibleLines.reduce((sum, l) => sum.plus(l.eligible), new Prisma.Decimal(0));
+      if (redemptionValue.greaterThan(totalEligible)) {
+        throw new ValidationFailedError(
+          `Redemption value ${redemptionValue.toString()} exceeds the sale's remaining merchandise value ${totalEligible.toString()}`,
+          { redemptionValue: redemptionValue.toString(), eligible: totalEligible.toString() },
+        );
       }
 
-      const totalAmount = subtotal.minus(discountAmount).plus(taxAmount);
-
-      let paidNow = new Prisma.Decimal(0);
-      for (const p of input.payments) paidNow = paidNow.plus(p.amount);
-      if (paidNow.greaterThan(totalAmount)) {
-        throw new ValidationFailedError('Payments exceed the sale total - overpayment/change-due is not tracked, tender the exact amount owed');
+      for (const [variantId, amount] of allocateRedemption(eligibleLines, redemptionValue)) {
+        loyaltyDiscountByVariant.set(variantId, amount);
       }
-      if (!input.customerId && !paidNow.equals(totalAmount)) {
-        throw new ValidationFailedError('A walk-in sale (no customer) must be paid in full at the time of sale');
-      }
+      // Redemption is folded into LINE discounts, never added at sale
+      // level, so `Sale.discountAmount = SUM(SaleItem.discountAmount)`
+      // still holds and Phase 6's netRevenue keeps working untouched.
+      discountAmount = discountAmount.plus(redemptionValue);
+    }
 
-      const id = randomUUID();
-      const sale = await tx.sale.create({
+    // ---------------------------------------------------------------
+    // Phase 10 (BD-18): the tax on each line, computed from the tenant's
+    // configuration on the line's FINAL net value - after the manual
+    // discount, the promotion and the loyalty redemption. The customer is
+    // taxed on what they actually pay.
+    //
+    // This is the ONE place a tax figure comes into existence for a sale,
+    // and it derives entirely from stored configuration.
+    // ---------------------------------------------------------------
+    const lineTaxAmount = new Map<string, Prisma.Decimal>();
+    for (const item of input.items) {
+      const lineDiscount = cappedManual
+        .get(item.variantId)!
+        .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
+        .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
+      const netLineValue = lineGross.get(item.variantId)!.minus(lineDiscount);
+      const lineTax = this.tax.computeLineTax(netLineValue, lineTaxByVariant.get(item.variantId)!);
+      lineTaxAmount.set(item.variantId, lineTax);
+      taxAmount = taxAmount.plus(lineTax);
+    }
+
+    const totalAmount = subtotal.minus(discountAmount).plus(taxAmount);
+
+    // Phase 10 (Exchanges): the returned goods' credit counts as tendered.
+    // It is applied in FULL, which is why the replacement must be worth at
+    // least the credit - see the check immediately below.
+    const payments = exchange
+      ? [{ amount: exchange.credit, method: 'EXCHANGE_CREDIT' as const, reference: undefined }, ...input.payments]
+      : input.payments;
+
+    let paidNow = new Prisma.Decimal(0);
+    for (const p of payments) paidNow = paidNow.plus(p.amount);
+
+    if (exchange && exchange.credit.greaterThan(totalAmount)) {
+      // A DOWNWARD exchange - swapping for something cheaper - is a return
+      // plus a separate sale, and the difference is real money going back
+      // to the customer. The return document already models that event
+      // exactly, with its own refund tender; expressing it here would need
+      // a two-part refund the append-only `sale_returns` row cannot carry.
+      // Rejecting with both figures named is more useful than inventing a
+      // shape for it.
+      throw new ValidationFailedError(
+        'The replacement must be worth at least the credit of the goods returned. For a cheaper replacement, record the return and the new sale separately so the difference is refunded as money.',
+        { returnCredit: exchange.credit.toString(), replacementTotal: totalAmount.toString() },
+      );
+    }
+
+    if (paidNow.greaterThan(totalAmount)) {
+      throw new ValidationFailedError('Payments exceed the sale total - overpayment/change-due is not tracked, tender the exact amount owed');
+    }
+    if (!input.customerId && !paidNow.equals(totalAmount)) {
+      throw new ValidationFailedError('A walk-in sale (no customer) must be paid in full at the time of sale');
+    }
+
+    const id = randomUUID();
+    const sale = await tx.sale.create({
+      data: {
+        id,
+        businessId: actor.tenantId,
+        branchId: warehouse.branchId,
+        warehouseId: input.warehouseId,
+        customerId: input.customerId,
+        shiftId: shift.id,
+        saleNumber: documentNumberFromId('INV', id),
+        idempotencyKey: input.idempotencyKey,
+        // Phase 10 (Exchanges): the return this sale replaces, when the
+        // two were created together. NULL for an ordinary sale.
+        exchangeForReturnId: exchange?.returnId,
+        subtotal,
+        discountAmount,
+        taxAmount,
+        totalAmount,
+        notes: input.notes,
+        createdBy: actor.id,
+      },
+    });
+
+    const permissions = await this.effectivePermissions.get(tx, actor.id);
+    const allowNegative = await resolveAllowNegative(tx, actor.tenantId, permissions ?? new Set());
+
+    // Canonical lock-acquisition order: sorted by variantId, never
+    // client-supplied order (Phase 5 rule #3/#10).
+    const sortedItems = [...input.items].sort((a, b) => a.variantId.localeCompare(b.variantId));
+    for (const item of sortedItems) {
+      const lineDiscount = cappedManual
+        .get(item.variantId)!
+        .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
+        .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
+      const resolvedTax = lineTaxByVariant.get(item.variantId)!;
+      const lineTax = lineTaxAmount.get(item.variantId)!;
+      const lineTotal = lineGross.get(item.variantId)!.minus(lineDiscount).plus(lineTax);
+
+      const createdItem = await tx.saleItem.create({
         data: {
-          id,
           businessId: actor.tenantId,
-          branchId: warehouse.branchId,
-          warehouseId: input.warehouseId,
-          customerId: input.customerId,
-          shiftId: shift.id,
-          saleNumber: documentNumberFromId('INV', id),
-          idempotencyKey: input.idempotencyKey,
-          subtotal,
-          discountAmount,
-          taxAmount,
-          totalAmount,
-          notes: input.notes,
-          createdBy: actor.id,
+          saleId: sale.id,
+          variantId: item.variantId,
+          quantity: item.quantity,
+          // The NET unit price. In EXCLUSIVE mode this is exactly what the
+          // caller sent; in INCLUSIVE mode it is the extracted net, so
+          // every downstream reader - BD-1 return credit above all - keeps
+          // working on tax-exclusive values without knowing which mode the
+          // business uses.
+          unitPrice: netUnitPrice.get(item.variantId)!,
+          discountAmount: lineDiscount,
+          // BD-18 rule 4: the applied rate is FROZEN here. Editing,
+          // retiring or deleting the Tax row later cannot reach this line.
+          taxId: resolvedTax.taxId,
+          taxRateSnapshot: resolvedTax.taxId ? resolvedTax.ratePercent : null,
+          taxExempt: resolvedTax.exempt,
+          taxAmount: lineTax,
+          lineTotal,
         },
       });
 
-      const permissions = await this.effectivePermissions.get(tx, actor.id);
-      const allowNegative = await resolveAllowNegative(tx, actor.tenantId, permissions ?? new Set());
-
-      // Canonical lock-acquisition order: sorted by variantId, never
-      // client-supplied order (Phase 5 rule #3/#10).
-      const sortedItems = [...input.items].sort((a, b) => a.variantId.localeCompare(b.variantId));
-      for (const item of sortedItems) {
-        const lineDiscount = cappedManual
-          .get(item.variantId)!
-          .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
-          .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
-        const resolvedTax = lineTaxByVariant.get(item.variantId)!;
-        const lineTax = lineTaxAmount.get(item.variantId)!;
-        const lineTotal = lineGross.get(item.variantId)!.minus(lineDiscount).plus(lineTax);
-
-        const createdItem = await tx.saleItem.create({
+      // Phase 8D: append-only promotion provenance, written in the SAME
+      // transaction as the line it describes. `discountApplied` is the
+      // EFFECTIVE contribution after the BD-11 cap - what the promotion
+      // actually took off this line - while `ruleSnapshot` carries what
+      // the rule COMPUTED plus every parameter it used, so the original
+      // arithmetic can be reproduced without ever reading the live
+      // Promotion row. The promotion's name and type are frozen here
+      // too: renaming a rule later must not rewrite a historical
+      // receipt.
+      const applied = promotionByVariant.get(item.variantId);
+      if (applied) {
+        await tx.salePromotionApplication.create({
           data: {
             businessId: actor.tenantId,
             saleId: sale.id,
-            variantId: item.variantId,
-            quantity: item.quantity,
-            // The NET unit price. In EXCLUSIVE mode this is exactly what the
-            // caller sent; in INCLUSIVE mode it is the extracted net, so
-            // every downstream reader - BD-1 return credit above all - keeps
-            // working on tax-exclusive values without knowing which mode the
-            // business uses.
-            unitPrice: netUnitPrice.get(item.variantId)!,
-            discountAmount: lineDiscount,
-            // BD-18 rule 4: the applied rate is FROZEN here. Editing,
-            // retiring or deleting the Tax row later cannot reach this line.
-            taxId: resolvedTax.taxId,
-            taxRateSnapshot: resolvedTax.taxId ? resolvedTax.ratePercent : null,
-            taxExempt: resolvedTax.exempt,
-            taxAmount: lineTax,
-            lineTotal,
+            saleItemId: createdItem.id,
+            promotionId: applied.rule.id,
+            promotionType: applied.rule.type,
+            promotionName: applied.rule.name,
+            ruleSnapshot: {
+              ...applied.ruleSnapshot,
+              promotionName: applied.rule.name,
+              manualDiscountAtSale: (manualDiscountByVariant.get(item.variantId) ?? new Prisma.Decimal(0)).toString(),
+              effectiveDiscount: effectivePromotionByVariant.get(item.variantId)!.toString(),
+              cappedAtLineGross: cappedByVariant.get(item.variantId) ?? false,
+            } as Prisma.InputJsonValue,
+            discountApplied: effectivePromotionByVariant.get(item.variantId)!,
           },
         });
+      }
 
-        // Phase 8D: append-only promotion provenance, written in the SAME
-        // transaction as the line it describes. `discountApplied` is the
-        // EFFECTIVE contribution after the BD-11 cap - what the promotion
-        // actually took off this line - while `ruleSnapshot` carries what
-        // the rule COMPUTED plus every parameter it used, so the original
-        // arithmetic can be reproduced without ever reading the live
-        // Promotion row. The promotion's name and type are frozen here
-        // too: renaming a rule later must not rewrite a historical
-        // receipt.
-        const applied = promotionByVariant.get(item.variantId);
-        if (applied) {
-          await tx.salePromotionApplication.create({
-            data: {
-              businessId: actor.tenantId,
-              saleId: sale.id,
-              saleItemId: createdItem.id,
-              promotionId: applied.rule.id,
-              promotionType: applied.rule.type,
-              promotionName: applied.rule.name,
-              ruleSnapshot: {
-                ...applied.ruleSnapshot,
-                promotionName: applied.rule.name,
-                manualDiscountAtSale: (manualDiscountByVariant.get(item.variantId) ?? new Prisma.Decimal(0)).toString(),
-                effectiveDiscount: effectivePromotionByVariant.get(item.variantId)!.toString(),
-                cappedAtLineGross: cappedByVariant.get(item.variantId) ?? false,
-              } as Prisma.InputJsonValue,
-              discountApplied: effectivePromotionByVariant.get(item.variantId)!,
-            },
-          });
-        }
+      const consumption = await consumeVariant(tx, this.engine, this.audit, {
+        businessId: actor.tenantId,
+        warehouseId: input.warehouseId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+        movementType: 'SALE',
+        referenceType: 'Sale',
+        referenceId: sale.id,
+        reason: `Sale ${sale.saleNumber}`,
+        createdBy: actor.id,
+        allowNegative,
+        // The units consumed go through InventoryEngine exactly as
+        // before - this only tells it WHICH ones.
+        serials: item.serials,
+      });
 
-        const consumption = await consumeVariant(tx, this.engine, this.audit, {
+      // Phase 8E: the durable link closing Known Issue #47. Append-only
+      // and written in the SAME transaction as the movement that
+      // consumed the unit, so a serial can never be marked SOLD without
+      // the record of which sale line sold it.
+      for (const serialNumberId of consumption.consumedSerialIds ?? []) {
+        await tx.saleItemSerial.create({
+          data: { businessId: actor.tenantId, saleId: sale.id, saleItemId: createdItem.id, serialNumberId },
+        });
+      }
+    }
+
+    for (const p of payments) {
+      await tx.salePayment.create({
+        data: {
           businessId: actor.tenantId,
-          warehouseId: input.warehouseId,
-          variantId: item.variantId,
-          quantity: item.quantity,
-          movementType: 'SALE',
+          saleId: sale.id,
+          amount: p.amount,
+          method: p.method,
+          reference: p.reference,
+          receivedBy: actor.id,
+        },
+      });
+
+      // Phase 10 (BD-17 rule 3): a CASH tender is also a movement of
+      // physical money, so it enters the shift's drawer ledger in the
+      // SAME transaction as the sale that collected it. That is what
+      // makes expected cash derivable and trustworthy - the drawer can
+      // never disagree with the documents, because neither can exist
+      // without the other.
+      //
+      // Only CASH. Card, wallet and the rest post to their own clearing
+      // accounts and never enter the drawer; including them would
+      // overstate expected cash by exactly the card takings.
+      if (p.method === 'CASH') {
+        await recordCashTransaction(tx, {
+          businessId: actor.tenantId,
+          shiftId: shift.id,
+          type: 'SALE_TENDER',
+          amount: p.amount,
           referenceType: 'Sale',
           referenceId: sale.id,
           reason: `Sale ${sale.saleNumber}`,
           createdBy: actor.id,
-          allowNegative,
-          // The units consumed go through InventoryEngine exactly as
-          // before - this only tells it WHICH ones.
-          serials: item.serials,
         });
-
-        // Phase 8E: the durable link closing Known Issue #47. Append-only
-        // and written in the SAME transaction as the movement that
-        // consumed the unit, so a serial can never be marked SOLD without
-        // the record of which sale line sold it.
-        for (const serialNumberId of consumption.consumedSerialIds ?? []) {
-          await tx.saleItemSerial.create({
-            data: { businessId: actor.tenantId, saleId: sale.id, saleItemId: createdItem.id, serialNumberId },
-          });
-        }
       }
+    }
 
-      for (const p of input.payments) {
-        await tx.salePayment.create({
-          data: {
-            businessId: actor.tenantId,
-            saleId: sale.id,
-            amount: p.amount,
-            method: p.method,
-            reference: p.reference,
-            receivedBy: actor.id,
-          },
-        });
-
-        // Phase 10 (BD-17 rule 3): a CASH tender is also a movement of
-        // physical money, so it enters the shift's drawer ledger in the
-        // SAME transaction as the sale that collected it. That is what
-        // makes expected cash derivable and trustworthy - the drawer can
-        // never disagree with the documents, because neither can exist
-        // without the other.
-        //
-        // Only CASH. Card, wallet and the rest post to their own clearing
-        // accounts and never enter the drawer; including them would
-        // overstate expected cash by exactly the card takings.
-        if (p.method === 'CASH') {
-          await recordCashTransaction(tx, {
-            businessId: actor.tenantId,
-            shiftId: shift.id,
-            type: 'SALE_TENDER',
-            amount: p.amount,
-            referenceType: 'Sale',
-            referenceId: sale.id,
-            reason: `Sale ${sale.saleNumber}`,
-            createdBy: actor.id,
-          });
-        }
-      }
-
-      // `totalAmount` can legitimately be ZERO once loyalty redemption is
-      // allowed to cover the full merchandise value (approved decision
-      // BD-7) on a sale with no tax. A zero-amount ledger row carries no
-      // information and is rejected outright by the
-      // `customer_transactions` non-zero CHECK, so it is skipped - the
-      // customer owes nothing and the ledger correctly records nothing.
-      // (Latent defect: a 100% MANUAL discount could already reach this
-      // before Phase 8C; the same guard now covers both.)
-      if (input.customerId && totalAmount.greaterThan(0)) {
+    // `totalAmount` can legitimately be ZERO once loyalty redemption is
+    // allowed to cover the full merchandise value (approved decision
+    // BD-7) on a sale with no tax. A zero-amount ledger row carries no
+    // information and is rejected outright by the
+    // `customer_transactions` non-zero CHECK, so it is skipped - the
+    // customer owes nothing and the ledger correctly records nothing.
+    // (Latent defect: a 100% MANUAL discount could already reach this
+    // before Phase 8C; the same guard now covers both.)
+    if (input.customerId && totalAmount.greaterThan(0)) {
+      await tx.customerTransaction.create({
+        data: {
+          businessId: actor.tenantId,
+          customerId: input.customerId,
+          type: 'SALE',
+          amount: totalAmount,
+          referenceType: 'Sale',
+          referenceId: sale.id,
+          description: `Sale ${sale.saleNumber}`,
+          createdBy: actor.id,
+        },
+      });
+    }
+    if (input.customerId) {
+      for (const p of payments) {
         await tx.customerTransaction.create({
           data: {
             businessId: actor.tenantId,
             customerId: input.customerId,
-            type: 'SALE',
-            amount: totalAmount,
+            type: 'PAYMENT',
+            amount: new Prisma.Decimal(p.amount).negated(),
             referenceType: 'Sale',
             referenceId: sale.id,
-            description: `Sale ${sale.saleNumber}`,
+            description: `Payment at sale ${sale.saleNumber}`,
             createdBy: actor.id,
           },
         });
       }
-      if (input.customerId) {
-        for (const p of input.payments) {
-          await tx.customerTransaction.create({
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 8C: LOYALTY LEDGER EVENTS, in the SAME transaction as
+    // everything else. Append-only inserts; the partial unique index
+    // `customer_points_one_event_per_source` is the database backstop
+    // guaranteeing at most one REDEEM and one EARN per Sale, which the
+    // Sale's own optional idempotencyKey cannot provide.
+    //
+    // REDEEM is written before EARN purely for readability - both are
+    // in one transaction, and BD-3's ordering requirement is satisfied
+    // by the fact that `discountAmount` already includes the
+    // redemption before the earning basis is computed below.
+    // ---------------------------------------------------------------
+    if (input.customerId && redemptionValue.greaterThan(0)) {
+      await tx.customerPoints.create({
+        data: {
+          businessId: actor.tenantId,
+          customerId: input.customerId,
+          type: 'REDEEM',
+          points: redeemPoints.negated(),
+          // Note the direction, opposite to EARN's: for a REDEEM row
+          // `basisAmount = round4(|points| x rateSnapshot)`, so the row
+          // reproduces its own arithmetic from its own fields with no
+          // current configuration consulted.
+          basisAmount: redemptionValue,
+          rateSnapshot: redemptionRate!,
+          referenceType: 'Sale',
+          referenceId: sale.id,
+          description: `Redeemed on sale ${sale.saleNumber}`,
+          createdBy: actor.id,
+        },
+      });
+    }
+
+    // BD-3: the earning basis is the NET merchandise amount - after
+    // every discount INCLUDING the loyalty redemption just applied -
+    // and before tax.
+    const loyaltyEligibleAmount = subtotal.minus(discountAmount);
+    if (input.customerId) {
+      const earnRate = await resolveLoyaltyEarnRate(tx, actor.tenantId);
+      if (earnRate) {
+        const pointsEarned = computePointsEarned(loyaltyEligibleAmount, earnRate);
+        // A zero result records nothing: it carries no information, and
+        // `customer_points_nonzero` would reject the row anyway.
+        if (pointsEarned.greaterThan(0)) {
+          await tx.customerPoints.create({
             data: {
               businessId: actor.tenantId,
               customerId: input.customerId,
-              type: 'PAYMENT',
-              amount: new Prisma.Decimal(p.amount).negated(),
+              type: 'EARN',
+              points: pointsEarned,
+              basisAmount: loyaltyEligibleAmount,
+              rateSnapshot: earnRate,
               referenceType: 'Sale',
               referenceId: sale.id,
-              description: `Payment at sale ${sale.saleNumber}`,
+              description: `Earned on sale ${sale.saleNumber}`,
               createdBy: actor.id,
             },
           });
         }
       }
+    }
 
-      // ---------------------------------------------------------------
-      // Phase 8C: LOYALTY LEDGER EVENTS, in the SAME transaction as
-      // everything else. Append-only inserts; the partial unique index
-      // `customer_points_one_event_per_source` is the database backstop
-      // guaranteeing at most one REDEEM and one EARN per Sale, which the
-      // Sale's own optional idempotencyKey cannot provide.
-      //
-      // REDEEM is written before EARN purely for readability - both are
-      // in one transaction, and BD-3's ordering requirement is satisfied
-      // by the fact that `discountAmount` already includes the
-      // redemption before the earning basis is computed below.
-      // ---------------------------------------------------------------
-      if (input.customerId && redemptionValue.greaterThan(0)) {
-        await tx.customerPoints.create({
-          data: {
-            businessId: actor.tenantId,
-            customerId: input.customerId,
-            type: 'REDEEM',
-            points: redeemPoints.negated(),
-            // Note the direction, opposite to EARN's: for a REDEEM row
-            // `basisAmount = round4(|points| x rateSnapshot)`, so the row
-            // reproduces its own arithmetic from its own fields with no
-            // current configuration consulted.
-            basisAmount: redemptionValue,
-            rateSnapshot: redemptionRate!,
-            referenceType: 'Sale',
-            referenceId: sale.id,
-            description: `Redeemed on sale ${sale.saleNumber}`,
-            createdBy: actor.id,
-          },
-        });
-      }
-
-      // BD-3: the earning basis is the NET merchandise amount - after
-      // every discount INCLUDING the loyalty redemption just applied -
-      // and before tax.
-      const loyaltyEligibleAmount = subtotal.minus(discountAmount);
-      if (input.customerId) {
-        const earnRate = await resolveLoyaltyEarnRate(tx, actor.tenantId);
-        if (earnRate) {
-          const pointsEarned = computePointsEarned(loyaltyEligibleAmount, earnRate);
-          // A zero result records nothing: it carries no information, and
-          // `customer_points_nonzero` would reject the row anyway.
-          if (pointsEarned.greaterThan(0)) {
-            await tx.customerPoints.create({
-              data: {
-                businessId: actor.tenantId,
-                customerId: input.customerId,
-                type: 'EARN',
-                points: pointsEarned,
-                basisAmount: loyaltyEligibleAmount,
-                rateSnapshot: earnRate,
-                referenceType: 'Sale',
-                referenceId: sale.id,
-                description: `Earned on sale ${sale.saleNumber}`,
-                createdBy: actor.id,
-              },
-            });
-          }
-        }
-      }
-
-      // Phase 6: post the accounting fact for this Sale in the SAME
-      // transaction - COGS sourced exclusively from computeSaleCost,
-      // which reads the SALE/BUNDLE_CONSUMPTION StockMovement rows
-      // consumeVariant just wrote above (unit_cost_at_movement, never a
-      // recomputed/current cost). Nothing here duplicates Sales'
-      // business logic - the lines are built from values already
-      // computed by this exact use-case (subtotal/discountAmount/
-      // taxAmount/totalAmount/payments).
-      const { totalCost } = await computeSaleCost(tx, actor.tenantId, { id: sale.id, subtotal, discountAmount });
-      const journalLines = await buildSaleJournalLines(tx, actor.tenantId, {
-        subtotal,
-        discountAmount,
-        taxAmount,
-        totalAmount,
-        totalCost,
-        payments: input.payments,
-      });
-      if (journalLines.length > 0) {
-        await this.accounting.postEntry(tx, {
-          businessId: actor.tenantId,
-          entryDate: new Date(),
-          sourceType: 'Sale',
-          sourceId: sale.id,
-          description: `Sale ${sale.saleNumber}`,
-          createdBy: actor.id,
-          lines: journalLines,
-        });
-      }
-
-      const finalSale = await tx.sale.findUniqueOrThrow({ where: { id: sale.id }, include: { items: true, payments: true } });
-
-      await this.audit.record(tx, {
-        businessId: actor.tenantId,
-        userId: actor.id,
-        action: 'CREATE',
-        entityType: 'Sale',
-        entityId: sale.id,
-        after: finalSale,
-      });
-
-      return finalSale;
+    // Phase 6: post the accounting fact for this Sale in the SAME
+    // transaction - COGS sourced exclusively from computeSaleCost,
+    // which reads the SALE/BUNDLE_CONSUMPTION StockMovement rows
+    // consumeVariant just wrote above (unit_cost_at_movement, never a
+    // recomputed/current cost). Nothing here duplicates Sales'
+    // business logic - the lines are built from values already
+    // computed by this exact use-case (subtotal/discountAmount/
+    // taxAmount/totalAmount/payments).
+    const { totalCost } = await computeSaleCost(tx, actor.tenantId, { id: sale.id, subtotal, discountAmount });
+    const journalLines = await buildSaleJournalLines(tx, actor.tenantId, {
+      subtotal,
+      discountAmount,
+      taxAmount,
+      totalAmount,
+      totalCost,
+      // The exchange credit is a tender here too: it debits the clearing
+      // account the return credited, which is what makes the pair net to
+      // zero rather than leaving a balance sitting there.
+      payments,
     });
+    if (journalLines.length > 0) {
+      await this.accounting.postEntry(tx, {
+        businessId: actor.tenantId,
+        entryDate: new Date(),
+        sourceType: 'Sale',
+        sourceId: sale.id,
+        description: `Sale ${sale.saleNumber}`,
+        createdBy: actor.id,
+        lines: journalLines,
+      });
+    }
+
+    const finalSale = await tx.sale.findUniqueOrThrow({ where: { id: sale.id }, include: { items: true, payments: true } });
+
+    await this.audit.record(tx, {
+      businessId: actor.tenantId,
+      userId: actor.id,
+      action: 'CREATE',
+      entityType: 'Sale',
+      entityId: sale.id,
+      after: finalSale,
+    });
+
+    return finalSale;
   }
 }

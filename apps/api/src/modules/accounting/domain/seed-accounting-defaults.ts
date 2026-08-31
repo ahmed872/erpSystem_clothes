@@ -27,6 +27,12 @@ const SYSTEM_ACCOUNTS: SystemAccountSeed[] = [
   { code: '1040', name: 'Bank Account', type: 'ASSET', normalBalance: 'DEBIT', parentCode: '1000', mappingKey: 'TENDER_BANK_TRANSFER' },
   { code: '1050', name: 'Cheques Clearing', type: 'ASSET', normalBalance: 'DEBIT', parentCode: '1000', mappingKey: 'TENDER_CHEQUE' },
   { code: '1060', name: 'Other Tender Clearing', type: 'ASSET', normalBalance: 'DEBIT', parentCode: '1000', mappingKey: 'TENDER_OTHER' },
+  // Phase 10 (Exchanges): the clearing account the two halves of an
+  // exchange meet in. The return credits it and the replacement sale
+  // debits it by the same figure, so a completed exchange leaves it at
+  // exactly zero - which is what makes a non-zero balance here a real
+  // signal rather than ordinary noise.
+  { code: '1070', name: 'Exchange Clearing', type: 'ASSET', normalBalance: 'DEBIT', parentCode: '1000', mappingKey: 'EXCHANGE_CLEARING' },
   { code: '1100', name: 'Accounts Receivable', type: 'ASSET', normalBalance: 'DEBIT', parentCode: '1000', mappingKey: 'ACCOUNTS_RECEIVABLE' },
   { code: '1200', name: 'Inventory', type: 'ASSET', normalBalance: 'DEBIT', parentCode: '1000', mappingKey: 'INVENTORY_ASSET' },
   { code: '2000', name: 'Liabilities', type: 'LIABILITY', normalBalance: 'CREDIT' },

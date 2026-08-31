@@ -1480,6 +1480,14 @@ enum SalePaymentMethod {
   CARD
   WALLET
   OTHER
+  /// Phase 10 (Exchanges): the value of goods handed back, applied to the
+  /// replacement. Never a real tender - no money moves and the drawer is
+  /// untouched - so it posts to a CLEARING account that the matching pair
+  /// of documents nets to exactly zero. Only `CreateExchangeUseCase` may
+  /// produce it; an ordinary sale or payment request that names it is
+  /// rejected, because a client that could mint exchange credit at will
+  /// could pay for anything with nothing.
+  EXCHANGE_CREDIT
 }
 
 enum SaleReturnCondition {
@@ -1706,26 +1714,34 @@ model CashTransaction {
 }
 
 model Sale {
-  id             String     @id @default(uuid())
-  businessId     String     @map("business_id")
-  branchId       String     @map("branch_id")
-  warehouseId    String     @map("warehouse_id")
-  customerId     String?    @map("customer_id")
-  shiftId        String     @map("shift_id")
-  saleNumber     String     @map("sale_number")
-  status         SaleStatus @default(COMPLETED)
+  id                  String     @id @default(uuid())
+  businessId          String     @map("business_id")
+  branchId            String     @map("branch_id")
+  warehouseId         String     @map("warehouse_id")
+  customerId          String?    @map("customer_id")
+  shiftId             String     @map("shift_id")
+  saleNumber          String     @map("sale_number")
+  status              SaleStatus @default(COMPLETED)
   /// Tenant-scoped idempotency key - the Sale itself is the retryable
   /// business unit (Phase 5 rule #8). NULL never conflicts with another
   /// NULL (same opt-in-per-request pattern as PurchaseReceipt).
-  idempotencyKey String?    @map("idempotency_key")
-  subtotal       Decimal    @default(0) @db.Decimal(18, 4)
-  discountAmount Decimal    @default(0) @map("discount_amount") @db.Decimal(18, 4)
-  taxAmount      Decimal    @default(0) @map("tax_amount") @db.Decimal(18, 4)
-  totalAmount    Decimal    @default(0) @map("total_amount") @db.Decimal(18, 4)
-  notes          String?
-  createdBy      String?    @map("created_by")
-  createdAt      DateTime   @default(now()) @map("created_at")
-  updatedAt      DateTime   @updatedAt @map("updated_at")
+  idempotencyKey      String?    @map("idempotency_key")
+  /// Phase 10 (Exchanges): the return this sale replaces, when the two
+  /// were created together as one exchange. NULL for an ordinary sale.
+  ///
+  /// The link points this way, from the sale to the return, because the
+  /// return is created FIRST - it is the return's credit that decides what
+  /// the replacement may be settled with. A column on the return could
+  /// only ever be filled in afterwards, and `sale_returns` is append-only.
+  exchangeForReturnId String?    @map("exchange_for_return_id")
+  subtotal            Decimal    @default(0) @db.Decimal(18, 4)
+  discountAmount      Decimal    @default(0) @map("discount_amount") @db.Decimal(18, 4)
+  taxAmount           Decimal    @default(0) @map("tax_amount") @db.Decimal(18, 4)
+  totalAmount         Decimal    @default(0) @map("total_amount") @db.Decimal(18, 4)
+  notes               String?
+  createdBy           String?    @map("created_by")
+  createdAt           DateTime   @default(now()) @map("created_at")
+  updatedAt           DateTime   @updatedAt @map("updated_at")
 
   business              Business                   @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sales_business_fk")
   branch                Branch                     @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -1737,6 +1753,7 @@ model Sale {
   returns               SaleReturn[]
   promotionApplications SalePromotionApplication[]
   SaleItemSerial        SaleItemSerial[]
+  exchangeForReturn     SaleReturn?                @relation("SaleExchange", fields: [exchangeForReturnId], references: [id], onDelete: Restrict)
 
   @@unique([businessId, saleNumber])
   @@unique([businessId, idempotencyKey])
@@ -1750,6 +1767,7 @@ model Sale {
   /// KPI filters on (business_id, created_at) - previously unindexed.
   @@index([businessId, createdAt])
   /// Phase 7 (Reporting): sales-by-employee/user grouping.
+  @@index([exchangeForReturnId])
   @@index([businessId, createdBy])
   @@map("sales")
 }
@@ -1856,11 +1874,14 @@ model SaleReturn {
   createdBy       String?            @map("created_by")
   createdAt       DateTime           @default(now()) @map("created_at")
 
-  business    Business               @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_returns_business_fk")
-  sale        Sale                   @relation(fields: [saleId], references: [id], onDelete: Restrict)
-  warehouse   Warehouse              @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
-  items       SaleReturnItem[]
-  itemSerials SaleReturnItemSerial[]
+  business      Business               @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "sale_returns_business_fk")
+  sale          Sale                   @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  warehouse     Warehouse              @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  items         SaleReturnItem[]
+  itemSerials   SaleReturnItemSerial[]
+  /// Phase 10 (Exchanges): the replacement sale, when this return was one
+  /// half of an exchange.
+  exchangeSales Sale[]                 @relation("SaleExchange")
 
   @@unique([businessId, returnNumber])
   @@unique([businessId, idempotencyKey])
@@ -1982,6 +2003,12 @@ enum AccountingMappingKey {
   /// Phase 10 (BD-17 rule 8): the configurable account a blind-close
   /// cash variance posts to. Shortage debits it, overage credits it.
   CASH_VARIANCE
+  /// Phase 10 (Exchanges): the clearing account the two halves of an
+  /// exchange meet in. The return credits it, the replacement sale debits
+  /// it, and the pair nets to zero by construction - which is what makes
+  /// a non-zero balance on this account a real signal that something is
+  /// wrong rather than ordinary noise.
+  EXCHANGE_CLEARING
   TENDER_CASH
   TENDER_CARD
   TENDER_WALLET

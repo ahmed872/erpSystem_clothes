@@ -126,6 +126,52 @@ export const createSaleReturnSchema = z.object({
 });
 export type CreateSaleReturnInput = z.infer<typeof createSaleReturnSchema>;
 
+/**
+ * Phase 10 (Exchanges) — goods back and goods out, as ONE event.
+ *
+ * The two halves are the SAME return and the SAME sale the existing
+ * endpoints create, composed inside one transaction. Nothing about either
+ * is reinterpreted: BD-1 still decides the credit, BD-18 still decides the
+ * tax, BD-13 still demands serials, and the Inventory and Accounting
+ * engines remain the only things that move stock or post entries.
+ *
+ * What the request DOES NOT carry, deliberately:
+ *
+ *   - the warehouse and the customer. Both come from the original sale.
+ *     An exchange is against that sale, so letting a client name a
+ *     different warehouse or a different customer would let it move goods
+ *     and credit between places the original document never mentioned.
+ *   - the exchange credit itself. It is the return's own computed figure;
+ *     a client that could state it could pay for goods with nothing.
+ */
+export const createExchangeSchema = z.object({
+  idempotencyKey: z.string().trim().min(1).max(120).optional(),
+  reason: notesSchema.optional(),
+  notes: notesSchema.optional(),
+  /// The goods coming back - identical in shape to a sale return's items,
+  /// minus the refund, which an exchange settles with the replacement.
+  returnItems: z
+    .array(
+      z.object({
+        saleItemId: z.string().uuid(),
+        quantity: positiveQuantitySchema,
+        condition: z.enum(['SELLABLE', 'DAMAGED']).default('SELLABLE'),
+        serials: z.array(z.string().trim().min(1).max(120)).max(10_000).optional(),
+      }),
+    )
+    .min(1)
+    .max(500),
+  /// The goods going out - identical in shape to a sale's items.
+  newItems: z.array(saleItemInputSchema).min(1).max(500),
+  /// Real tender for the difference, when the replacement is worth more
+  /// than the goods handed back. EXCHANGE_CREDIT is not among the methods
+  /// a client may name: only the server can produce it.
+  payments: z.array(salePaymentInputSchema).max(20).default([]),
+  /// Phase 8C: the replacement may spend loyalty points like any sale.
+  redeemPoints: nonNegativeMoneySchema.optional(),
+});
+export type CreateExchangeInput = z.infer<typeof createExchangeSchema>;
+
 export const saleListQuerySchema = z.object({
   customerId: z.string().uuid().optional(),
   warehouseId: z.string().uuid().optional(),
