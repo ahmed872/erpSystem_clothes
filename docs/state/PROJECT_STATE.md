@@ -1,11 +1,62 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 8G — Release Gate (**Complete. PHASE 8 IS CLOSED.**)
+Phase 10 — Release Gate (**Complete. PHASE 10 IS CLOSED. Phase 11 NOT started.**)
 
-Phase 8G is the final gate for Phase 8. It added no feature, changed no source file, created no migration, altered no schema and added no permission or test. It performed a final verification run and consolidated the record.
+Phase 10 turned the engine of Phases 1–8 into a shop that can actually open its doors: a till with a cash drawer, tax the business configures rather than the client asserts, serials that survive every path a physical unit takes, exchanges, parked baskets, receipts, expenses, and password management.
 
-**Final verification (G1), all green:** 453/453 e2e across 40 files · 28/28 unit · build, `tsc --noEmit` and lint clean · both `erp_dev` and `erp_test` report "Database schema is up to date" · `prisma migrate diff --exit-code` reports **no drift** · **39 migrations**, **106 permissions**.
+**Final verification, all green:** 582/582 e2e across 49 files · 28/28 unit · build, `tsc --noEmit` and lint clean · both `erp_dev` and `erp_test` report "Database schema is up to date" · `prisma migrate diff` reports **no drift** · **54 migrations**, **117 permissions**.
+
+**Whole-database invariant sweep (all zero):** unbalanced journal entries · negative-side or double-sided journal lines · stock-balance-vs-movement drift · negative reservations · sale lines discounted beyond their gross · customers with a negative point balance · serials in two places at once · zero-amount cash transactions · a non-zero exchange-clearing balance.
+
+**Engine authority verified by grep, not by assertion:** no write to `stock_movements`/`stock_balances` outside `engines/inventory` (the only non-engine hits are read-only SELECTs in reporting and reconciliation); no `journalEntry`/`journalEntryLine` create outside `engines/accounting`; `quantity_reserved` written only by the engine.
+
+---
+
+## PHASE 10 — WHAT WAS DELIVERED
+
+| Sub-phase | Delivered |
+|---|---|
+| **10A** Cash & till | `CashRegister`, `CashTransaction` drawer ledger, shift open with register + opening float, **blind close** (expected cash DERIVED, never stored, and stripped server-side from anyone lacking `shifts.view_expected`), manager reconciliation, variance posting to a configurable `CASH_VARIANCE` account. A default register is created at onboarding (Phase 0 §11). |
+| **10B** Tax Engine | `Tax` model, `TaxEngineService`, resolution precedence (line exemption > product exemption > product tax > business default > none), per-line `taxId`/`taxRateSnapshot`/`taxExempt` snapshots, tax-inclusive pricing as an ENTRY AND DISPLAY convention only (boundary conversion at the line, one pipeline), BD-1's cumulative method applied to the tax column on returns. **`taxAmount` is no longer accepted from a client.** |
+| **10C** Refund tender | `SaleReturn.refundMethod/refundAmount/refundReference` recorded at source — closes Known Issue #32, which required a real operational fact rather than an inference. |
+| **10D** Serial lifecycle | Serials on PO receiving (mandatory), on stock transfers (`IN_TRANSIT`, owned by no warehouse), and on purchase returns (`RETURNED_TO_SUPPLIER`, terminal). Three append-only link tables. |
+| **10E** Return disposition | BD-22: a returned unit takes the disposition the return declared — `SELLABLE → IN_STOCK`, `DAMAGED → DAMAGED` — superseding BD-14's quarantine state. |
+| **Exchanges** | `POST /sales/:id/exchanges`, one transaction, composing the unchanged return and sale use-cases; `EXCHANGE_CLEARING` nets to exactly zero. |
+| **Hold / Resume** | `HeldSale`/`HeldSaleItem` as a SEPARATE entity — never a `Sale` with a HELD status. Soft: the advisory `quantityReserved` never blocks a sale. Resume re-prices through the unchanged pipeline. |
+| **10F** Receipts | `GET /sales/:id/receipt` — one request, nothing recalculated, no cost or profit for anyone. Business profile fields, all free text. |
+| **10G** Passwords | Change-own (current password required) and administrative reset; both revoke every live session. No value or hash ever reaches the audit trail. |
+| **10H** Expenses | `ExpenseCategory` (business-chosen EXPENSE account) and append-only `Expense`. A cash expense enters the drawer ledger in the same transaction. |
+| **10I** Contract | Purchase-receipt idempotency fingerprint (defect fix), idempotency transport frozen to the request body, OpenAPI at `/api/v1/docs`. |
+
+### Defects found and fixed during Phase 10 (each with a regression test)
+
+1. **PO receiving accepted serial-tracked goods with NO serials.** Stock went up, no unit was registered, and the goods were then unsellable — BD-13 requires a serial per unit at the till and there were none. Surfaced only at the point of sale, long after the receipt.
+2. **Stock transfers ignored serials entirely.** The unit's row kept pointing at the warehouse it had physically left, so it could be sold at NEITHER end. The worst of the three because it failed silently: the transfer succeeded and only a later sale broke, in a different warehouse, on a different day.
+3. **Purchase returns left returned serials sitting in stock** as though the units were still there.
+4. **Returned serials went to a quarantine state the deferred inspection workflow never released.** A SELLABLE return posts a real `SALES_RETURN` increase, so the QUANTITY came back on the shelf while the SERIAL did not — a permanent contradiction in which nobody could ever sell the unit again. (BD-22.)
+5. **`ReceivePurchaseUseCase` returned the stored receipt for a replayed idempotency key whatever the new request said** — the only idempotent path that did not compare fingerprints. A key reused with a different delivery was handed the first receipt and the second delivery was never recorded: stock the business had actually taken in simply did not exist.
+
+### Behavioural corrections (previously-approved behaviour deliberately changed)
+
+| # | Was | Now | Why |
+|---|---|---|---|
+| 1 | Client supplied `taxAmount` per sale line | Rejected; the server computes tax from stored configuration | BD-18 rule 5. **Breaking change.** |
+| 2 | Tax was whatever the client said, unrelated to discounts | Tax follows the DISCOUNTED net, so a line discounted or redeemed to zero attracts no tax | BD-18 / BLOCKING-1. Three tests that asserted "the customer still owes the tax" on a fully-discounted line were updated with the reasoning recorded inline. |
+| 3 | A return's customer credit was the merchandise value alone | Credit includes the tax reversal | Crediting only the merchandise stranded a permanent debit against goods the customer handed back. |
+| 4 | A walk-in return never reversed Revenue (Known Issue #32) | It does, when a refund tender is recorded | BD-23. Two user-facing limitation notes that stated the opposite were factually wrong and are corrected. |
+| 5 | Returned serial → `RETURNED` quarantine (BD-14) | → `IN_STOCK` or `DAMAGED` per the return's own condition | BD-22, superseding BD-14. Two Phase 8E tests updated; both now assert something strictly stronger. |
+| 6 | Opening a shift needed only a warehouse | Needs a cash register and an opening float | BD-17 rule 2. **Breaking change.** |
+| 7 | Phase 5's schema note proposed a future `HELD` SaleStatus | Held baskets are a separate entity | No reporting query filters on `Sale.status`, so a held basket stored as a Sale would have been counted as revenue from the moment it was parked. The note is corrected in place. |
+
+### Deliberate boundaries (in scope, chosen, and NOT defects)
+
+- **A downward exchange is refused**, naming both figures and what to do instead. Swapping for something cheaper is a return plus a separate sale — the difference is real money going back, which the return document already models with its own refund tender. Expressing it in one exchange would need a two-part refund the append-only `sale_returns` row cannot carry.
+- **`Tax` has no effective-dated child.** Per-line snapshotting is strictly stronger than rate versioning for the one thing that matters (a historical sale never moves), and the approved policy never asked for versioning. A deliberate deviation from the Phase 0 ERD.
+- **Purchase tax stays caller-supplied.** It is a fact from the supplier's invoice, not a computation the business performs; BD-18's server-side rule is about the tax the business CHARGES.
+- **Shift routes stay under `/sales/shifts`** rather than moving to `finance/`, to avoid breaking a path clients already use.
+- **No self-service password reset by email or SMS.** Delivery is outside Phase 10's approved scope, and a reset link nobody can receive is worse than none.
+- **OpenAPI does not restate request shapes as DTOs.** The Zod schemas are what a request is judged against; a second definition of every payload would be free to drift from the one that enforces anything.
 
 ---
 
@@ -891,6 +942,27 @@ Every entry carries exactly one status. These are descriptive classifications of
 
 **No entry in the Phase 8 register is an open, unclassified defect.** Every one is either closed, fixed-and-accepted, an accepted limitation, a deferred feature, or an explicitly carried-forward pre-existing item.
 
+### PHASE 10 CLOSURES against the register above
+
+The entries below are CLOSED BY PHASE 10. The original text of each is left standing rather than rewritten — history is not edited to match a later decision — and this block is the record of what changed.
+
+| Entry | Was | Closed by |
+|---|---|---|
+| **#28** Shift has no cash count or reconciliation | An explicit Phase 5 scope decision | **10A.** Blind close, counted cash, manager reconciliation, and a variance posting. The note even predicted the shape ("an `expectedCash`/`countedCash` pair on close") — except that expected cash is DERIVED and never stored, which is what makes blind close real. |
+| **#32** Walk-in return posts no Revenue/AR reversal | An absence of data, not an oversight: Sales recorded no refund fact, and Accounting is forbidden to invent one | **10C + BD-23.** `SaleReturn.refundMethod/refundAmount` records the tender at source, which is exactly the "real operational business fact newly recorded at the source" the entry named as the precondition for any fix. The two user-facing notes that told users walk-in returns never reverse revenue were factually wrong once BD-23 landed and are corrected. |
+| **#36** Purchasing idempotency gap | Inherited, explicitly not fixed by Phase 6 | **10I.** `ReceivePurchaseUseCase` now compares a canonical fingerprint; a key reused with a different delivery is 409. |
+| **#72** A returned serial is quarantined and cannot be resold | BD-14's disposition, awaiting an inspection workflow | **10E + BD-22.** The serial follows the return line's own condition. The inspection workflow remains deferred and is no longer a precondition for reselling returned goods. |
+
+**Still open and unchanged:** #55 (outstanding loyalty points are not a GL liability), #56 (points never expire), #73 (BD-13 is a breaking change for clients selling serial-tracked products without naming serials — Phase 10 widened this to receiving and transfers), #76 (reporting cannot split a discount into manual, promotional and loyalty components). Phase 10 addressed none of these and did not claim to.
+
+**New accepted limitations from Phase 10**, each a consequence of an approved decision rather than a gap:
+
+- **A downward exchange is refused.** Recorded as a deliberate boundary above, with the reason and the alternative.
+- **A short transfer receipt leaves the missing units `IN_TRANSIT` forever** until someone adjusts them. They are in neither warehouse, which is the truth; absorbing them at either end would hide a real discrepancy. There is no write-off workflow for them yet.
+- **The advisory `quantityReserved` is never reconciled or expired.** A basket parked and forgotten holds its reservation until it is resumed or voided. Nothing depends on the number, so nothing breaks — but `availableQuantity` will drift optimistic-low until someone tidies up. A hold-expiry policy was not in scope.
+- **Pre-Phase-10 sale lines carry no tax snapshot.** They were sold under a contract where the client asserted the tax, and their `taxRateSnapshot` is null. Historical receipts for them show a tax figure with no rate beside it. They are NOT rewritten.
+- **Pre-Phase-10 shifts have no cash register.** `Shift.cashRegisterId` is nullable precisely so those shifts keep their history truthfully rather than being back-filled with a register they were never opened against.
+
 The most operationally significant accepted limitations, restated so they are not overlooked at release: **#55** outstanding loyalty points are not a GL liability and appear nowhere on the Balance Sheet; **#56** points never expire, so the float only grows until redeemed; **#72** a returned serial is quarantined as `RETURNED` and cannot be resold until a future inspection workflow exists; **#73** BD-13 is a breaking change for any client selling a serial-tracked product without naming its serials; **#76** reporting cannot break a discount into manual, promotional and loyalty components.
 
 ### The register
@@ -1131,7 +1203,20 @@ None.
 `docs/state/PROJECT_STATE.md` only. **No source file, schema, migration, seed, permission, validation schema or test was changed** — 8G was documentation and final verification, nothing else, and the only repository modification was verified to be this file before any edit was made.
 
 ## Next Phase
-**PHASE 8 IS CLOSED.** 8A Warranty, 8B Loyalty Ledger, 8C Loyalty Redemption, 8D Promotions, 8E Sales Integration, 8F Full Verification and 8G Release Gate are all complete and gate-accepted.
+**PHASE 10 IS CLOSED.** 10A Cash/Till, 10B Tax, 10C Refund Tender, 10D Serial Lifecycle, 10E Return Disposition, Exchanges, Hold/Resume, 10F Receipts, 10G Passwords, 10H Expenses and 10I Contract Freeze are all complete and verified.
 
-Phase 9 and any post-Phase-8 feature work have **not** been started, scoped or designed. The deferred register above (#29, #31, #32, #33, #41, #42, #43, #44, #54, #56, #76) is the natural input to that scoping, but nothing in it is approved or planned.
+Phase 8 is closed (8A–8G). Phase 9 was a contract-and-roadmap gate, not an implementation phase, and produced the approved decisions BD-17 … BD-25 plus the resolutions of BLOCKING-1 (tax-inclusive pricing) and BLOCKING-2 (soft hold) that Phase 10 implements.
+
+**Phase 11 has NOT been started, scoped or designed.** The explicitly deferred register is the natural input to that scoping, and nothing in it is approved or planned:
+
+- `FinancialAccount` (SCOPE-2, deferred to Phase 11 by decision)
+- Hard inventory reservation
+- Offline sync
+- E-invoicing / jurisdiction-aware tax documents
+- Email / SMS delivery
+- Multi-tax stacking
+- Returned-goods inspection workflow
+- Legacy serial migration
+- Card / wallet settlement
+
 **No further phase will start without explicit instruction.**
