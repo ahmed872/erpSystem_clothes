@@ -147,6 +147,11 @@ export const createProductSchema = z
     defaultCost: moneySchema.default(0),
     defaultSellingPrice: moneySchema.default(0),
     minimumStock: moneySchema.optional(),
+    /// Phase 10 (BD-18): the tax this product carries. Omitted means the
+    /// business default applies. `taxExempt` is an EXPLICIT exemption and is
+    /// never inferred from a missing tax.
+    taxId: z.string().uuid().nullable().optional(),
+    taxExempt: z.boolean().optional(),
     maximumStock: moneySchema.optional(),
     baseUomId: z.string().uuid(),
     images: z.array(imageSchema).max(20).optional(),
@@ -183,6 +188,11 @@ export const updateProductSchema = z
     description: z.string().trim().max(2000).nullable().optional(),
     status: z.enum(['ACTIVE', 'INACTIVE', 'DISCONTINUED']).optional(),
     minimumStock: moneySchema.nullable().optional(),
+    /// Phase 10 (BD-18): the tax this product carries. Omitted means the
+    /// business default applies. `taxExempt` is an EXPLICIT exemption and is
+    /// never inferred from a missing tax.
+    taxId: z.string().uuid().nullable().optional(),
+    taxExempt: z.boolean().optional(),
     maximumStock: moneySchema.nullable().optional(),
     images: z.array(imageSchema).max(20).optional(),
     tracksLots: z.boolean().optional(),

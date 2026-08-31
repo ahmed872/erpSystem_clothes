@@ -3,19 +3,25 @@ import request from 'supertest';
 import { PrismaClient } from '@prisma/client';
 import { createTestApp } from './utils/app-factory';
 import { resetDatabase } from './db-reset';
-import { setupSalesFixture, SalesFixture } from './utils/sales-fixtures';
+import { setupSalesFixture, SalesFixture, createTax } from './utils/sales-fixtures';
 import { createSimpleProduct } from './utils/inventory-fixtures';
 
 describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () => {
   let app: INestApplication;
   let admin: PrismaClient;
   let biz: SalesFixture;
+  let taxId10: string;
 
   beforeAll(async () => {
     await resetDatabase();
     app = await createTestApp();
     admin = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
     biz = await setupSalesFixture(app, 'lifecycle');
+    // Phase 10 (BD-18): the caller no longer supplies tax. A 10% tax exists
+    // for the one test that needs it, attached to that test's own product -
+    // NOT as the business default, which would change every other total
+    // this spec asserts.
+    taxId10 = await createTax(app, biz.accessToken, 10);
   });
 
   afterAll(async () => {
@@ -34,7 +40,7 @@ describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () 
   }
 
   it('completes a fully-paid walk-in sale: correct totals, SALE inventory movement, no customer ledger effect', async () => {
-    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SALE-BASIC-1');
+    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'SALE-BASIC-1', { taxId: taxId10 });
     await stockUp(variantId, 20, 5);
 
     const res = await request(app.getHttpServer())
@@ -42,15 +48,17 @@ describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () 
       .set('Authorization', auth())
       .send({
         warehouseId: biz.warehouseId,
-        items: [{ variantId, quantity: 3, unitPrice: 15, discountAmount: 3, taxAmount: 2 }],
-        payments: [{ amount: 44, method: 'CASH' }],
+        // Phase 10 (BD-18): tax is server-computed from the product's own
+        // 10% tax, on the DISCOUNTED net (45 - 3 = 42), giving 4.20.
+        items: [{ variantId, quantity: 3, unitPrice: 15, discountAmount: 3 }],
+        payments: [{ amount: 46.2, method: 'CASH' }],
       })
       .expect(201);
     expect(res.body.data.saleNumber).toMatch(/^INV-[A-F0-9]{8}$/);
     expect(res.body.data.subtotal).toBe('45'); // 3*15
     expect(res.body.data.discountAmount).toBe('3');
-    expect(res.body.data.taxAmount).toBe('2');
-    expect(res.body.data.totalAmount).toBe('44'); // 45-3+2
+    expect(res.body.data.taxAmount).toBe('4.2'); // 10% of the discounted net 42
+    expect(res.body.data.totalAmount).toBe('46.2'); // 45-3+4.2
     expect(res.body.data.branchId).toBe(biz.branchId);
     expect(res.body.data.shiftId).toBe(biz.activeShiftId);
 
@@ -66,7 +74,7 @@ describe('Sales: sale lifecycle and payment integrity (e2e, real Postgres)', () 
     expect(ledgerCount).toBe(0); // no customer on this sale
 
     const saleGet = await request(app.getHttpServer()).get(`/api/v1/sales/${res.body.data.id}`).set('Authorization', auth()).expect(200);
-    expect(saleGet.body.data.paidAmount).toBe('44');
+    expect(saleGet.body.data.paidAmount).toBe('46.2');
     expect(saleGet.body.data.remainingAmount).toBe('0');
     expect(saleGet.body.data.paymentStatus).toBe('PAID');
   });

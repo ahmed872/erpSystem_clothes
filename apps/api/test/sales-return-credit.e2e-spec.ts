@@ -3,7 +3,7 @@ import request from 'supertest';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { createTestApp } from './utils/app-factory';
 import { resetDatabase } from './db-reset';
-import { setupSalesFixture, SalesFixture } from './utils/sales-fixtures';
+import { setupSalesFixture, SalesFixture, createTax } from './utils/sales-fixtures';
 import { createSimpleProduct } from './utils/inventory-fixtures';
 
 /**
@@ -52,9 +52,26 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
    * engine (Phase 8D) will write the same snapshot fields, so proving the
    * arithmetic here proves it for promotional discounts too - BD-1
    * operates on the stored SaleItem snapshot, never on how the discount
-   * arose. */
-  async function sellOneLine(sku: string, quantity: number, unitPrice: number, discountAmount: number, taxAmount = 0) {
-    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, sku, { defaultCost: 1 });
+   * arose.
+   *
+   * Phase 10 (BD-18): the caller no longer supplies tax. A line that needs
+   * tax gets a real tax attached to its own product, so the figure the
+   * assertions below use is one the SERVER computed. The rate is attached
+   * per product rather than as the business default, which would silently
+   * change the total of every other sale in this spec. */
+  const taxIdByRate = new Map<number, string>();
+  async function taxOfRate(ratePercent: number): Promise<string> {
+    let id = taxIdByRate.get(ratePercent);
+    if (!id) {
+      id = await createTax(app, biz.accessToken, ratePercent);
+      taxIdByRate.set(ratePercent, id);
+    }
+    return id;
+  }
+
+  async function sellOneLine(sku: string, quantity: number, unitPrice: number, discountAmount: number, taxRatePercent = 0) {
+    const taxId = taxRatePercent > 0 ? await taxOfRate(taxRatePercent) : undefined;
+    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, sku, { defaultCost: 1, taxId });
     await request(app.getHttpServer())
       .post('/api/v1/inventory/opening-stock')
       .set('Authorization', auth())
@@ -62,17 +79,20 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
       .expect(201);
 
     // BD-12: the manual discount is capped at the line gross, so the
-    // amount actually owed follows the capped figure.
+    // amount actually owed follows the capped figure. BD-18: tax is then
+    // charged on that capped, discounted net - never on the gross - so a
+    // fully-discounted line attracts no tax at all.
     const gross = unitPrice * quantity;
-    const total = gross - Math.min(discountAmount, gross) + taxAmount;
+    const net = gross - Math.min(discountAmount, gross);
+    const total = net + (net * taxRatePercent) / 100;
     const res = await request(app.getHttpServer())
       .post('/api/v1/sales')
       .set('Authorization', auth())
       .send({
         warehouseId: biz.warehouseId,
         customerId,
-        items: [{ variantId, quantity, unitPrice, discountAmount, taxAmount }],
-        payments: [{ amount: total }],
+        items: [{ variantId, quantity, unitPrice, discountAmount }],
+        payments: total > 0 ? [{ amount: total }] : [],
       })
       .expect(201);
     return { saleId: res.body.data.id as string, saleItemId: res.body.data.items[0].id as string, variantId };
@@ -173,14 +193,43 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
 
   // ------------------------------------------------------------------
   it('excludes tax from the credit - the stored lineTotal INCLUDES tax and must not be used', async () => {
-    // 2 units at 100 = 200 gross, 50 discount, 30 tax.
+    // 2 units at 100 = 200 gross, 50 discount, 20% tax on the net 150 = 30.
     // lineTotal stored = 200 - 50 + 30 = 180, but merchandise = 150.
-    const { saleId, saleItemId } = await sellOneLine('BD1-TAX', 2, 100, 50, 30);
+    const { saleId, saleItemId } = await sellOneLine('BD1-TAX', 2, 100, 50, 20);
     const item = await admin.saleItem.findUniqueOrThrow({ where: { id: saleItemId } });
     expect(item.lineTotal.toString()).toBe('180');
 
     const res = await returnUnits(saleId, saleItemId, 2).expect(201);
-    expect((await creditFor(res.body.data.id)).toString()).toBe('150');
+
+    // BD-1's subject is the MERCHANDISE credit, and it is 150 - the stored
+    // lineTotal of 180 must never be used as the credit basis. The GL is
+    // where the two columns are separately visible, so assert there.
+    const entry = await admin.journalEntry.findFirstOrThrow({
+      where: { sourceType: 'SaleReturn', sourceId: res.body.data.id },
+      include: { lines: { include: { account: true } } },
+    });
+    const debitOn = (type: string) =>
+      entry.lines
+        .filter((l) => l.account.type === type)
+        .reduce((sum, l) => sum.plus(l.debit), D(0))
+        .toString();
+
+    // Revenue is reversed by the MERCHANDISE value only: 150, not the 180
+    // lineTotal and not the 200 gross a pre-BD-1 calculation produced.
+    expect(debitOn('REVENUE')).toBe('150');
+
+    // Phase 10 (BD-18) adds the second column: the 30 of tax the customer
+    // was charged comes off the tax liability in its own right, computed by
+    // BD-1's cumulative method rather than as a fresh proportion.
+    const taxPayable = entry.lines.filter((l) => l.account.type === 'LIABILITY');
+    expect(taxPayable.reduce((sum, l) => sum.plus(l.debit), D(0)).toString()).toBe('30');
+
+    // The customer's ledger is therefore credited 180 - exactly what the
+    // sale debited them for this line. Crediting only the merchandise would
+    // strand a permanent 30 debit against goods they handed back. The 150
+    // above is what guarantees this is 180 rather than the 230 the pre-BD-1
+    // calculation would have produced.
+    expect((await creditFor(res.body.data.id)).toString()).toBe('180');
   });
 
   it('an undiscounted line is unchanged by the fix - Phase 5 behaviour preserved exactly', async () => {
@@ -217,8 +266,9 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
   // ------------------------------------------------------------------
   describe('BD-12 - the manual discount is capped at the line gross', () => {
     it('caps an over-discounted line and never produces negative merchandise value', async () => {
-      // gross 100, requested discount 110, tax 20. The old CHECK
-      // (line_total >= 0) accepted this; the discount is now capped at 100.
+      // gross 100, requested discount 110, a 20% tax on the product. The
+      // old CHECK (line_total >= 0) accepted this; the discount is now
+      // capped at 100.
       const { saleId, saleItemId } = await sellOneLine('BD12-CAP', 1, 100, 110, 20);
       const sale = await admin.sale.findUniqueOrThrow({ where: { id: saleId }, include: { items: true } });
 
@@ -226,18 +276,28 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
       expect(sale.items[0].discountAmount.toString()).toBe('100');
       // Merchandise value is zero, never negative.
       expect(sale.subtotal.minus(sale.discountAmount).toString()).toBe('0');
-      // The customer still owes the tax; line_total is unchanged at 20.
-      expect(sale.totalAmount.toString()).toBe('20');
-      expect(sale.items[0].lineTotal.toString()).toBe('20');
+      // BEHAVIOURAL CORRECTION, Phase 10 (BD-18). This line used to assert
+      // that the customer "still owes the tax" of 20, because the caller
+      // supplied the tax figure directly and nothing related it to the
+      // discount. Tax is now computed by the server on the DISCOUNTED net,
+      // so a line discounted to zero is taxed at zero - which is both the
+      // approved rule and what any tax authority would expect. The total is
+      // therefore 0, not 20.
+      expect(sale.totalAmount.toString()).toBe('0');
+      expect(sale.items[0].lineTotal.toString()).toBe('0');
+      expect(sale.items[0].taxAmount.toString()).toBe('0');
       expect(sale.discountAmount.toString()).toBe(
         sale.items.reduce((s, i) => s.plus(i.discountAmount), D(0)).toString(),
       );
 
-      // ...and the CustomerTransaction records the real amount owed.
-      const txn = await admin.customerTransaction.findFirstOrThrow({
+      // ...and because nothing is owed, no CustomerTransaction is written
+      // at all: a zero-amount ledger row carries no information and is
+      // rejected by the `customer_transactions` non-zero CHECK. This
+      // exercises the zero-total guard in CreateSaleUseCase directly.
+      const txn = await admin.customerTransaction.findFirst({
         where: { referenceType: 'Sale', referenceId: saleId, type: 'SALE' },
       });
-      expect(txn.amount.toString()).toBe('20');
+      expect(txn).toBeNull();
 
       // Returning it credits exactly zero - never a negative credit that
       // would charge the customer for handing goods back.
@@ -248,7 +308,7 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
     });
 
     it('the GL entry for a fully-discounted line stays balanced with no negative reversal', async () => {
-      const { saleId, saleItemId } = await sellOneLine('BD12-GL', 2, 50, 500, 10);
+      const { saleId, saleItemId } = await sellOneLine('BD12-GL', 2, 50, 500, 10); // 10% tax on a net of zero = zero
       const entry = await admin.journalEntry.findFirstOrThrow({
         where: { sourceType: 'Sale', sourceId: saleId },
         include: { lines: true },
@@ -286,8 +346,11 @@ describe('Sale return credit - BD-1 historical effective value (e2e, real Postgr
         .send({
           warehouseId: biz.warehouseId,
           customerId,
-          items: [{ variantId, quantity: 1, unitPrice: 100, discountAmount: 150, taxAmount: 30 }],
-          payments: [{ amount: 30 }],
+          items: [{ variantId, quantity: 1, unitPrice: 100, discountAmount: 150 }],
+          // Phase 10 (BD-18): the discount caps at the gross, leaving a net
+          // of zero, so the server charges no tax and there is nothing to
+          // tender. This used to carry a caller-supplied tax of 30.
+          payments: [],
         })
         .expect(201);
 

@@ -19,6 +19,7 @@ import { round4 } from '../../../../common/domain/money';
 import { lockCustomer } from '../../../loyalty/domain/lock-customer';
 import { findActiveShift } from '../../domain/find-active-shift';
 import { recordCashTransaction } from '../../../finance/domain/record-cash-transaction';
+import { TaxEngineService } from '../../../../engines/tax/tax-engine.service';
 import { getCustomerPointsBalance } from '../../../loyalty/domain/customer-points-balance';
 import { computeCumulativeClawback, computeCumulativeRestoration } from '../../../loyalty/domain/loyalty-returns';
 import { returnSerialsToQuarantine } from '../../../inventory/domain/return-serials';
@@ -84,6 +85,7 @@ export class CreateSaleReturnUseCase {
     private readonly engine: InventoryEngineService,
     private readonly effectivePermissions: EffectivePermissionsService,
     private readonly accounting: AccountingEngineService,
+    private readonly tax: TaxEngineService,
   ) {}
 
   async execute(actor: RequestUser, saleId: string, input: CreateSaleReturnInput) {
@@ -215,6 +217,9 @@ export class CreateSaleReturnUseCase {
       });
 
       let totalCredit = new Prisma.Decimal(0);
+      /// Phase 10 (BD-18): the tax portion coming back, accumulated by the
+      /// same cumulative-delta method as the merchandise credit.
+      let totalTaxReversal = new Prisma.Decimal(0);
       let returnInCost = new Prisma.Decimal(0);
       let damageWriteOff = new Prisma.Decimal(0);
       for (const line of input.items) {
@@ -340,6 +345,22 @@ export class CreateSaleReturnUseCase {
         // and the redemption restoration alike, so no two of them can
         // ever disagree about how much of the sale came back.
         totalCredit = totalCredit.plus(lineReturnCredit(saleItem, line.quantity));
+
+        // Phase 10 (BD-18): the TAX on the returned units reverses too - the
+        // customer paid it, so it comes back with the merchandise.
+        //
+        // Apportioned by BD-1's CUMULATIVE method rather than a per-return
+        // proportion. This is not decoration: naive per-return proportions
+        // drift by fractions that accumulate, which is precisely the defect
+        // BD-1 exists to eliminate. Three partial returns of a line reverse
+        // EXACTLY the tax that was charged - never a fraction more or less.
+        const taxBefore = this.tax.cumulativeLineTax(saleItem.taxAmount, saleItem.quantity, saleItem.quantityReturned);
+        const taxAfter = this.tax.cumulativeLineTax(
+          saleItem.taxAmount,
+          saleItem.quantity,
+          saleItem.quantityReturned.plus(line.quantity),
+        );
+        totalTaxReversal = totalTaxReversal.plus(taxAfter.minus(taxBefore));
       }
 
       // ---------------------------------------------------------------
@@ -474,10 +495,17 @@ export class CreateSaleReturnUseCase {
       // ---------------------------------------------------------------
       const refundAmount = input.refund ? round4(new Prisma.Decimal(input.refund.amount)) : new Prisma.Decimal(0);
 
-      if (refundAmount.greaterThan(totalCredit)) {
+      // Phase 10 (BD-18): what the customer actually gets back is the
+      // merchandise credit PLUS the tax they paid on it. The merchandise
+      // figure alone stays the basis for every loyalty calculation (BD-3 is
+      // explicitly net of discounts and BEFORE tax), so the two are kept
+      // separate rather than merged.
+      const totalRefundable = round4(totalCredit.plus(totalTaxReversal));
+
+      if (refundAmount.greaterThan(totalRefundable)) {
         throw new ValidationFailedError('The refund cannot exceed the credit due for this return', {
           refundAmount: refundAmount.toString(),
-          returnCredit: totalCredit.toString(),
+          returnCredit: totalRefundable.toString(),
         });
       }
 
@@ -486,10 +514,10 @@ export class CreateSaleReturnUseCase {
       // not an invented policy - it is the same shape as the existing rule
       // that a walk-in SALE must be paid in full. Without it, the
       // difference would simply vanish.
-      if (!sale.customerId && totalCredit.greaterThan(0) && !refundAmount.equals(totalCredit)) {
+      if (!sale.customerId && totalRefundable.greaterThan(0) && !refundAmount.equals(totalRefundable)) {
         throw new ValidationFailedError(
           'A walk-in return must be refunded in full - there is no customer account for the balance to sit on',
-          { returnCredit: totalCredit.toString(), refundAmount: refundAmount.toString() },
+          { returnCredit: totalRefundable.toString(), refundAmount: refundAmount.toString() },
         );
       }
 
@@ -518,7 +546,7 @@ export class CreateSaleReturnUseCase {
       }
 
       // The customer's ledger takes only what was NOT handed back in cash.
-      const ledgerCredit = round4(totalCredit.minus(refundAmount));
+      const ledgerCredit = round4(totalRefundable.minus(refundAmount));
       if (sale.customerId && ledgerCredit.greaterThan(0)) {
         await tx.customerTransaction.create({
           data: {
@@ -540,6 +568,7 @@ export class CreateSaleReturnUseCase {
       const returnJournalLines = await buildSaleReturnJournalLines(tx, actor.tenantId, {
         customerId: sale.customerId,
         totalCredit,
+        taxReversal: totalTaxReversal,
         returnInCost,
         damageWriteOff,
         refund: input.refund && refundAmount.greaterThan(0) ? { method: input.refund.method, amount: refundAmount } : null,

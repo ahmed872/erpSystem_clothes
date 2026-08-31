@@ -109,6 +109,14 @@ model Business {
   salePromotionApplications SalePromotionApplication[]
   SaleItemSerial            SaleItemSerial[]
   SaleReturnItemSerial      SaleReturnItemSerial[]
+  /// Phase 10 (BD-18 rule 3). Default EXCLUSIVE - exactly how every
+  /// pre-Phase-10 business already behaved, so no existing tenant changes
+  /// meaning.
+  taxPricingMode            TaxPricingMode             @default(EXCLUSIVE) @map("tax_pricing_mode")
+  /// The tax applied when a product names none of its own.
+  defaultTaxId              String?                    @map("default_tax_id")
+  defaultTax                Tax?                       @relation("BusinessDefaultTax", fields: [defaultTaxId], references: [id], onDelete: SetNull)
+  taxes                     Tax[]
   cashRegisters             CashRegister[]
   cashTransactions          CashTransaction[]
 
@@ -507,6 +515,13 @@ model Product {
   // any Phase 1/2 behavior.
   tracksLots          Boolean       @default(false) @map("tracks_lots")
   tracksSerialNumbers Boolean       @default(false) @map("tracks_serial_numbers")
+  /// Phase 10 (BD-18): the tax this product carries. NULL falls back to the
+  /// business default.
+  taxId               String?       @map("tax_id")
+  /// BD-18 rule 8: exemption is EXPLICIT and never inferred from a missing
+  /// rate. An exempt product is taxed at nothing even where a business
+  /// default exists.
+  taxExempt           Boolean       @default(false) @map("tax_exempt")
   createdAt           DateTime      @default(now()) @map("created_at")
   updatedAt           DateTime      @updatedAt @map("updated_at")
   createdBy           String?       @map("created_by")
@@ -519,6 +534,7 @@ model Product {
   variants    ProductVariant[]
   productUoms ProductUom[]
   bundleItems BundleItem[]     @relation("BundleProduct")
+  tax         Tax?             @relation(fields: [taxId], references: [id], onDelete: SetNull)
 
   @@unique([businessId, sku])
   @@index([businessId])
@@ -1455,6 +1471,16 @@ enum CashTransactionType {
   EXPENSE
 }
 
+/// Phase 10 (BD-18 rule 3): whether catalogue prices are entered with tax
+/// already inside them. INCLUSIVE is an ENTRY AND DISPLAY CONVENTION ONLY:
+/// the TaxEngine extracts the net amount at line construction and the whole
+/// existing tax-exclusive pipeline runs unchanged from there. There is
+/// deliberately no second calculation pipeline.
+enum TaxPricingMode {
+  EXCLUSIVE
+  INCLUSIVE
+}
+
 enum ShiftStatus {
   OPEN
   CLOSED
@@ -1569,6 +1595,40 @@ model Shift {
 /// Phase 10 (BD-17): a physical till. `Branch 1---* CashRegister 1---* Shift`,
 /// exactly as the Phase 0 ERD specifies. Generic across a single-register
 /// shop, a multi-register branch, and many branches.
+/// Phase 10 (BD-18) — a configurable tax. Rates are CONFIGURATION, never
+/// hard-coded constants, and no jurisdiction is assumed anywhere: a
+/// business defines whatever taxes it is subject to.
+///
+/// There is deliberately NO effective-dated TaxRate child table. Historical
+/// fidelity (BD-18 rule 4) is achieved by SNAPSHOTTING the applied rate and
+/// amount onto each sale line, which is strictly stronger than rate
+/// versioning - it survives a rate being edited, retired or deleted - and
+/// avoids building a versioning mechanism the approved policy never asked
+/// for. Recorded as a deliberate deviation from the Phase 0 ERD.
+model Tax {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  name        String
+  /// Stored as a PERCENTAGE (14.0000 means 14%), which is how a business
+  /// owner states a rate. The engine divides by 100 exactly once, in one
+  /// place, so the percent-vs-fraction ambiguity cannot spread.
+  ratePercent Decimal  @map("rate_percent") @db.Decimal(9, 4)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdBy   String?  @map("created_by")
+  updatedBy   String?  @map("updated_by")
+
+  business             Business   @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "taxes_business_fk")
+  products             Product[]
+  defaultForBusinesses Business[] @relation("BusinessDefaultTax")
+  saleItems            SaleItem[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+  @@map("taxes")
+}
+
 model CashRegister {
   id         String   @id @default(uuid())
   businessId String   @map("business_id")
@@ -1677,6 +1737,14 @@ model SaleItem {
   /// rule #6), exactly mirroring PurchaseItem.unitCost's non-retroactivity.
   unitPrice        Decimal  @map("unit_price") @db.Decimal(18, 4)
   discountAmount   Decimal  @default(0) @map("discount_amount") @db.Decimal(18, 4)
+  /// Phase 10 (BD-18 rules 4 and 5): the tax ACTUALLY applied, computed
+  /// server-side and frozen here. `taxRateSnapshot` is the percentage in
+  /// force at the moment of sale; changing, retiring or deleting the Tax row
+  /// later cannot reach this line. `taxId` is descriptive provenance only -
+  /// the arithmetic reads the snapshot.
+  taxId            String?  @map("tax_id")
+  taxRateSnapshot  Decimal? @map("tax_rate_snapshot") @db.Decimal(9, 4)
+  taxExempt        Boolean  @default(false) @map("tax_exempt")
   taxAmount        Decimal  @default(0) @map("tax_amount") @db.Decimal(18, 4)
   lineTotal        Decimal  @default(0) @map("line_total") @db.Decimal(18, 4)
   /// Cumulative quantity returned across ALL SaleReturns for this line -
@@ -1693,6 +1761,7 @@ model SaleItem {
   warranties            Warranty[]
   promotionApplications SalePromotionApplication[]
   SaleItemSerial        SaleItemSerial[]
+  tax                   Tax?                       @relation(fields: [taxId], references: [id], onDelete: SetNull)
 
   @@unique([saleId, variantId])
   @@index([businessId])

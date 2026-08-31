@@ -90,3 +90,36 @@ export const createCashMovementSchema = z.object({
   idempotencyKey: z.string().trim().min(1).max(120).optional(),
 });
 export type CreateCashMovementInput = z.infer<typeof createCashMovementSchema>;
+
+/**
+ * Phase 10 (BD-18) — tax configuration.
+ *
+ * Rates are CONFIGURATION. No jurisdiction, rate or regime is assumed
+ * anywhere in the product: a business defines whatever taxes it is subject
+ * to, names them itself, and switches them on or off.
+ */
+export const createTaxSchema = z.object({
+  name: nameSchema,
+  /// A PERCENTAGE: 14 means 14%. Zero is valid (an explicitly zero-rated
+  /// tax is a real thing and is not the same as no tax at all).
+  ratePercent: z.number().finite().min(0).max(1000),
+});
+export type CreateTaxInput = z.infer<typeof createTaxSchema>;
+
+export const updateTaxSchema = z.object({
+  name: nameSchema.optional(),
+  /// Editing a rate changes what FUTURE sales are charged. It can never
+  /// reach a historical sale, because each line snapshots the rate that
+  /// produced its tax (BD-18 rule 4).
+  ratePercent: z.number().finite().min(0).max(1000).optional(),
+  isActive: z.boolean().optional(),
+});
+export type UpdateTaxInput = z.infer<typeof updateTaxSchema>;
+
+export const updateTaxSettingsSchema = z.object({
+  taxPricingMode: z.enum(['EXCLUSIVE', 'INCLUSIVE']).optional(),
+  /// Applied to any product that names no tax of its own. Explicitly
+  /// nullable, so a business can remove the default entirely.
+  defaultTaxId: z.string().uuid().nullable().optional(),
+});
+export type UpdateTaxSettingsInput = z.infer<typeof updateTaxSettingsSchema>;

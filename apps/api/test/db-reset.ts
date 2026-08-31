@@ -20,7 +20,7 @@ export async function resetDatabase(): Promise<void> {
         "warranty_claims", "warranties",
         "sale_return_item_serials", "sale_promotion_applications", "promotions", "sale_item_serials",
         "sale_return_items", "sale_returns", "sale_payments", "sale_items", "sales",
-        "cash_transactions", "shifts", "cash_registers",
+        "cash_transactions", "shifts", "cash_registers", "taxes",
         "customer_transactions", "customer_points", "customers",
         "journal_entry_lines", "journal_entries", "accounting_mapping_rules", "fiscal_periods", "accounts",
         "product_price_history", "product_prices", "price_lists",

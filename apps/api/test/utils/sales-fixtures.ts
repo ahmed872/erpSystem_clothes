@@ -36,3 +36,50 @@ export async function setupSalesFixture(app: INestApplication, slugSuffix: strin
 
   return { ...biz, activeShiftId: shift.body.data.id, cashRegisterId };
 }
+
+
+/**
+ * Phase 10 (BD-18): creates a tax and makes it the business default, so
+ * every product without its own tax is charged at `ratePercent`.
+ *
+ * Tests that previously passed `taxAmount` in the sale request now configure
+ * a real tax instead - which is a strictly stronger check, because the tax
+ * they assert is one the SERVER computed rather than one they asserted the
+ * server echoed back.
+ */
+export async function setupDefaultTax(app: INestApplication, accessToken: string, ratePercent: number, name = 'Standard'): Promise<string> {
+  const taxId = await createTax(app, accessToken, ratePercent, name);
+
+  await request(app.getHttpServer())
+    .put('/api/v1/settings/tax')
+    .set('Authorization', `Bearer ${accessToken}`)
+    .send({ defaultTaxId: taxId })
+    .expect(200);
+
+  return taxId;
+}
+
+/**
+ * Creates a tax WITHOUT making it the business default, so it can be
+ * attached to one product only. Tests that need a single taxed product
+ * use this rather than `setupDefaultTax`, which would change the total of
+ * every other sale in the same spec.
+ */
+let taxNameSeq = 0;
+export async function createTax(app: INestApplication, accessToken: string, ratePercent: number, name = `Tax ${ratePercent} #${++taxNameSeq}`): Promise<string> {
+  const res = await request(app.getHttpServer())
+    .post('/api/v1/taxes')
+    .set('Authorization', `Bearer ${accessToken}`)
+    .send({ name, ratePercent })
+    .expect(201);
+  return res.body.data.id;
+}
+
+/** Switches the business between EXCLUSIVE and INCLUSIVE pricing. */
+export async function setTaxPricingMode(app: INestApplication, accessToken: string, mode: 'EXCLUSIVE' | 'INCLUSIVE'): Promise<void> {
+  await request(app.getHttpServer())
+    .put('/api/v1/settings/tax')
+    .set('Authorization', `Bearer ${accessToken}`)
+    .send({ taxPricingMode: mode })
+    .expect(200);
+}

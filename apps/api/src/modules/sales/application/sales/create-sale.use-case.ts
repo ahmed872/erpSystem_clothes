@@ -19,6 +19,7 @@ import { buildSaleJournalLines } from '../../../accounting/domain/sale-journal-l
 import { round4 } from '../../../../common/domain/money';
 import { capManualDiscount } from '../../domain/line-discount';
 import { recordCashTransaction } from '../../../finance/domain/record-cash-transaction';
+import { TaxEngineService, ResolvedLineTax } from '../../../../engines/tax/tax-engine.service';
 import { lockCustomer } from '../../../loyalty/domain/lock-customer';
 import { getCustomerPointsBalance } from '../../../loyalty/domain/customer-points-balance';
 import { computePointsEarned, resolveLoyaltyEarnRate } from '../../../loyalty/domain/loyalty-earning';
@@ -34,7 +35,7 @@ function saleFingerprint(
     quantity: Prisma.Decimal.Value;
     unitPrice: Prisma.Decimal.Value;
     discountAmount: Prisma.Decimal.Value;
-    taxAmount: Prisma.Decimal.Value;
+    taxExempt?: boolean;
     serials?: string[];
   }[],
   payments: { amount: Prisma.Decimal.Value; method: string }[],
@@ -60,7 +61,10 @@ function saleFingerprint(
         variantId: i.variantId,
         quantity: new Prisma.Decimal(i.quantity).toString(),
         unitPrice: new Prisma.Decimal(i.unitPrice).toString(),
-        taxAmount: new Prisma.Decimal(i.taxAmount).toString(),
+        // Phase 10: the caller no longer supplies tax, so it cannot be part
+        // of the fingerprint. The explicit exemption flag IS part of the
+        // request, so a replay that flips it is correctly rejected.
+        taxExempt: Boolean(i.taxExempt),
         // Phase 8E: serials are CLIENT-supplied, so replaying the same key
         // with a different physical unit must be rejected, not silently
         // accepted. Sorted so the same set in a different order is
@@ -120,6 +124,7 @@ export class CreateSaleUseCase {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly tax: TaxEngineService,
     private readonly engine: InventoryEngineService,
     private readonly effectivePermissions: EffectivePermissionsService,
     private readonly accounting: AccountingEngineService,
@@ -246,7 +251,10 @@ export class CreateSaleUseCase {
         where: { id: { in: variantIds }, businessId: actor.tenantId },
         // `product.categoryId` is needed so a CATEGORY-targeted promotion
         // can be matched without a second query per line.
-        include: { product: { select: { id: true, categoryId: true, tracksSerialNumbers: true } } },
+        // Phase 10 (BD-18): the product's own tax and explicit exemption are
+        // loaded here so tax resolves from stored configuration, never from
+        // anything the caller sent.
+        include: { product: { select: { id: true, categoryId: true, tracksSerialNumbers: true, taxId: true, taxExempt: true } } },
       });
       if (variants.length !== variantIds.length) {
         const found = new Set(variants.map((v) => v.id));
@@ -296,6 +304,32 @@ export class CreateSaleUseCase {
       // return-credit.ts). For integer quantities the rounding is the
       // identity, so no pre-existing sale's arithmetic changes; it only
       // bites for fractional quantities at 4-dp prices.
+      // ---------------------------------------------------------------
+      // Phase 10 (BD-18): TAX, resolved and computed SERVER-SIDE.
+      //
+      // The request no longer carries `taxAmount` at all - a client cannot
+      // state what tax it would like to pay. Everything below derives from
+      // the tenant's own tax configuration.
+      //
+      // In INCLUSIVE mode the unit price and the manual discount arrive
+      // expressed in shelf terms and are converted to net HERE, at the line
+      // boundary. From this point on the pipeline is byte-identical to
+      // EXCLUSIVE mode, which is what keeps BD-1, BD-2, BD-3, BD-11 and
+      // BD-12 operating on exactly the values they were approved for.
+      // ---------------------------------------------------------------
+      const taxCtx = await this.tax.loadContext(tx, actor.tenantId);
+      const taxCache = new Map<string, { id: string; ratePercent: Prisma.Decimal; isActive: boolean } | null>();
+      const lineTaxByVariant = new Map<string, ResolvedLineTax>();
+      const netUnitPrice = new Map<string, Prisma.Decimal>();
+      const netManualInput = new Map<string, Prisma.Decimal>();
+      for (const item of input.items) {
+        const product = variantsById.get(item.variantId)!.product;
+        const resolved = await this.tax.resolveLineTax(tx, actor.tenantId, taxCtx, product, item.taxExempt ?? false, taxCache);
+        lineTaxByVariant.set(item.variantId, resolved);
+        netUnitPrice.set(item.variantId, this.tax.toNet(item.unitPrice, resolved, taxCtx));
+        netManualInput.set(item.variantId, this.tax.toNet(item.discountAmount, resolved, taxCtx));
+      }
+
       const lineGross = new Map<string, Prisma.Decimal>();
       // Approved decision BD-12: the manual discount is capped at the
       // line gross UNIVERSALLY, so net merchandise value can never go
@@ -306,14 +340,15 @@ export class CreateSaleUseCase {
       let discountAmount = new Prisma.Decimal(0);
       let taxAmount = new Prisma.Decimal(0);
       for (const item of input.items) {
-        const gross = round4(new Prisma.Decimal(item.unitPrice).times(item.quantity));
+        const gross = round4(netUnitPrice.get(item.variantId)!.times(item.quantity));
         lineGross.set(item.variantId, gross);
-        const manual = capManualDiscount(item.discountAmount, gross);
+        const manual = capManualDiscount(netManualInput.get(item.variantId)!, gross);
         cappedManual.set(item.variantId, manual);
         subtotal = subtotal.plus(gross);
         discountAmount = discountAmount.plus(manual);
-        taxAmount = taxAmount.plus(item.taxAmount);
       }
+      // `taxAmount` is now computed AFTER every discount is known, once the
+      // final net value of each line is settled - see below.
 
       // ---------------------------------------------------------------
       // Phase 8D: PROMOTIONS, resolved server-side inside this same
@@ -443,6 +478,27 @@ export class CreateSaleUseCase {
         discountAmount = discountAmount.plus(redemptionValue);
       }
 
+      // ---------------------------------------------------------------
+      // Phase 10 (BD-18): the tax on each line, computed from the tenant's
+      // configuration on the line's FINAL net value - after the manual
+      // discount, the promotion and the loyalty redemption. The customer is
+      // taxed on what they actually pay.
+      //
+      // This is the ONE place a tax figure comes into existence for a sale,
+      // and it derives entirely from stored configuration.
+      // ---------------------------------------------------------------
+      const lineTaxAmount = new Map<string, Prisma.Decimal>();
+      for (const item of input.items) {
+        const lineDiscount = cappedManual
+          .get(item.variantId)!
+          .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
+          .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
+        const netLineValue = lineGross.get(item.variantId)!.minus(lineDiscount);
+        const lineTax = this.tax.computeLineTax(netLineValue, lineTaxByVariant.get(item.variantId)!);
+        lineTaxAmount.set(item.variantId, lineTax);
+        taxAmount = taxAmount.plus(lineTax);
+      }
+
       const totalAmount = subtotal.minus(discountAmount).plus(taxAmount);
 
       let paidNow = new Prisma.Decimal(0);
@@ -485,7 +541,9 @@ export class CreateSaleUseCase {
           .get(item.variantId)!
           .plus(effectivePromotionByVariant.get(item.variantId) ?? 0)
           .plus(loyaltyDiscountByVariant.get(item.variantId) ?? 0);
-        const lineTotal = lineGross.get(item.variantId)!.minus(lineDiscount).plus(item.taxAmount);
+        const resolvedTax = lineTaxByVariant.get(item.variantId)!;
+        const lineTax = lineTaxAmount.get(item.variantId)!;
+        const lineTotal = lineGross.get(item.variantId)!.minus(lineDiscount).plus(lineTax);
 
         const createdItem = await tx.saleItem.create({
           data: {
@@ -493,9 +551,19 @@ export class CreateSaleUseCase {
             saleId: sale.id,
             variantId: item.variantId,
             quantity: item.quantity,
-            unitPrice: item.unitPrice,
+            // The NET unit price. In EXCLUSIVE mode this is exactly what the
+            // caller sent; in INCLUSIVE mode it is the extracted net, so
+            // every downstream reader - BD-1 return credit above all - keeps
+            // working on tax-exclusive values without knowing which mode the
+            // business uses.
+            unitPrice: netUnitPrice.get(item.variantId)!,
             discountAmount: lineDiscount,
-            taxAmount: item.taxAmount,
+            // BD-18 rule 4: the applied rate is FROZEN here. Editing,
+            // retiring or deleting the Tax row later cannot reach this line.
+            taxId: resolvedTax.taxId,
+            taxRateSnapshot: resolvedTax.taxId ? resolvedTax.ratePercent : null,
+            taxExempt: resolvedTax.exempt,
+            taxAmount: lineTax,
             lineTotal,
           },
         });

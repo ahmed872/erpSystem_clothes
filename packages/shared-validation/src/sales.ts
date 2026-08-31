@@ -35,7 +35,15 @@ const saleItemInputSchema = z.object({
   quantity: positiveQuantitySchema,
   unitPrice: nonNegativeMoneySchema,
   discountAmount: nonNegativeMoneySchema.default(0),
-  taxAmount: nonNegativeMoneySchema.default(0),
+  /// Phase 10 (BD-18 rule 5): `taxAmount` is NO LONGER ACCEPTED. Tax is
+  /// resolved and computed server-side from the tenant's own configuration,
+  /// so a client can never state the tax it would like to pay. This is a
+  /// deliberate breaking change, reported at the release gate.
+  ///
+  /// BD-18 rule 8: a line may be marked EXPLICITLY exempt. Exemption is
+  /// never inferred - a product with no tax configured is untaxed, which is
+  /// a different fact from a product that is exempt.
+  taxExempt: z.boolean().default(false),
   /// Phase 8E: the exact physical units being sold. REQUIRED for a
   /// serial-tracked variant (approved decision BD-13) and rejected for a
   /// variant that is not serial-tracked - the server decides which,

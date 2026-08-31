@@ -157,6 +157,9 @@ export const PERMISSION_CODES = [
   /// look. Same server-side stripping posture as products.view_cost.
   'shifts.view_expected',
   'cash.movement',
+  // Tax configuration (Phase 10, BD-18)
+  'tax.view',
+  'tax.manage',
 ] as const;
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number];
@@ -239,6 +242,7 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'shifts.reconcile',
     'shifts.view_expected',
     'cash.movement',
+    'tax.view',
   ],
   ACCOUNTANT: [
     'business.view',
@@ -297,6 +301,10 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'shifts.reconcile',
     'shifts.view_expected',
     'cash.movement',
+    // Tax is an accounting configuration decision, so the Accountant may
+    // author it as well as read it.
+    'tax.view',
+    'tax.manage',
   ],
   INVENTORY_MANAGER: [
     'warehouses.view',
@@ -326,6 +334,8 @@ export const ROLE_TEMPLATE_PERMISSIONS: Record<RoleTemplate, PermissionCode[]> =
     'attributes.edit',
     'attributes.delete',
     'pricelists.view',
+    // Assigning a tax to a product is part of setting the product up.
+    'tax.view',
     'inventory.view',
     'inventory.opening_stock',
     'inventory.receive',

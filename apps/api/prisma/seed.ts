@@ -115,6 +115,9 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'shifts.reconcile': 'Review and acknowledge a closed shift\'s cash variance',
   'shifts.view_expected': 'See the EXPECTED cash figure and variance on a shift (withheld from the counting cashier so blind close stays blind)',
   'cash.movement': 'Record a manual cash pay-in or pay-out against an open shift',
+  // Phase 10 (BD-18) - tax configuration
+  'tax.view': 'View the business tax configuration',
+  'tax.manage': 'Create, edit and retire taxes, and set the pricing mode and default tax',
 };
 
 /**

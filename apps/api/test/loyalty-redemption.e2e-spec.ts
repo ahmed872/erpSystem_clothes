@@ -3,7 +3,7 @@ import request from 'supertest';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { createTestApp } from './utils/app-factory';
 import { resetDatabase } from './db-reset';
-import { setupSalesFixture, SalesFixture } from './utils/sales-fixtures';
+import { setupSalesFixture, SalesFixture , createTax } from './utils/sales-fixtures';
 import { createSimpleProduct } from './utils/inventory-fixtures';
 
 /**
@@ -76,14 +76,22 @@ describe('Loyalty redemption, earning, clawback and restoration (e2e, real Postg
 
   /** `rawToken` is the bare access token (createSimpleProduct adds its
    * own `Bearer ` prefix); the direct request below adds one too. */
-  async function stockedVariant(sku: string, qty = 500, rawToken = biz.accessToken, fixture = biz) {
-    const { variantId } = await createSimpleProduct(app, rawToken, fixture.uomId, sku, { defaultCost: 1 });
+  async function stockedVariant(sku: string, qty = 500, rawToken = biz.accessToken, fixture = biz, taxId?: string) {
+    const { variantId } = await createSimpleProduct(app, rawToken, fixture.uomId, sku, { defaultCost: 1, taxId });
     await request(app.getHttpServer())
       .post('/api/v1/inventory/opening-stock')
       .set('Authorization', `Bearer ${rawToken}`)
       .send({ warehouseId: fixture.warehouseId, variantId, quantity: qty, unitCost: 1 })
       .expect(201);
     return variantId;
+  }
+
+  /** Phase 10 (BD-18): a stocked variant carrying its OWN tax at
+   * `ratePercent`. The rate is attached to the product rather than set as
+   * the business default, so it cannot change the totals of the other
+   * sales in this spec. */
+  async function taxedVariant(sku: string, ratePercent: number) {
+    return stockedVariant(sku, 500, biz.accessToken, biz, await createTax(app, biz.accessToken, ratePercent));
   }
 
   function sell(body: Record<string, unknown>, token = auth(), fixture = biz) {
@@ -216,16 +224,25 @@ describe('Loyalty redemption, earning, clawback and restoration (e2e, real Postg
     it('earns on the NET merchandise amount after the redemption discount, floored, excluding tax', async () => {
       const customerId = await createCustomer('Earner');
       await grantPoints(customerId, 5000);
-      const variantId = await stockedVariant('LOY-EARN');
+      const variantId = await taxedVariant('LOY-EARN', 4);
 
-      // 300 gross - 50 redemption = 250 net; tax 10 is excluded.
+      // 300 gross - 50 redemption = 250 net; a 4% tax on that net is 10,
+      // and BD-3 excludes it from the basis.
       // rate 2 => floor(250 x 2) = 500 points earned.
+      //
+      // Phase 10 (BD-18): the tax is no longer asserted by the caller. A
+      // real 4% tax is attached to this product, so the 10 excluded below
+      // is a figure the SERVER computed from the discounted net - which
+      // makes this a strictly stronger proof that the basis is net of
+      // discounts and before tax.
       const res = await sell({
         customerId,
-        items: [{ variantId, quantity: 3, unitPrice: 100, taxAmount: 10 }],
+        items: [{ variantId, quantity: 3, unitPrice: 100 }],
         redeemPoints: 5000,
         payments: [{ amount: 260 }],
       }).expect(201);
+      expect(res.body.data.taxAmount).toBe('10');
+      expect(res.body.data.totalAmount).toBe('260');
 
       const earn = (await ledger(customerId)).find((e) => e.type === 'EARN' && e.referenceId === res.body.data.id)!;
       expect(earn.points.toString()).toBe('500');
@@ -364,18 +381,26 @@ describe('Loyalty redemption, earning, clawback and restoration (e2e, real Postg
     it('redemption may take merchandise to exactly zero, and the entry still balances', async () => {
       const customerId = await createCustomer('Full Redeem');
       await grantPoints(customerId, 10000);
-      const variantId = await stockedVariant('LOY-FULL');
+      const variantId = await taxedVariant('LOY-FULL', 5);
 
+      // BEHAVIOURAL CORRECTION, Phase 10 (BD-18). This sale used to carry a
+      // caller-supplied tax of 5, so the customer "still tendered the tax"
+      // even though the merchandise came to nothing. Tax is now computed by
+      // the server on the DISCOUNTED net, and a line redeemed to zero has a
+      // net of zero, so it attracts no tax: the sale total is 0 and there is
+      // nothing to tender. A 5% tax is still attached to the product, which
+      // is what makes the zero meaningful rather than vacuous.
       const res = await sell({
         customerId,
-        items: [{ variantId, quantity: 1, unitPrice: 100, taxAmount: 5 }],
+        items: [{ variantId, quantity: 1, unitPrice: 100 }],
         redeemPoints: 10000, // exactly 100.00
-        payments: [{ amount: 5 }], // customer still tenders the tax
+        payments: [],
       }).expect(201);
 
       const sale = await admin.sale.findUniqueOrThrow({ where: { id: res.body.data.id } });
       expect(sale.discountAmount.toString()).toBe('100');
-      expect(sale.totalAmount.toString()).toBe('5');
+      expect(sale.taxAmount.toString()).toBe('0');
+      expect(sale.totalAmount.toString()).toBe('0');
 
       const entry = await admin.journalEntry.findFirstOrThrow({
         where: { sourceType: 'Sale', sourceId: sale.id },

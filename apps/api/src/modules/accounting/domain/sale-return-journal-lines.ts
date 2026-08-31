@@ -30,6 +30,12 @@ export interface SaleReturnJournalInput {
    * no money moved and the whole credit stays on the customer's ledger.
    */
   refund: { method: SalePaymentMethod; amount: Prisma.Decimal } | null;
+  /**
+   * Phase 10 (BD-18): the tax portion coming back, apportioned by BD-1's
+   * cumulative method. Reverses out of Tax Payable, so the liability tracks
+   * only the tax actually retained.
+   */
+  taxReversal: Prisma.Decimal;
 }
 
 const SALE_TENDER_KEY: Record<SalePaymentMethod, AccountingMappingKey> = {
@@ -82,15 +88,19 @@ export async function buildSaleReturnJournalLines(tx: TenantTx, businessId: stri
   const neededKeys: AccountingMappingKey[] = [];
   if (returnInCost.greaterThan(0)) neededKeys.push('INVENTORY_ASSET', 'COGS');
   if (damageWriteOff.greaterThan(0)) neededKeys.push('INVENTORY_SHRINKAGE');
+  const taxReversal = round4(input.taxReversal);
+  // What the customer gets back: merchandise plus the tax they paid on it.
+  const totalRefundable = round4(totalCredit.plus(taxReversal));
   const refundAmount = input.refund ? round4(input.refund.amount) : new Prisma.Decimal(0);
-  const ledgerCredit = round4(totalCredit.minus(refundAmount));
+  const ledgerCredit = round4(totalRefundable.minus(refundAmount));
 
   // Revenue now reverses whenever the value went SOMEWHERE real - either
   // onto a customer's ledger or back out as a tender. A walk-in return with
   // a recorded refund therefore reverses revenue for the first time.
-  const postRevenueReversal = totalCredit.greaterThan(0) && (Boolean(input.customerId) || refundAmount.greaterThan(0));
+  const postRevenueReversal = totalRefundable.greaterThan(0) && (Boolean(input.customerId) || refundAmount.greaterThan(0));
   if (postRevenueReversal) {
     neededKeys.push('SALES_REVENUE');
+    if (taxReversal.greaterThan(0)) neededKeys.push('TAX_PAYABLE');
     if (refundAmount.greaterThan(0)) neededKeys.push(SALE_TENDER_KEY[input.refund!.method]);
     if (ledgerCredit.greaterThan(0)) neededKeys.push('ACCOUNTS_RECEIVABLE');
   }
@@ -108,6 +118,9 @@ export async function buildSaleReturnJournalLines(tx: TenantTx, businessId: stri
   }
   if (postRevenueReversal) {
     lines.push({ accountId: accounts.get('SALES_REVENUE')!, debit: totalCredit, description: 'Reverse sales revenue' });
+    if (taxReversal.greaterThan(0)) {
+      lines.push({ accountId: accounts.get('TAX_PAYABLE')!, debit: taxReversal, description: 'Reverse tax charged on returned goods' });
+    }
     if (refundAmount.greaterThan(0)) {
       lines.push({
         accountId: accounts.get(SALE_TENDER_KEY[input.refund!.method])!,

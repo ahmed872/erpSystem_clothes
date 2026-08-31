@@ -3,7 +3,7 @@ import request from 'supertest';
 import { PrismaClient } from '@prisma/client';
 import { createTestApp } from './utils/app-factory';
 import { resetDatabase } from './db-reset';
-import { setupSalesFixture, SalesFixture } from './utils/sales-fixtures';
+import { setupSalesFixture, SalesFixture, createTax } from './utils/sales-fixtures';
 import { createSimpleProduct } from './utils/inventory-fixtures';
 
 /**
@@ -19,12 +19,18 @@ describe('Accounting: exact postings and reconciliation (e2e, real Postgres)', (
   let admin: PrismaClient;
   let biz: SalesFixture;
   let supplierId: string;
+  let taxId10: string;
 
   beforeAll(async () => {
     await resetDatabase();
     app = await createTestApp();
     admin = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
     biz = await setupSalesFixture(app, 'acct-postings');
+    // Phase 10 (BD-18): tax is server-computed. A 10% tax exists for the one
+    // test that needs it, attached to that test's own product - NOT as the
+    // business default, which would silently change the totals every other
+    // posting in this spec asserts.
+    taxId10 = await createTax(app, biz.accessToken, 10);
 
     const supplier = await request(app.getHttpServer())
       .post('/api/v1/purchasing/suppliers')
@@ -72,7 +78,7 @@ describe('Accounting: exact postings and reconciliation (e2e, real Postgres)', (
   }
 
   it('a fully-paid walk-in sale posts Dr Cash / Cr Revenue + Dr COGS / Cr Inventory, exactly', async () => {
-    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'ACCT-SALE-1');
+    const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'ACCT-SALE-1', { taxId: taxId10 });
     await request(app.getHttpServer())
       .post('/api/v1/inventory/opening-stock')
       .set('Authorization', auth())
@@ -82,7 +88,11 @@ describe('Accounting: exact postings and reconciliation (e2e, real Postgres)', (
     const sale = await request(app.getHttpServer())
       .post('/api/v1/sales')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, items: [{ variantId, quantity: 3, unitPrice: 15, taxAmount: 3 }], payments: [{ amount: 48, method: 'CASH' }] })
+      // Phase 10 (BD-18): the caller no longer supplies tax. The product
+      // carries a 10% tax, so the net 45 attracts 4.50 - and the figure
+      // asserted below is one the SERVER computed, which is a strictly
+      // stronger check than the pass-through this used to assert.
+      .send({ warehouseId: biz.warehouseId, items: [{ variantId, quantity: 3, unitPrice: 15 }], payments: [{ amount: 49.5, method: 'CASH' }] })
       .expect(201);
 
     const cash = await accountByCode('1010');
@@ -92,9 +102,9 @@ describe('Accounting: exact postings and reconciliation (e2e, real Postgres)', (
     const inventory = await accountByCode('1200');
 
     const lines = await linesForSource('Sale', sale.body.data.id);
-    expect(sumSide(lines, cash.id, 'debit')).toBe(48);
+    expect(sumSide(lines, cash.id, 'debit')).toBe(49.5);
     expect(sumSide(lines, revenue.id, 'credit')).toBe(45);
-    expect(sumSide(lines, tax.id, 'credit')).toBe(3);
+    expect(sumSide(lines, tax.id, 'credit')).toBe(4.5);
     expect(sumSide(lines, cogs.id, 'debit')).toBe(18);
     expect(sumSide(lines, inventory.id, 'credit')).toBe(18);
 

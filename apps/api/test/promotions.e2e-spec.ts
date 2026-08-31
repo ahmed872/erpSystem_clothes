@@ -3,7 +3,7 @@ import request from 'supertest';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { createTestApp } from './utils/app-factory';
 import { resetDatabase } from './db-reset';
-import { setupSalesFixture, SalesFixture } from './utils/sales-fixtures';
+import { setupSalesFixture, SalesFixture, createTax } from './utils/sales-fixtures';
 
 /**
  * Phase 8D - Promotions. Real NestJS app + real PostgreSQL with RLS and
@@ -56,7 +56,7 @@ describe('Promotions (e2e, real Postgres)', () => {
   }
 
   /** A product (optionally in a category) with stock, returning its ids. */
-  async function stocked(sku: string, opts: { categoryId?: string; qty?: number; token?: string; fixture?: SalesFixture } = {}) {
+  async function stocked(sku: string, opts: { categoryId?: string; qty?: number; token?: string; fixture?: SalesFixture; taxId?: string } = {}) {
     const token = opts.token ?? biz.accessToken;
     const fixture = opts.fixture ?? biz;
     const res = await request(app.getHttpServer())
@@ -69,6 +69,7 @@ describe('Promotions (e2e, real Postgres)', () => {
         categoryId: opts.categoryId,
         defaultCost: 1,
         defaultSellingPrice: 100,
+        ...(opts.taxId ? { taxId: opts.taxId } : {}),
       })
       .expect(201);
     const productId = res.body.data.id as string;
@@ -337,14 +338,22 @@ describe('Promotions (e2e, real Postgres)', () => {
     });
 
     it('a line with NO promotion is unaffected by the promotion path - a discount at the gross stands', async () => {
-      const { variantId } = await stocked(`PR-BD11D-${seq++}`);
+      const { variantId } = await stocked(`PR-BD11D-${seq++}`, { taxId: await createTax(app, biz.accessToken, 20) });
       // No promotion for this variant at all. A manual discount exactly
       // equal to the line gross is untouched (Phase 8E's BD-12 cap is the
-      // identity here) and the customer still owes the tax.
-      const res = await sell({ items: [{ variantId, quantity: 1, unitPrice: 100, discountAmount: 100, taxAmount: 20 }], payments: [{ amount: 20 }] }).expect(201);
+      // identity here).
+      //
+      // BEHAVIOURAL CORRECTION, Phase 10 (BD-18). This used to assert that
+      // "the customer still owes the tax" of 20, because the caller handed
+      // the tax figure to the server. The server now computes tax on the
+      // DISCOUNTED net, so a line discounted to zero is taxed at zero. The
+      // product genuinely carries a 20% tax here, which is what makes the
+      // zero below a real result rather than an absence of configuration.
+      const res = await sell({ items: [{ variantId, quantity: 1, unitPrice: 100, discountAmount: 100 }], payments: [] }).expect(201);
       const sale = await saleRow(res.body.data.id);
       expect(sale.discountAmount.toString()).toBe('100');
-      expect(sale.totalAmount.toString()).toBe('20');
+      expect(sale.taxAmount.toString()).toBe('0');
+      expect(sale.totalAmount.toString()).toBe('0');
     });
   });
 

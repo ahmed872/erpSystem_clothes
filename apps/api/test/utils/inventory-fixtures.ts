@@ -32,7 +32,15 @@ export async function createSimpleProduct(
   token: string,
   uomId: string,
   sku: string,
-  opts?: { defaultCost?: number; defaultSellingPrice?: number; tracksLots?: boolean; tracksSerialNumbers?: boolean },
+  opts?: {
+    defaultCost?: number;
+    defaultSellingPrice?: number;
+    tracksLots?: boolean;
+    tracksSerialNumbers?: boolean;
+    /** Phase 10 (BD-18): the product's own tax, and an explicit exemption. */
+    taxId?: string;
+    taxExempt?: boolean;
+  },
 ): Promise<{ productId: string; variantId: string }> {
   const res = await request(app.getHttpServer())
     .post('/api/v1/catalog/products')
@@ -45,6 +53,8 @@ export async function createSimpleProduct(
       defaultSellingPrice: opts?.defaultSellingPrice ?? 0,
       tracksLots: opts?.tracksLots ?? false,
       tracksSerialNumbers: opts?.tracksSerialNumbers ?? false,
+      ...(opts?.taxId ? { taxId: opts.taxId } : {}),
+      ...(opts?.taxExempt ? { taxExempt: true } : {}),
     })
     .expect(201);
   return { productId: res.body.data.id as string, variantId: res.body.data.variants[0].id as string };

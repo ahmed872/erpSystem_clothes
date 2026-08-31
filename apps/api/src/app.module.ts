@@ -18,6 +18,7 @@ import { LoyaltyModule } from './modules/loyalty/loyalty.module';
 import { FinanceModule } from './modules/finance/finance.module';
 import { PromotionsModule } from './modules/promotions/promotions.module';
 import { InventoryEngineModule } from './engines/inventory/inventory-engine.module';
+import { TaxEngineModule } from './engines/tax/tax-engine.module';
 import { AccountingEngineModule } from './engines/accounting/accounting-engine.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
@@ -31,6 +32,7 @@ import { PermissionsGuard } from './common/guards/permissions.guard';
     AuditModule,
     InventoryEngineModule,
     AccountingEngineModule,
+    TaxEngineModule,
     IamModule,
     TenancyModule,
     CatalogModule,

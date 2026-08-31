@@ -93,6 +93,9 @@ export class ProductsService {
           defaultCost: input.defaultCost,
           defaultSellingPrice: input.defaultSellingPrice,
           minimumStock: input.minimumStock,
+          // Phase 10 (BD-18): product-level tax and explicit exemption.
+          taxId: input.taxId ?? undefined,
+          taxExempt: input.taxExempt,
           maximumStock: input.maximumStock,
           baseUomId: input.baseUomId,
           images: input.images,
@@ -249,6 +252,8 @@ export class ProductsService {
           description: input.description === undefined ? undefined : input.description,
           status: input.status ?? undefined,
           minimumStock: input.minimumStock === undefined ? undefined : input.minimumStock,
+          taxId: input.taxId === undefined ? undefined : input.taxId,
+          taxExempt: input.taxExempt,
           maximumStock: input.maximumStock === undefined ? undefined : input.maximumStock,
           images: input.images === undefined ? undefined : input.images,
           tracksLots: input.tracksLots ?? undefined,

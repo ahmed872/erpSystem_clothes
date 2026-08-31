@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { CashRegistersController } from './presentation/cash-registers.controller';
 import { CashRegistersService } from './application/registers/cash-registers.service';
 import { CashMovementsService } from './application/cash/cash-movements.service';
+import { TaxesController } from './presentation/taxes.controller';
+import { TaxesService } from './application/tax/taxes.service';
 
 /**
  * Phase 10 (BD-17) — the finance module of the Phase 0 module map, opened
@@ -21,8 +23,8 @@ import { CashMovementsService } from './application/cash/cash-movements.service'
  * cash-movement sub-resource.
  */
 @Module({
-  controllers: [CashRegistersController],
-  providers: [CashRegistersService, CashMovementsService],
+  controllers: [CashRegistersController, TaxesController],
+  providers: [CashRegistersService, CashMovementsService, TaxesService],
   exports: [CashMovementsService],
 })
 export class FinanceModule {}
