@@ -19,6 +19,20 @@ import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
  * documented where they are enforced.
  */
 export function setupSwagger(app: INestApplication): void {
+  SwaggerModule.setup('api/v1/docs', app, buildOpenApiDocument(app), {
+    swaggerOptions: { persistAuthorization: true },
+  });
+}
+
+/**
+ * The document itself, built and annotated but not mounted.
+ *
+ * Separated from `setupSwagger` so the contract can be asserted against
+ * directly - the Phase 11 security spec checks that every operation's
+ * stated authorization matches the metadata the guard enforces, and it
+ * should not have to stand up an HTTP route to do it.
+ */
+export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
   const config = new DocumentBuilder()
     .setTitle('Retail Operating System API')
     .setVersion('10')
@@ -31,9 +45,7 @@ export function setupSwagger(app: INestApplication): void {
 
   const document = SwaggerModule.createDocument(app, config);
   annotateAuthorization(app, document);
-  SwaggerModule.setup('api/v1/docs', app, document, {
-    swaggerOptions: { persistAuthorization: true },
-  });
+  return document;
 }
 
 /**

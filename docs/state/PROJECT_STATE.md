@@ -1,7 +1,65 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 10.2 — Downward Exchanges (**Complete. Phase 11 NOT started.**)
+Phase 11 — Security / Operations Hardening (**Complete. Phase 12 NOT started.**)
+
+Phase 11 added no product feature. It closed the gap between "the backend is correct" and "the backend is safe to run", which are different claims: every finding below is a real gap found in live code, and each was fixed, demonstrated, or recorded as an accepted limitation with the reasoning that made it acceptable.
+
+**Verification:** 627/627 e2e across 51 files · 37/37 unit · build, `tsc --noEmit` and lint clean · 54 migrations, no drift, both `erp_dev` and `erp_test` up to date · 183 routes, of which exactly **3 are public** (login, refresh, register — all now rate-limited) and **2 are token-only with no extra permission** (logout, change-own-password), the other **178 permission-gated** · `ops/verify-security.sh` PASS on both databases · a backup **restored and verified row-for-row** against a real database.
+
+---
+
+## PHASE 11 — WHAT WAS DELIVERED
+
+| # | Kind | Finding, from live code | Outcome |
+|---|---|---|---|
+| 1 | **Defect (severe, operational)** | `test/db-reset.ts` TRUNCATEs every table as the owner role, reading its target from `DATABASE_URL`, with nothing between it and a production connection string. | **Fixed.** Two independent conditions must both hold: `NODE_ENV` is exactly `test` **and** the database name identifies a test database. The error never prints the URL, because a connection string carries a password. |
+| 2 | Security gap | JWT secrets were validated lazily at first use. A server missing one started cleanly, passed a health check, and failed on the first person who tried to sign in. | **Fixed.** `assertEnvironmentIsUsable()` runs before `NestFactory.create`. It reports *every* problem at once, and quotes no value. |
+| 3 | Security gap | No refresh-token reuse detection. Rotation invalidated the spent token; the attacker's copy simply failed, and the session it was stolen from carried on. | **Fixed.** A genuine, unexpired, already-spent token revokes **every live session** for that user and writes an audit row. |
+| 4 | Security gap | Rate limiting was global only (120/min/IP) — 172,800 password guesses a day against one account. | **Fixed.** Per-endpoint limits on login (10/min), registration (5/min) and credential handling (20/min), all environment-configurable. |
+| 5 | Security gap | `audit.view` had existed since Phase 1 with **no endpoint serving it**: the record was kept and could not be read. | **Fixed.** `GET /audit-logs`, read-only, tenant-scoped, filterable, deterministically paged. |
+| 6 | Security gap | `PERMISSION_DENIED` was a dead enum value. "Did anyone try to reach the accounting module?" had no answer. | **Fixed.** Written in `PermissionsGuard` — the single place every authorization decision is made — naming the endpoint, the caller and the missing permission. |
+| 7 | Operational gap | No backup or restore, documented or demonstrated. | **Fixed and demonstrated** against a real database (see below). |
+| 8 | Operational gap | No `.env.example`, so every required variable was folklore. | **Fixed**, including the `DATABASE_URL` vs `RUNTIME_DATABASE_URL` distinction and why it matters. |
+| 9 | **Accepted limitation (reasoned)** | No token-based self-service password reset. | **Deliberately not built.** While delivery is deferred, the token would pass through the administrator anyway — zero benefit, in exchange for an unauthenticated redemption endpoint, a token store and a user-enumeration surface. The single-use/reuse-prevention requirement was instead applied to **refresh tokens**, where it genuinely applies and where a real gap existed (#3). |
+
+**Two audit claims corrected as stale.** A global throttler has existed since Phase 1 (`ThrottlerModule.forRoot`), and Swagger was wired in Phase 10I. Phase 11 did not add either; it tightened the first and made the second **drift-proof** — each operation's stated authorization is now read from the same `@RequirePermissions` metadata the guard enforces, so documentation cannot disagree with enforcement.
+
+### Backup and restore — actually demonstrated, not asserted
+
+`ops/backup.sh` (`pg_dump --format=custom`) and `ops/restore.sh` were run end to end against a real database. The restored copy matched row for row — businesses 2 · users 3 · sales 47 · sale_items 47 · journal_entries 67 · journal_entry_lines 295 · stock_movements 122 · customer_points 3 · audit_logs 247 · cash_transactions 44 — with zero unbalanced entries, an exchange-clearing balance of 0.0000, and no balance-vs-movement drift. **Enforcement survived the restore**: as the restricted `erp_app` role, tenant A saw 46 of its own sales and 0 of tenant B's; `DELETE FROM journal_entry_lines`, `UPDATE audit_logs` and a cross-tenant `INSERT` were each refused by PostgreSQL, and the row counts were unchanged afterwards.
+
+`restore.sh` refuses a non-empty target ("a restore is not a merge") and refuses a cluster lacking the `erp_app` role, because **roles are cluster-wide and are not in the dump**. `ops/BACKUP-RESTORE.md` states plainly what is still needed for production — off-host storage, a schedule, PITR, rehearsals, role provisioning — as **contracts**, naming no provider and inventing no credential.
+
+### `ops/verify-security.sh` — asking PostgreSQL, not the application
+
+A standing structural check that reads the system catalogues directly, so it holds even if the ORM, the use-cases and the whole test suite were wrong at once: RLS **and FORCE** on every table carrying `business_id`; no table with RLS and no policy; every policy carrying **both halves** *and actually consulting* `app.current_tenant_id` (a `USING (true)` policy has a USING half and isolates nothing); the documented `businesses` exception bounded to exactly its three per-command policies; `erp_app` neither superuser nor `BYPASSRLS`; nothing granted to `PUBLIC`; **no append-only table holding UPDATE or DELETE**, checked against an explicit list rather than derived from the grants themselves; and the ledger invariants — every entry balancing, no double-sided line, stock balances equal to their movements, exchange clearing at zero.
+
+It was proved non-vacuous: on a scratch copy with `FORCE RLS` removed from `sales`, an `UPDATE` granted on `audit_logs`, and the `customers` policy dropped, it reported all three and exited non-zero. Both real databases report **PASS**.
+
+### Files
+
+**Created:** `apps/api/src/common/config/validate-environment.ts` · `apps/api/src/common/security/throttle-policy.ts` · `apps/api/src/modules/audit/application/list-audit-logs.use-case.ts` · `apps/api/src/modules/audit/presentation/audit-logs.controller.ts` · `.env.example` · `ops/backup.sh` · `ops/restore.sh` · `ops/verify-security.sh` · `ops/BACKUP-RESTORE.md` · `apps/api/test/security-hardening.e2e-spec.ts` (25) · `apps/api/test/rate-limiting.e2e-spec.ts` (5) · `apps/api/src/common/config/__tests__/validate-environment.spec.ts` (9).
+
+**Modified:** `apps/api/test/db-reset.ts` (the reset guard) · `apps/api/src/main.ts` (validate before building anything) · `apps/api/src/app.module.ts` (configurable global limit) · `apps/api/src/common/guards/permissions.guard.ts` (`PERMISSION_DENIED` audit) · `apps/api/src/modules/iam/application/auth/refresh-token.use-case.ts` (reuse detection) · `apps/api/src/modules/iam/presentation/{auth,users}.controller.ts` and `apps/api/src/modules/tenancy/presentation/businesses.controller.ts` (throttle decorators) · `apps/api/src/modules/audit/audit.module.ts` · `apps/api/src/common/openapi/setup-swagger.ts` (drift-proof authorization annotations; `buildOpenApiDocument` split out so the contract can be asserted without mounting a route) · `packages/shared-validation/src/index.ts` (`auditLogListQuerySchema`) · `apps/api/.env.test` (relaxed limits, so the suite tests behaviour rather than throttling itself).
+
+**No migration. No schema change. No new permission — 117, unchanged. No new business rule.**
+
+### Security review — Phase 11
+
+- **The reuse-detection write survives its own 401.** Throwing inside `withTenant` would roll back the family revocation *and* the record of it, leaving the attacker's session alive and no evidence anything happened. It returns a discriminated result and throws after the transaction commits — the pattern `LoginUseCase` already used for exactly this reason — and there is a test that fails if that regresses.
+- **No per-account lockout, deliberately.** It is a denial-of-service weapon: anyone who knows a cashier's email could lock them out of the till mid-shift. The limit is on the source, not the target.
+- **In-memory, per-process rate limiting is an accepted weakness.** Behind N instances the effective limit is N times the configured one. A shared Redis store would buy a correct count in exchange for an availability dependency this system does not otherwise have; when horizontal scaling arrives the fix is a storage adapter behind the same policy, and the decorators do not change.
+- **A failed audit write never turns a 403 into a 500.** The `PERMISSION_DENIED` insert is wrapped and swallowed: failing to record must not tell the caller anything and must not let a denied request through.
+- **The audit endpoint could not become a write path even by mistake** — `erp_app` holds SELECT and INSERT on `audit_logs` and nothing else. Ordering is `createdAt DESC, id DESC`: several rows share a timestamp inside one transaction, and paging on the timestamp alone would silently skip and repeat rows.
+- **Append-only semantics were not touched.** No UPDATE or DELETE privilege was added to any ledger table.
+
+### Known issues — Phase 11
+
+- **Seven permission codes are enforced nowhere** — `branches.delete`, `brands.delete`, `categories.delete`, `products.delete`, `uoms.delete`, `warehouses.delete`, `users.manage_roles`. Each names a capability that has no endpoint. This is inert rather than dangerous (the hazardous direction is an endpoint with no permission, and there are none), and removing them would be a behaviour change outside a hardening phase. **Recorded, not fixed.** Four further codes — `products.view_cost`, `reports.view_profit`, `shifts.view_expected`, `inventory.allow_negative` — are correctly absent from any route because they gate **fields inside** a response, and are covered by existing tests.
+- **`businesses` allows an open `SELECT` policy.** Sign-in must resolve a slug before any tenant is known. Pre-existing, deliberate, and now bounded by an automated check so the exception cannot quietly grow to INSERT or UPDATE.
+
+---
 
 Phase 10.1 was a decision gate that found the Phase 10 exchange refusal rested on a **wrong premise**, and Phase 10.2 implemented the correction. `SaleReturn.refundMethod`/`refundAmount` mean *the real tender handed back*; the exchange-credit portion is not a refund and already lives on the sale as an `EXCHANGE_CREDIT` payment. A downward exchange therefore needs ONE refund figure with ONE method — exactly what the row carries.
 
@@ -77,7 +135,7 @@ Phase 10 turned the engine of Phases 1–8 into a shop that can actually open it
 
 ### Deliberate boundaries (in scope, chosen, and NOT defects)
 
-- **A downward exchange is refused**, naming both figures and what to do instead. Swapping for something cheaper is a return plus a separate sale — the difference is real money going back, which the return document already models with its own refund tender. Expressing it in one exchange would need a two-part refund the append-only `sale_returns` row cannot carry.
+- ~~**A downward exchange is refused.**~~ **SUPERSEDED BY PHASE 10.2.** The stated reason — that it would need a two-part refund the append-only `sale_returns` row cannot carry — was **wrong**: the row carries one refund figure with one method, which is exactly what a downward exchange needs. Phase 10.1 found the error and Phase 10.2 implemented the correction; see the Phase 10.2 section above for the settlement identities now enforced.
 - **`Tax` has no effective-dated child.** Per-line snapshotting is strictly stronger than rate versioning for the one thing that matters (a historical sale never moves), and the approved policy never asked for versioning. A deliberate deviation from the Phase 0 ERD.
 - **Purchase tax stays caller-supplied.** It is a fact from the supplier's invoice, not a computation the business performs; BD-18's server-side rule is about the tax the business CHARGES.
 - **Shift routes stay under `/sales/shifts`** rather than moving to `finance/`, to avoid breaking a path clients already use.
@@ -797,6 +855,12 @@ None (still backend-only - unchanged from Phases 1-5; still flagging this for yo
 **Phase 8F**: E2E: **9 new verification tests, 1 new file** (`phase8-verification.e2e-spec.ts`) — a cross-tenant INSERT sweep proving `WITH CHECK` rejects a forged row on every Phase 8 table (plus an explicit test that a cross-tenant `INSERT…SELECT` inserts *nothing*, because RLS filters the source rows too — a different but equally safe outcome, verified rather than assumed); a zero-row read sweep over ten tables both cross-tenant and with no tenant context; trial balance balanced after a promotion + loyalty + serial sale and its return, cross-checked by a query asserting every journal entry balances individually; determinism proven by computing the same promoted, discounted sale three times and by resolving overlapping promotions three times to the same winner; a consolidated atomicity sweep asserting **ten** table counts unchanged across seven rejection paths plus zero-value redemption; and historical immunity to `defaultCost`/`defaultSellingPrice` changes covering the sale, its COGS movements and its later return credit.
 - Full regression after 8F: **453/453 e2e (40 files) + 28/28 unit**, zero regressions. Build, `tsc --noEmit`, lint clean; both databases report "up to date" and `prisma migrate diff --exit-code` reports **no schema drift**.
 
+**Phase 11**: E2E: **30 new tests, 2 new files**; Unit: **9 new tests, 1 new file**. Every one covers a gap that was actually found — nothing restates an invariant an earlier phase already proves, and the RLS/append-only/tenant-isolation suites are touched only where Phase 11 opened a new path to them.
+- `security-hardening.e2e-spec.ts` (25) — **the reset guard (5)**: the real test database accepted; a production database name refused *even under* `NODE_ENV=test`; the test database refused when `NODE_ENV` is not `test`; unset and unparseable targets refused; and the error proven to contain neither the password nor the URL while still naming the database. **Refresh-token reuse (5)**: normal rotation leaving other sessions alone; a spent token presented twice revoking **every** live session including an unrelated second device, with `revokedAt IS NULL` count driven to 0; the audit row naming how many sessions it killed; the revocation *and* the record proven to survive the request's own 401 (the rollback trap); a forged token rejected **without** revoking anything, so reuse detection cannot be triggered by anyone who can send a bad string. **Suspension (1)**: a live, unexpired access token stops working immediately, along with the refresh token and any new login. **Audit trail (8)**: served to `audit.view`; 403 for a Cashier; 401 unauthenticated; **no cross-tenant row on any page**, with the tenant's `meta.total` proven to be its own count and not the table's; filters on action/user/entity; **deterministic paging across rows sharing a `createdAt`**, walking every page and asserting the ids equal the single-page read exactly (the regression that would catch losing the `id` tiebreak); malformed queries rejected rather than ignored; and the endpoint proven to expose **only** `get`, with a direct-connection `UPDATE`/`DELETE` refused by PostgreSQL. **`PERMISSION_DENIED` (4)**: a row naming the endpoint, caller and missing permission; one row per attempt with the denial still standing and nothing created; the denial filed under the **caller's** tenant and invisible to the other; and **no row at all** when the request was allowed. **The published contract (2)**: every documented operation's stated authorization matched against the `@RequirePermissions` and `@Public` metadata the guards actually read, across 80+ handlers, so the document cannot drift from enforcement.
+- `rate-limiting.e2e-spec.ts` (5) — builds its **own** application with small limits set before the module graph loads, because `.env.test` relaxes them for the rest of the suite and a relaxed limit proves nothing. Sign-in refused on a burst of **wrong** passwords (what an attack actually sends) and then refused for the **correct** ones too, with the structured `TOO_MANY_REQUESTS` envelope intact; bulk tenant creation refused; a stolen refresh token refused when exercised in a loop; a password-change loop grinding `currentPassword` refused; and the ordinary API proven **not** tightened — thirty authenticated calls, all served, because throttling a cashier who scans quickly is an operational cost for no security gain.
+- `validate-environment.spec.ts` (9, unit) — a correct production environment passing silently; the owner connection refused as the runtime connection in production and tolerated in development; missing, short and well-known-placeholder secrets; one key signing both token types; **every** problem reported at once rather than the first; warnings not fatal outside production; and no message — thrown or returned — quoting a secret, a value or a connection string.
+- Full regression: **627/627 e2e across 51 files + 37/37 unit**, zero regressions from Phases 1–10.2.
+
 ## Security Review
 Everything from Phases 1-4 stands unchanged. Phase 5 additions:
 - Every sales-mutating endpoint requires its own specific permission (11 new codes) rather than one blanket `sales.manage` - verified by test at two privilege levels: a Cashier (the intended POS-floor role) allowed to open a shift, sell, and return, but rejected from an out-of-template action; a role with zero sales permissions rejected from every sales route entirely.
@@ -1229,15 +1293,19 @@ None.
 `docs/state/PROJECT_STATE.md` only. **No source file, schema, migration, seed, permission, validation schema or test was changed** — 8G was documentation and final verification, nothing else, and the only repository modification was verified to be this file before any edit was made.
 
 ## Next Phase
+**PHASE 11 IS CLOSED.** The backend is hardened: authentication and session handling, rate limiting on the endpoints that are actually attacked, a readable audit trail, recorded authorization failures, startup configuration validation, a demonstrated backup and restore, and a standing structural security check. No product feature was added and no approved behaviour was changed.
+
+**Phase 12 has NOT been started, scoped or designed.** No frontend decision, POS UI decision or ERP UI decision has been made, and none will be made without explicit instruction.
+
 **PHASE 10.2 IS CLOSED**, and with it the last material contract ambiguity Phase 10 left open. The exchange endpoint now covers every direction.
 
 **PHASE 10 IS CLOSED.** 10A Cash/Till, 10B Tax, 10C Refund Tender, 10D Serial Lifecycle, 10E Return Disposition, Exchanges, Hold/Resume, 10F Receipts, 10G Passwords, 10H Expenses and 10I Contract Freeze are all complete and verified.
 
 Phase 8 is closed (8A–8G). Phase 9 was a contract-and-roadmap gate, not an implementation phase, and produced the approved decisions BD-17 … BD-25 plus the resolutions of BLOCKING-1 (tax-inclusive pricing) and BLOCKING-2 (soft hold) that Phase 10 implements.
 
-**Phase 11 has NOT been started, scoped or designed.** The explicitly deferred register is the natural input to that scoping, and nothing in it is approved or planned:
+The explicitly deferred register is unchanged by Phase 11, and nothing in it is approved or planned:
 
-- `FinancialAccount` (SCOPE-2, deferred to Phase 11 by decision)
+- `FinancialAccount` (SCOPE-2 — was deferred *to* Phase 11, and Phase 11's approved scope explicitly excluded it; still deferred, now unassigned)
 - Hard inventory reservation
 - Offline sync
 - E-invoicing / jurisdiction-aware tax documents
@@ -1246,5 +1314,8 @@ Phase 8 is closed (8A–8G). Phase 9 was a contract-and-roadmap gate, not an imp
 - Returned-goods inspection workflow
 - Legacy serial migration
 - Card / wallet settlement
+- Self-service password reset **delivery** (Phase 11 recorded the reasoning: while delivery is deferred, a reset token would pass through the administrator anyway, so building the redemption flow now would reduce security rather than add it)
+- Shared-store (Redis) rate limiting, needed only once the API runs on more than one instance
+- New promotion types · loyalty expiry · multi-tax stacking (Phase 11 scope exclusions, unchanged)
 
 **No further phase will start without explicit instruction.**

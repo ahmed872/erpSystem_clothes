@@ -67,11 +67,11 @@ export function inspectEnvironment(env: NodeJS.ProcessEnv = process.env): Enviro
     }
     if (value.length < MIN_SECRET_LENGTH) {
       const message = `${key} is shorter than ${MIN_SECRET_LENGTH} characters, which is guessable offline from one captured token.`;
-      isProduction ? errors.push(message) : warnings.push(message);
+      (isProduction ? errors : warnings).push(message);
     }
     if (KNOWN_DEV_SECRETS.has(value.toLowerCase())) {
       const message = `${key} is a well-known development placeholder.`;
-      isProduction ? errors.push(message) : warnings.push(message);
+      (isProduction ? errors : warnings).push(message);
     }
   }
 
