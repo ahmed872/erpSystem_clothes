@@ -13,6 +13,7 @@ import { ReturnsPage } from './pages/ReturnsPage';
 import { HeldSalesPage } from './pages/HeldSalesPage';
 import { ShiftPage } from './pages/ShiftPage';
 import { WarrantyPage } from './pages/WarrantyPage';
+import { LookupPage } from './pages/LookupPage';
 import { ShiftClosePage } from './pages/ShiftClosePage';
 
 /** On a fresh page load with a persisted session, re-validate permissions
@@ -74,6 +75,9 @@ export function App() {
             {/* Post-sale lifecycle: registering and looking up cover on
                 units this shop has already sold. */}
             <Route path="/warranty" element={<WarrantyPage />} />
+            {/* Find a past sale by its number or by a serial on the goods:
+                receipt reprint (U4) and serial entry (D4). */}
+            <Route path="/lookup" element={<LookupPage />} />
             {/* The till's own state and its drawer history. Deliberately
                 inside RequireShift: there is no drawer without a shift. */}
             <Route path="/shift" element={<ShiftPage />} />

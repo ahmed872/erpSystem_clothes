@@ -193,10 +193,17 @@ export function CheckoutModal({ open, onClose }: { open: boolean; onClose: () =>
       navigate(`/receipt/${saleId}`);
     } catch (err) {
       // The server re-resolved everything and disagreed - stock gone, a
-      // promotion started, a price moved. Re-quoting is the recovery, and
-      // the banner offers it rather than leaving the cashier stuck.
-      setError(describeError(err));
-      void requestQuote();
+      // promotion started, a price moved. Re-quoting is the recovery.
+      //
+      // ORDER MATTERS, and getting it wrong hid every failure:
+      // `requestQuote` begins by clearing the error, so setting the banner
+      // BEFORE re-quoting wiped it a moment later and the modal simply
+      // reopened with no explanation of why the sale had not gone through.
+      // The re-quote is awaited first, and the banner set last, so the
+      // cashier is left looking at a fresh price AND the reason.
+      const described = describeError(err);
+      await requestQuote();
+      setError(described);
     } finally {
       setSubmitting(false);
     }

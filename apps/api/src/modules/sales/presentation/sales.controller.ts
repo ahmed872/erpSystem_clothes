@@ -8,6 +8,8 @@ import {
   previewExchangeSchema,
   createSalePaymentSchema,
   saleListQuerySchema,
+  serialLookupQuerySchema,
+  SerialLookupQuery,
   CreateSaleInput,
   QuoteSaleInput,
   CreateSaleReturnInput,
@@ -29,6 +31,7 @@ import { PreviewSaleReturnUseCase } from '../application/returns/preview-sale-re
 import { CreateSalePaymentUseCase } from '../application/payments/create-sale-payment.use-case';
 import { CreateExchangeUseCase } from '../application/exchanges/create-exchange.use-case';
 import { PreviewExchangeUseCase } from '../application/exchanges/preview-exchange.use-case';
+import { LookupSerialUseCase } from '../application/sales/lookup-serial.use-case';
 import { GetSaleReceiptUseCase } from '../application/sales/get-sale-receipt.use-case';
 
 @Controller('sales')
@@ -44,6 +47,7 @@ export class SalesController {
     private readonly createExchange: CreateExchangeUseCase,
     private readonly previewExchange: PreviewExchangeUseCase,
     private readonly saleReceipt: GetSaleReceiptUseCase,
+    private readonly lookupSerial: LookupSerialUseCase,
   ) {}
 
   @RequirePermissions('sales.view')
@@ -79,6 +83,21 @@ export class SalesController {
   @HttpCode(HttpStatus.OK)
   async quote(@CurrentUser() user: RequestUser, @Body(new ZodValidationPipe(quoteSaleSchema)) body: QuoteSaleInput) {
     return { data: await this.quoteSale.execute(user, body) };
+  }
+
+  /**
+   * Phase 12 (D4). Registered before ':id' so Nest's route matching does
+   * not treat "serial-lookup" as a sale id. Gated on `sales.view`, the
+   * same permission the sale-number lookup this parallels uses - it
+   * answers the same question by a different handle.
+   */
+  @RequirePermissions('sales.view')
+  @Get('serial-lookup')
+  async serialLookup(
+    @CurrentUser() user: RequestUser,
+    @Query(new ZodValidationPipe(serialLookupQuerySchema)) query: SerialLookupQuery,
+  ) {
+    return { data: await this.lookupSerial.execute(user, query) };
   }
 
   @RequirePermissions('sales.view')

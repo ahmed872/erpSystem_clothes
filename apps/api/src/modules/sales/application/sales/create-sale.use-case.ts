@@ -10,6 +10,7 @@ import { ConflictDomainError, NotFoundDomainError, ValidationFailedError } from 
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { resolveAllowNegative } from '../../../inventory/domain/resolve-allow-negative';
 import { consumeVariant } from '../../../inventory/domain/consume-variant';
+import { loadConfiguredPrices, resolveSellingPrice } from '../../domain/resolve-selling-price';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
 import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
 import { findActiveShift } from '../../domain/find-active-shift';
@@ -761,6 +762,38 @@ export class CreateSaleUseCase {
     // product does not track them.
     // ---------------------------------------------------------------
     const variantsById = new Map(variants.map((v) => [v.id, v]));
+
+    // ---------------------------------------------------------------
+    // Phase 12 (D3): THE SELLING PRICE IS THE SHOP'S, NOT THE TILL'S.
+    //
+    // Resolved HERE, before anything reads a price, so the single pricing
+    // pipeline - and therefore both `POST /sales/quote` and `POST /sales`
+    // - price from the same authoritative figure. `input.items` is
+    // rewritten in place rather than threading a parallel map through
+    // twenty downstream reads: every later `item.unitPrice`, the tax
+    // conversion, the BD-12 cap, the promotion base and the persisted
+    // `SaleItem.unitPrice` then all describe the price actually charged.
+    //
+    // A caller holding `products.change_price` keeps their figure - that
+    // permission is exactly the approved override, and the POS cart's
+    // editable price field is already gated on it.
+    // ---------------------------------------------------------------
+    const configuredPrices = await loadConfiguredPrices(
+      tx,
+      actor.tenantId,
+      input.items.map((i) => i.variantId),
+    );
+    if (configuredPrices.size > 0) {
+      const permissions = await this.effectivePermissions.get(tx, actor.id);
+      const canOverride = permissions?.has('products.change_price') ?? false;
+      input.items = input.items.map((item) => {
+        const resolved = resolveSellingPrice(item.unitPrice, configuredPrices.get(item.variantId), canOverride);
+        return resolved.unitPrice.equals(new Prisma.Decimal(item.unitPrice))
+          ? item
+          : { ...item, unitPrice: resolved.unitPrice.toNumber() };
+      });
+    }
+
     for (const item of input.items) {
       const tracks = variantsById.get(item.variantId)!.product.tracksSerialNumbers;
       const supplied = item.serials ?? [];

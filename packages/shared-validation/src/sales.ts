@@ -349,6 +349,18 @@ export const heldSaleListQuerySchema = z.object({
 });
 export type HeldSaleListQuery = z.infer<typeof heldSaleListQuerySchema>;
 
+/**
+ * Phase 12 (D4) — EXACT serial lookup, never a search.
+ *
+ * Equality against `@@unique([businessId, serial])`. Deliberately no
+ * wildcard, prefix or list parameter: this answers "which sale sold this
+ * unit", and a till has no business enumerating the shop's serials.
+ */
+export const serialLookupQuerySchema = z.object({
+  serial: z.string().trim().min(1).max(120),
+});
+export type SerialLookupQuery = z.infer<typeof serialLookupQuerySchema>;
+
 export const saleListQuerySchema = z.object({
   /**
    * Phase 12 (Returns) — find the sale on the receipt in the customer's

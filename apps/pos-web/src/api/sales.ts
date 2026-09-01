@@ -14,6 +14,7 @@ import type {
   SaleReceipt,
   SaleReturn,
   SaleReturnPreview,
+  SerialLookupResult,
 } from '../lib/apiTypes';
 
 export const salesApi = {
@@ -48,6 +49,16 @@ export const salesApi = {
     api.get<{ data: SaleListRow[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
       `/sales?shiftId=${shiftId}&limit=100`,
     ),
+  /**
+   * Phase 12 (approved decision D4) — EXACT serial lookup.
+   *
+   * For the customer who arrives holding the unit and nothing else. Exact
+   * equality against the tenant's unique serial; there is deliberately no
+   * prefix or wildcard, and no way to list. A unit received but never sold
+   * answers with `sale: null` rather than 404.
+   */
+  lookupSerial: (serial: string) =>
+    api.get<{ data: SerialLookupResult }>(`/sales/serial-lookup?serial=${encodeURIComponent(serial)}`),
   createReturn: (saleId: string, input: CreateSaleReturnInput) =>
     api.post<{ data: SaleReturn }>(`/sales/${saleId}/returns`, input),
   /**

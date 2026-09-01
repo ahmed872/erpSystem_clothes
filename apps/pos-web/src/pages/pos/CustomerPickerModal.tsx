@@ -57,7 +57,17 @@ export function CustomerPickerModal({
 
         {!creating ? (
           <>
-            <Input placeholder={t('common.search')} value={search} onChange={(e) => setSearch(e.target.value)} autoFocus />
+            {/* Phase 12 (approved decision D1): the endpoint now searches
+                NAME OR PHONE and ranks an exact phone first, so the
+                placeholder says so - a cashier holding a number had no way
+                to know this box would take it. */}
+            <Input
+              placeholder={t('pos.customerSearchPlaceholder')}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              autoFocus
+              data-testid="customer-search"
+            />
             <div className="max-h-64 overflow-y-auto rounded-lg border border-neutral-200">
               {query.isFetching && (
                 <div className="flex justify-center p-4">

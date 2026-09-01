@@ -736,3 +736,28 @@ export interface RegisterWarrantyInput {
   durationDays?: number;
   notes?: string;
 }
+
+/**
+ * Phase 12 (approved decision D4) — what an exact serial resolves to.
+ *
+ * Deliberately narrow: which unit, and which sale delivered it. Enough to
+ * enter Returns or Warranty, and nothing more — no cost, no margin, no
+ * other unit from the same sale, no customer contact details.
+ */
+export interface SerialLookupResult {
+  serialNumberId: string;
+  serial: string;
+  status: 'IN_STOCK' | 'RESERVED' | 'SOLD' | 'DAMAGED' | 'RETURNED';
+  variantId: string;
+  sku: string;
+  productName: string;
+  alternativeName: string | null;
+  /** Null when the unit is in this shop's stock but has not been sold. */
+  sale: {
+    id: string;
+    saleNumber: string;
+    soldAt: string;
+    saleItemId: string;
+    customer: { id: string; name: string } | null;
+  } | null;
+}

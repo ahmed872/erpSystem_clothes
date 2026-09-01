@@ -18,6 +18,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const clearShift = useShiftStore((s) => s.setActiveShift);
   const canReturn = usePermission('sales.return');
   const canHold = usePermission('sales.hold');
+  const canViewSales = usePermission('sales.view');
   const canViewWarranty = usePermission('warranty.view');
   const canViewShift = usePermission('shifts.view');
   const canCloseShift = usePermission('shifts.close');
@@ -36,12 +37,23 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-full min-h-screen flex-col bg-neutral-50">
       <header className="flex items-center justify-between border-b border-neutral-200 bg-white px-4 py-2.5 sm:px-6">
-        <div className="flex items-center gap-6">
-          <span className="text-base font-bold text-brand-700">{t('app.title')}</span>
+        <div className="flex min-w-0 items-center gap-3 sm:gap-6">
+          <span className="shrink-0 text-base font-bold text-brand-700">{t('app.title')}</span>
+          {/* Phase 12 (POS loose ends, B2) — THE NAVIGATION SURVIVES A
+              NARROW TILL.
+              This was `hidden sm:flex`, so below 640px every destination
+              vanished: on a compact till or a phone the cashier could sell
+              and nothing else - no returns, no held baskets, no shift, no
+              way to close. There is no hamburger here on purpose; a till
+              has a handful of destinations and hiding them behind a second
+              tap is worse than letting them wrap. The row scrolls
+              horizontally when it must, so the last item is always
+              reachable rather than clipped. */}
           {activeShift && (
-            <nav className="hidden items-center gap-1 sm:flex">
+            <nav className="scrollbar-none -mx-1 flex min-w-0 items-center gap-1 overflow-x-auto px-1">
               <ShellNavLink to="/pos">{t('nav.pos')}</ShellNavLink>
               {canHold && <ShellNavLink to="/holds">{t('nav.holds')}</ShellNavLink>}
+              {canViewSales && <ShellNavLink to="/lookup">{t('nav.lookup')}</ShellNavLink>}
               {canReturn && <ShellNavLink to="/returns">{t('nav.returns')}</ShellNavLink>}
               {canViewWarranty && <ShellNavLink to="/warranty">{t('nav.warranty')}</ShellNavLink>}
               {canViewShift && <ShellNavLink to="/shift">{t('nav.shift')}</ShellNavLink>}
@@ -49,7 +61,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </nav>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1 sm:gap-2">
           <button
             type="button"
             onClick={() => setLanguage(i18n.language === 'ar' ? 'en' : 'ar')}
@@ -73,7 +85,7 @@ function ShellNavLink({ to, children }: { to: string; children: ReactNode }) {
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors ${
+        `shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-sm font-semibold transition-colors sm:px-3 ${
           isActive ? 'bg-brand-50 text-brand-700' : 'text-neutral-600 hover:bg-neutral-100'
         }`
       }

@@ -23,7 +23,12 @@ export function NewItemPicker({ warehouseId, onAdd }: { warehouseId: string; onA
   const { t } = useTranslation();
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
-  const [pickerProduct, setPickerProduct] = useState<{ id: string; name: string; variants: ProductVariant[] } | null>(null);
+  const [pickerProduct, setPickerProduct] = useState<{
+    id: string;
+    name: string;
+    variants: ProductVariant[];
+    isBundle: boolean;
+  } | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
 
@@ -42,15 +47,16 @@ export function NewItemPicker({ warehouseId, onAdd }: { warehouseId: string; onA
     onAdd(variant, Number(variant.sellingPrice));
   }
 
+  // Phase 12 (D5): a bundle is a replacement like any other - the sale
+  // half of an exchange runs the same pipeline, which expands it.
   async function openProduct(product: Product & { variants: Array<{ id: string; sku: string; status: string }> }) {
-    if (product.type === 'BUNDLE') return;
     const { data } = await catalogApi.getProduct(product.id);
     if (data.variants.length === 1) {
       const variant = data.variants[0];
       if (variant) addSingleVariant(variant);
       return;
     }
-    setPickerProduct({ id: data.id, name: data.name, variants: data.variants });
+    setPickerProduct({ id: data.id, name: data.name, variants: data.variants, isBundle: data.type === 'BUNDLE' });
   }
 
   async function handleScanKeyDown(e: KeyboardEvent<HTMLInputElement>) {

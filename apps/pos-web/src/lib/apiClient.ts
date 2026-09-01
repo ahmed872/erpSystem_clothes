@@ -1,3 +1,4 @@
+import i18n from 'i18next';
 import { useAuthStore } from '../store/authStore';
 import type { ApiErrorBody } from './apiTypes';
 
@@ -67,7 +68,9 @@ async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<
       return apiFetch<T>(path, { ...options, _retried: true });
     }
     useAuthStore.getState().clear();
-    throw new ApiError(401, { code: 'SESSION_EXPIRED', message: 'Your session has expired. Please sign in again.' });
+    // No prose here: the code alone is enough, and `describeError`
+    // renders it in the reader's language.
+    throw new ApiError(401, { code: 'SESSION_EXPIRED', message: '' });
   }
 
   const text = await res.text();
@@ -89,31 +92,46 @@ export const api = {
   delete: <T>(path: string) => apiFetch<T>(path, { method: 'DELETE' }),
 };
 
-/** Human-readable fallback for an ApiError, or any other thrown value. */
+/**
+ * Phase 12 (POS loose ends, B1) — the error a cashier reads is in the
+ * cashier's language.
+ *
+ * WHAT WAS WRONG. Both halves of every error banner in this app were
+ * English: a hardcoded title, and the server's own prose underneath. An
+ * Arabic-first till showed an Arabic screen that turned English at exactly
+ * the moment something went wrong — the moment the words matter most.
+ *
+ * WHAT IS LOCALIZED, AND WHAT IS NOT. The TITLE and a plain-language
+ * EXPLANATION now come from the translation bundle, keyed by the API's own
+ * error code, so the actionable half of every banner is in the reader's
+ * language. The server's `message` is kept as supporting DETAIL because it
+ * carries the specifics no code can ("this serial was not sold on this
+ * sale line", which variant is short) — but it is still English, because
+ * the backend emits prose rather than message keys. Closing that last gap
+ * is a backend contract change and is reported rather than faked here: a
+ * translation table in the browser guessing at server prose would go stale
+ * silently the first time a message changed.
+ *
+ * `i18n.t` is used directly rather than the `useTranslation` hook because
+ * this is called from event handlers and query callbacks, not during
+ * render.
+ */
 export function describeError(err: unknown): { title: string; message?: string } {
   if (err instanceof ApiError) {
-    return { title: errorTitle(err.code), message: err.message };
+    return {
+      title: i18n.t(`errors.title.${err.code}`, { defaultValue: i18n.t('errors.title.UNKNOWN_ERROR') }),
+      // The localized explanation leads; the server's own words follow it
+      // when it has something more specific to add.
+      message: joinDetail(i18n.t(`errors.hint.${err.code}`, { defaultValue: '' }), err.message),
+    };
   }
-  if (err instanceof Error) return { title: 'Something went wrong', message: err.message };
-  return { title: 'Something went wrong' };
+  if (err instanceof Error) {
+    return { title: i18n.t('errors.title.UNKNOWN_ERROR'), message: err.message };
+  }
+  return { title: i18n.t('errors.title.UNKNOWN_ERROR') };
 }
 
-function errorTitle(code: string): string {
-  switch (code) {
-    case 'VALIDATION_FAILED':
-      return 'Check the highlighted fields';
-    case 'FORBIDDEN':
-      return 'Not permitted';
-    case 'UNAUTHORIZED':
-    case 'SESSION_EXPIRED':
-      return 'Sign-in required';
-    case 'NOT_FOUND':
-      return 'Not found';
-    case 'CONFLICT':
-      return 'Cannot complete this action';
-    case 'INSUFFICIENT_STOCK':
-      return 'Not enough stock';
-    default:
-      return 'Request failed';
-  }
+function joinDetail(hint: string, serverMessage?: string): string | undefined {
+  const parts = [hint, serverMessage].filter((p): p is string => Boolean(p && p.trim()));
+  return parts.length > 0 ? parts.join(' — ') : undefined;
 }

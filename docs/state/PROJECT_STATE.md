@@ -1,7 +1,21 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 12 — POS Web (**Warranty milestone complete.** ERP Web NOT started, offline sync NOT started.)
+Phase 12 — POS Web (**POS loose ends complete.** ERP Web NOT started, offline sync NOT started.)
+
+### POS loose ends (Phase 12 milestone)
+
+Two blockers, five UX gaps and four of the five approved product decisions. **D2 (promotion provenance on the receipt) was NOT implemented** — it genuinely requires a change to the frozen Phase 10I receipt contract, which the brief said to report before making; the exact requirement is recorded below.
+
+**D3 — the selling price is the shop's, not the till's.** `POST /sales` and `/sales/quote` took `unitPrice` from the request and price lists were consulted by nothing. `resolveSalePricing` — the one pricing pipeline both callers run — now resolves the active default price list's configured price first, so quote and sale cannot disagree. `products.change_price` remains the approved override. A variant with no configured price is unaffected, which is every pre-existing sale (800/800 e2e unchanged).
+
+**D1 — customer lookup by phone.** Search now covers name OR phone with an exact phone ranked first, ordered in SQL so the ranking survives pagination rather than sorting one page. `@@index([phone])` already existed; no new index.
+
+**D4 — exact serial lookup.** New additive `GET /sales/serial-lookup?serial=`, gated on `sales.view`. Exact equality against the tenant's unique serial: no prefix, no wildcard, no listing. Returns only what Returns and Warranty need to start, and answers truthfully (`sale: null`) for a unit received but never sold.
+
+**D5 — bundles were already sellable; the POS was ignoring them.** `consumeVariant` has always expanded a BUNDLE line into its components. The POS had `if (product.type === 'BUNDLE') return;` — clicking one did nothing at all. Removed; the bundle's variant goes into the cart like any other and the server does the rest. The variant picker skips the stock gate for bundles, which by design carry no balance of their own.
+
+**B1** localized API error titles and guidance by error code (server prose remains English — reported). **B2** the navigation no longer disappears below 640px. **U1** the scanner keeps focus after every click. **U2** payment methods are translated on receipts. **U3** loyalty is spendable on an exchange. **U4** a receipt can be reprinted for any past sale.
 
 ### Warranty (Phase 12 milestone)
 

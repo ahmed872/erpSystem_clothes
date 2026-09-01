@@ -89,7 +89,7 @@ export function ReceiptPage() {
           {receipt.payments.length > 0 && (
             <div className="border-t border-dashed border-neutral-300 pt-2">
               {receipt.payments.map((p, i) => (
-                <Row key={i} label={p.method} value={p.amount} />
+                <Row key={i} label={t(`checkout.${p.method.toLowerCase()}`, { defaultValue: p.method })} value={p.amount} />
               ))}
             </div>
           )}

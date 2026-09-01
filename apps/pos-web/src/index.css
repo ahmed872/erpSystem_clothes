@@ -22,3 +22,14 @@ body {
   unicode-bidi: isolate;
   font-variant-numeric: tabular-nums;
 }
+
+/* Phase 12 (POS loose ends, B2): the till's navigation row scrolls
+   horizontally on a narrow screen rather than disappearing, and a
+   scrollbar across it would eat a third of the touch target. */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}

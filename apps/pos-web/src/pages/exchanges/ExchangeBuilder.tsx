@@ -22,6 +22,7 @@ import { ReturnSerialPicker } from '../returns/ReturnSerialPicker';
 import { NewItemPicker } from './NewItemPicker';
 import { SerialCaptureModal } from '../pos/SerialCaptureModal';
 import { usePermission } from '../../hooks/usePermission';
+import { loyaltyApi } from '../../api/loyalty';
 import type { ExchangePreview, ExchangeResult, SalePaymentInput, SalePaymentMethod } from '../../lib/apiTypes';
 
 /**
@@ -68,6 +69,7 @@ export function ExchangeBuilder({ saleId, onBack, onDone }: { saleId: string; on
       saleId={saleId}
       saleNumber={receipt.sale.saleNumber}
       customerName={receipt.customer?.name ?? null}
+      customerId={receipt.customer?.id ?? null}
       warehouseId={saleQuery.data!.data.warehouseId}
       returnLines={draftFromReceipt(receipt)}
       onBack={onBack}
@@ -80,6 +82,7 @@ function ExchangeForm({
   saleId,
   saleNumber,
   customerName,
+  customerId,
   warehouseId,
   returnLines,
   onBack,
@@ -88,6 +91,9 @@ function ExchangeForm({
   saleId: string;
   saleNumber: string;
   customerName: string | null;
+  /** The ORIGINAL SALE's customer. Loyalty belongs to them and is never
+   *  switched to someone else here. */
+  customerId: string | null;
   // The original sale's own warehouse, not a client choice — resolved
   // server-side from the sale, exactly as the real exchange resolves it
   // (see CreateExchangeUseCase). Used only for the replacement picker's
@@ -102,6 +108,13 @@ function ExchangeForm({
   const navigate = useNavigate();
   const canReturn = usePermission('sales.return');
   const canSell = usePermission('sales.create');
+  const canViewLoyalty = usePermission('loyalty.view');
+
+  const pointsQuery = useQuery({
+    queryKey: ['loyalty-balance', customerId],
+    queryFn: () => loyaltyApi.balance(customerId!),
+    enabled: Boolean(customerId) && canViewLoyalty,
+  });
 
   const [lines, setLines] = useState<ReturnLineDraft[]>(returnLines);
   const [newItems, setNewItems] = useState<NewItemDraft[]>([]);
@@ -113,6 +126,20 @@ function ExchangeForm({
   const [payments, setPayments] = useState<SalePaymentInput[]>([]);
   const [refundMethod, setRefundMethod] = useState<SalePaymentMethod>('CASH');
   const [reason, setReason] = useState('');
+  /**
+   * Phase 12 (POS loose ends, U3) — POINTS ARE SPENDABLE ON AN EXCHANGE.
+   *
+   * `previewExchange` and `createExchange` have always accepted
+   * `redeemPoints`, and the server applies it through the same BD-2/BD-3
+   * pipeline a normal sale uses. The screen simply never offered the
+   * control, so a customer swapping an item could not spend the points
+   * they could have spent buying it outright — for no reason anyone chose.
+   *
+   * The value is an INPUT only. What the points are worth, whether the
+   * balance covers them, and how they change the settlement are all the
+   * preview's answers.
+   */
+  const [redeemPoints, setRedeemPoints] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<{ title: string; message?: string } | null>(null);
   const [result, setResult] = useState<ExchangeResult | null>(null);
@@ -131,6 +158,7 @@ function ExchangeForm({
       const { data } = await salesApi.previewExchange(saleId, {
         returnItems: toRequestItems(lines),
         newItems: toNewItemsRequest(newItems),
+        redeemPoints: redeemPoints > 0 ? redeemPoints : undefined,
       });
       setPreview(data);
       const due = parseMoney(data.totals.amountDue);
@@ -148,7 +176,7 @@ function ExchangeForm({
   useEffect(() => {
     setPreview(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newItems]);
+  }, [newItems, redeemPoints]);
 
   async function handleConfirm() {
     if (!preview) return;
@@ -159,6 +187,10 @@ function ExchangeForm({
         reason: reason || undefined,
         returnItems: toRequestItems(lines),
         newItems: toNewItemsRequest(newItems),
+        // The SAME figure the preview was computed from: confirming with a
+        // different redemption than the one priced would settle an
+        // exchange the cashier never saw.
+        redeemPoints: redeemPoints > 0 ? redeemPoints : undefined,
         payments: preview.direction === 'UPWARD' ? payments.filter((p) => p.amount > 0) : [],
         refund:
           preview.direction === 'DOWNWARD'
@@ -268,6 +300,25 @@ function ExchangeForm({
             </Card>
           ))}
         </ul>
+      )}
+
+      {/* U3: offered only for an ACCOUNT sale, and only to a caller who
+          may see loyalty at all - a walk-in has no balance to spend, and
+          the points belong to the original sale's customer. */}
+      {customerId && canViewLoyalty && pointsQuery.data && (
+        <div className="mt-3 rounded-lg border border-neutral-200 p-3">
+          <Input
+            label={`${t('pos.redeemPoints')} (${t('pos.pointsAvailable')}: ${pointsQuery.data.data.balance})`}
+            type="number"
+            className="numeric w-32"
+            min={0}
+            max={parseMoney(pointsQuery.data.data.balance)}
+            value={redeemPoints}
+            onChange={(e) => setRedeemPoints(Math.max(0, Number(e.target.value)))}
+            data-testid="exchange-redeem-points"
+          />
+          <p className="mt-1 text-[11px] leading-snug text-neutral-500">{t('exchange.redeemNotice')}</p>
+        </div>
       )}
 
       <Button

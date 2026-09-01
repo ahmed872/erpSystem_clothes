@@ -24,6 +24,7 @@ import { CreateExchangeUseCase } from './application/exchanges/create-exchange.u
 import { PreviewExchangeUseCase } from './application/exchanges/preview-exchange.use-case';
 import { HeldSalesService } from './application/holds/held-sales.service';
 import { GetSaleReceiptUseCase } from './application/sales/get-sale-receipt.use-case';
+import { LookupSerialUseCase } from './application/sales/lookup-serial.use-case';
 import { HeldSalesController } from './presentation/held-sales.controller';
 import { FinanceModule } from '../finance/finance.module';
 
@@ -58,6 +59,7 @@ import { FinanceModule } from '../finance/finance.module';
     PreviewExchangeUseCase,
     HeldSalesService,
     GetSaleReceiptUseCase,
+    LookupSerialUseCase,
   ],
 })
 export class SalesModule {}

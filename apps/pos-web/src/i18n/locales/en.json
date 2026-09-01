@@ -46,7 +46,9 @@
     "outOfStock": "Out of stock",
     "available": "Available",
     "redeemPoints": "Redeem loyalty points",
-    "pointsAvailable": "Available balance"
+    "pointsAvailable": "Available balance",
+    "bundle": "Bundle",
+    "customerSearchPlaceholder": "Search by name or phone number"
   },
   "checkout": {
     "title": "Complete sale",
@@ -163,7 +165,8 @@
     "language": "العربية",
     "holds": "Held sales",
     "shift": "Shift",
-    "warranty": "Warranty"
+    "warranty": "Warranty",
+    "lookup": "Find a sale"
   },
   "common": {
     "loading": "Loading...",
@@ -180,7 +183,24 @@
   },
   "errors": {
     "forbidden": "You don't have permission for this action",
-    "network": "Could not reach the server. Check your connection."
+    "network": "Could not reach the server. Check your connection.",
+    "title": {
+      "VALIDATION_FAILED": "Check the highlighted fields",
+      "FORBIDDEN": "Not permitted",
+      "UNAUTHORIZED": "Sign-in required",
+      "SESSION_EXPIRED": "Sign-in required",
+      "NOT_FOUND": "Not found",
+      "CONFLICT": "Cannot complete this action",
+      "INSUFFICIENT_STOCK": "Not enough stock",
+      "UNKNOWN_ERROR": "Something went wrong"
+    },
+    "hint": {
+      "FORBIDDEN": "Your account does not allow this. Ask a manager.",
+      "UNAUTHORIZED": "Sign in again to continue.",
+      "SESSION_EXPIRED": "Your session has ended. Sign in again to continue.",
+      "CONFLICT": "Something changed since this screen loaded. Check the details and try again.",
+      "INSUFFICIENT_STOCK": "There is not enough stock to complete this."
+    }
   },
   "exchange": {
     "title": "Exchange",
@@ -197,7 +217,8 @@
     "confirm": "Confirm exchange",
     "confirming": "Processing exchange…",
     "doneTitle": "Exchange complete",
-    "newExchange": "Another exchange"
+    "newExchange": "Another exchange",
+    "redeemNotice": "The points are an input. What they are worth, and how they change this exchange, are worked out by the server when you price it."
   },
   "holds": {
     "title": "Held sales",
@@ -310,6 +331,24 @@
       "OPEN": "Open",
       "RESOLVED": "Resolved",
       "REJECTED": "Rejected"
+    }
+  },
+  "lookup": {
+    "title": "Find a sale",
+    "explainer": "Reprint a receipt, or find the sale behind a serial-numbered item the customer is holding.",
+    "field": "Sale number or serial number",
+    "fieldHint": "Type or scan either one",
+    "notFound": "No sale and no serial-numbered item matches that exactly.",
+    "viewReceipt": "View receipt",
+    "goToReturns": "Returns and exchanges",
+    "soldOn": "Sold on",
+    "serialNotSold": "This shop holds this unit, but it has not been sold. There is no receipt or warranty for it yet.",
+    "serialStatus": {
+      "IN_STOCK": "In stock",
+      "RESERVED": "Reserved",
+      "SOLD": "Sold",
+      "DAMAGED": "Damaged",
+      "RETURNED": "Returned"
     }
   }
 }
