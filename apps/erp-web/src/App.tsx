@@ -13,6 +13,10 @@ import { ProductCreatePage } from './pages/ProductCreatePage';
 import { ProductDetailPage } from './pages/ProductDetailPage';
 import { PriceListsPage } from './pages/PriceListsPage';
 import { SetupPage } from './pages/SetupPage';
+import { InventoryPage } from './pages/InventoryPage';
+import { TransfersPage } from './pages/TransfersPage';
+import { TransferDetailPage } from './pages/TransferDetailPage';
+import { StockCountPage } from './pages/StockCountPage';
 import { WarrantyClaimsPage } from './pages/WarrantyClaimsPage';
 import { ShiftsPage } from './pages/ShiftsPage';
 import { NoAccessPage } from './pages/NoAccessPage';
@@ -92,6 +96,17 @@ function GuardedRoutes() {
           <Route path="/catalogue/new" element={<ProductCreatePage />} />
         </Route>
         <Route path="/catalogue/:productId" element={<ProductDetailPage />} />
+      </Route>
+      {/* Phase 15. Every inventory READ is `inventory.view`; each mutation
+          carries its own separate grant, checked on the control rather
+          than the route, and by the backend regardless. `/transfers` is
+          declared BEFORE `/counts/:id` siblings so no static segment is
+          read as an id. */}
+      <Route element={<RequirePermission codes={['inventory.view']} fallback={fallback} />}>
+        <Route path="/inventory" element={<InventoryPage />} />
+        <Route path="/inventory/transfers" element={<TransfersPage />} />
+        <Route path="/inventory/transfers/:transferId" element={<TransferDetailPage />} />
+        <Route path="/inventory/counts/:countId" element={<StockCountPage />} />
       </Route>
       <Route element={<RequirePermission codes={['pricelists.view']} fallback={fallback} />}>
         <Route path="/price-lists" element={<PriceListsPage />} />

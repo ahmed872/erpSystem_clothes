@@ -6,6 +6,7 @@ import { InventoryEngineService } from '../../../../engines/inventory/inventory-
 import { EffectivePermissionsService } from '../../../../common/authorization/effective-permissions.service';
 import { ConflictDomainError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
+import { canViewInventoryCost, stripStockCost } from '../../domain/stock-result-visibility';
 import { loadVariantContext } from '../../domain/load-variant-context';
 import { toBaseQuantity, toBaseUnitCost } from '../../domain/uom-conversion';
 import { resolveOrCreateLot, createSerialsForReceipt } from '../../domain/lot-and-serial';
@@ -76,11 +77,14 @@ export class RecordOpeningStockUseCase {
         after: { movementType: 'OPENING_BALANCE', quantityBase: baseQty.toString(), unitCost: baseCost.toString() },
       });
 
-      return {
-        movementId: result.movement.id,
-        quantityOnHand: result.quantityOnHand.toString(),
-        averageCost: result.averageCost.toString(),
-      };
+      return stripStockCost(
+        {
+          movementId: result.movement.id,
+          quantityOnHand: result.quantityOnHand.toString(),
+          averageCost: result.averageCost.toString(),
+        },
+        await canViewInventoryCost(this.effectivePermissions, tx, actor.id),
+      );
     });
   }
 }

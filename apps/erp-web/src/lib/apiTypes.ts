@@ -354,3 +354,212 @@ export interface PriceListEntry {
   price: string;
   variant: { id: string; sku: string; product: { id: string; name: string } };
 }
+
+// ------------------------------------------------------- Inventory -------
+/**
+ * Phase 15. Traced to the live `inventory` module — its controllers, the
+ * zod schemas in `packages/shared-validation/src/inventory.ts`, and the
+ * Prisma models.
+ *
+ * COST IS OPTIONAL WHEREVER IT APPEARS, on reads AND on mutation results.
+ * `StockBalance.averageCost`, `StockMovement.unitCostAtMovement` and the
+ * engine's post-mutation `averageCost`/`cogsPerUnit` are all deleted for a
+ * caller without `products.view_cost` — the write paths as of this
+ * milestone, the read paths already. A BRANCH_MANAGER holds
+ * `inventory.view` and NOT `products.view_cost`, and genuinely receives
+ * no such key.
+ *
+ * NOTE WHAT IS ABSENT FROM THE MODEL. `InventoryLot` carries no quantity
+ * and no cost — it is a registry of lot METADATA, not a counter — and
+ * `SerialNumber` carries no cost either. Neither is an omission this app
+ * should paper over.
+ */
+
+export interface Warehouse {
+  id: string;
+  businessId: string;
+  branchId: string;
+  name: string;
+  code: string;
+  isActive: boolean;
+}
+
+export interface StockBalance {
+  id: string;
+  warehouseId: string;
+  variantId: string;
+  quantityOnHand: string;
+  /**
+   * DISPLAY ONLY. Nothing in the live backend writes this column: the
+   * held-sale advisory reservation is a deferred decision and there are no
+   * reservation endpoints. It exists so staff can see how much of the
+   * shelf is already spoken for.
+   */
+  quantityReserved: string;
+  /** Server-computed: quantityOnHand - quantityReserved. Never derived here. */
+  availableQuantity: string;
+  /** Gated by `products.view_cost` — absent, not null, when not held. */
+  averageCost?: string;
+  updatedAt: string;
+  variant: { id: string; sku: string; product: { id: string; name: string } };
+  warehouse: { id: string; name: string };
+}
+
+export type StockMovementType =
+  | 'OPENING_BALANCE'
+  | 'PURCHASE'
+  | 'SALE'
+  | 'SALES_RETURN'
+  | 'PURCHASE_RETURN'
+  | 'TRANSFER_OUT'
+  | 'TRANSFER_IN'
+  | 'STOCK_COUNT'
+  | 'ADJUSTMENT'
+  | 'DAMAGE'
+  | 'LOSS'
+  | 'INTERNAL_CONSUMPTION'
+  | 'EXPIRY'
+  | 'BUNDLE_CONSUMPTION'
+  | 'AUTHORIZED_CORRECTION';
+
+/** The signed adjustment reasons `adjustStockSchema` accepts — a strict
+ *  subset of the movement types above. */
+export type AdjustmentType = 'ADJUSTMENT' | 'DAMAGE' | 'LOSS' | 'INTERNAL_CONSUMPTION' | 'EXPIRY';
+
+export interface StockMovement {
+  id: string;
+  warehouseId: string;
+  variantId: string;
+  movementType: StockMovementType;
+  /** Signed base-unit quantity. Negative means stock left. */
+  quantityBase: string;
+  quantityInUom: string | null;
+  /** Gated by `products.view_cost`. */
+  unitCostAtMovement?: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  lotId: string | null;
+  isNegativeStock: boolean;
+  reason: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  variant: { id: string; sku: string };
+  warehouse: { id: string; name: string };
+}
+
+export interface MovementListResult {
+  data: StockMovement[];
+  pagination: Pagination;
+}
+
+export interface MovementFilters {
+  warehouseId?: string;
+  variantId?: string;
+  movementType?: StockMovementType;
+  page?: number;
+  limit?: number;
+}
+
+/** Metadata registry, NOT a quantity counter — the model has no quantity. */
+export interface InventoryLot {
+  id: string;
+  variantId: string;
+  lotNumber: string;
+  manufacturingDate: string | null;
+  expiryDate: string | null;
+  createdAt: string;
+}
+
+export type SerialStatus =
+  | 'IN_STOCK'
+  | 'RESERVED'
+  | 'SOLD'
+  | 'DAMAGED'
+  | 'RETURNED'
+  | 'IN_TRANSIT'
+  | 'RETURNED_TO_SUPPLIER';
+
+export interface SerialNumber {
+  id: string;
+  variantId: string;
+  serial: string;
+  status: SerialStatus;
+  currentWarehouseId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** What every stock mutation returns. `averageCost`/`cogsPerUnit` are
+ *  present only for a caller holding `products.view_cost`. */
+export interface StockMutationResult {
+  movementId: string;
+  quantityOnHand: string;
+  averageCost?: string;
+  cogsPerUnit?: string;
+}
+
+// ------------------------------------------------------- Transfers -------
+export type TransferStatus = 'DRAFT' | 'IN_TRANSIT' | 'COMPLETED' | 'CANCELLED';
+
+export interface TransferItem {
+  id: string;
+  stockTransferId: string;
+  variantId: string;
+  quantity: string;
+  quantityReceived: string | null;
+  variant?: { id: string; sku: string };
+}
+
+export interface StockTransfer {
+  id: string;
+  sourceWarehouseId: string;
+  destinationWarehouseId: string;
+  status: TransferStatus;
+  createdBy: string | null;
+  sentBy: string | null;
+  sentAt: string | null;
+  receivedBy: string | null;
+  receivedAt: string | null;
+  createdAt: string;
+  items: TransferItem[];
+  sourceWarehouse?: { id: string; name: string };
+  destinationWarehouse?: { id: string; name: string };
+}
+
+// ----------------------------------------------------- Stock counts ------
+export type StockCountStatus = 'DRAFT' | 'SUBMITTED' | 'APPROVED' | 'CANCELLED';
+
+export interface StockCountItem {
+  id: string;
+  variantId: string;
+  /** Snapshotted when the count was created. */
+  expectedQuantity: string;
+  actualQuantity: string | null;
+  reason: string | null;
+  variant?: { id: string; sku: string };
+}
+
+export interface StockCount {
+  id: string;
+  warehouseId: string;
+  status: StockCountStatus;
+  createdBy: string | null;
+  submittedAt: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  createdAt: string;
+  items: StockCountItem[];
+  warehouse?: { id: string; name: string };
+}
+
+/** `GET /inventory/reconciliation` — an integrity check, not a report. */
+export interface ReconciliationResult {
+  checked: number;
+  discrepancies: {
+    warehouseId: string;
+    variantId: string;
+    cachedQuantityOnHand: string;
+    computedFromLedger: string;
+    difference: string;
+  }[];
+}

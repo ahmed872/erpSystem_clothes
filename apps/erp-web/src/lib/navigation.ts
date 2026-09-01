@@ -53,6 +53,8 @@ export const ERP_NAV: NavItem[] = [
   { to: '/dashboard', labelKey: 'nav.dashboard', requires: ['reports.dashboard.view'] },
   { to: '/catalogue', labelKey: 'nav.catalogue', requires: ['products.view'] },
   { to: '/price-lists', labelKey: 'nav.priceLists', requires: ['pricelists.view'] },
+  { to: '/inventory', labelKey: 'nav.inventory', requires: ['inventory.view'] },
+  { to: '/inventory/transfers', labelKey: 'nav.transfers', requires: ['inventory.view'] },
   {
     to: '/setup',
     labelKey: 'nav.setup',

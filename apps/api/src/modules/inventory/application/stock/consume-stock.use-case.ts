@@ -5,6 +5,7 @@ import { AuditService } from '../../../audit/audit.service';
 import { InventoryEngineService } from '../../../../engines/inventory/inventory-engine.service';
 import { EffectivePermissionsService } from '../../../../common/authorization/effective-permissions.service';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
+import { canViewInventoryCost, stripStockCost } from '../../domain/stock-result-visibility';
 import { resolveAllowNegative } from '../../domain/resolve-allow-negative';
 import { consumeVariant } from '../../domain/consume-variant';
 
@@ -52,12 +53,15 @@ export class ConsumeStockUseCase {
       if (result.bundleProductId) {
         return { bundleProductId: result.bundleProductId, componentsConsumed: result.componentsConsumed };
       }
-      return {
-        movementId: result.movementId,
-        quantityOnHand: result.quantityOnHand,
-        averageCost: result.averageCost,
-        cogsPerUnit: result.cogsPerUnit,
-      };
+      return stripStockCost(
+        {
+          movementId: result.movementId,
+          quantityOnHand: result.quantityOnHand,
+          averageCost: result.averageCost,
+          cogsPerUnit: result.cogsPerUnit,
+        },
+        await canViewInventoryCost(this.effectivePermissions, tx, actor.id),
+      );
     });
   }
 }

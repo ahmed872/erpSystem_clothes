@@ -6,6 +6,7 @@ import { AuditService } from '../../../audit/audit.service';
 import { InventoryEngineService } from '../../../../engines/inventory/inventory-engine.service';
 import { EffectivePermissionsService } from '../../../../common/authorization/effective-permissions.service';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
+import { canViewInventoryCost, stripStockCost } from '../../domain/stock-result-visibility';
 import { loadVariantContext } from '../../domain/load-variant-context';
 import { toBaseQuantity } from '../../domain/uom-conversion';
 import { resolveAllowNegative } from '../../domain/resolve-allow-negative';
@@ -85,11 +86,14 @@ export class AdjustStockUseCase {
         reason: input.reason,
       });
 
-      return {
-        movementId: result.movement.id,
-        quantityOnHand: result.quantityOnHand.toString(),
-        averageCost: result.averageCost.toString(),
-      };
+      return stripStockCost(
+        {
+          movementId: result.movement.id,
+          quantityOnHand: result.quantityOnHand.toString(),
+          averageCost: result.averageCost.toString(),
+        },
+        await canViewInventoryCost(this.effectivePermissions, tx, actor.id),
+      );
     });
   }
 }

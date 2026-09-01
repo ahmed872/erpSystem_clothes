@@ -60,6 +60,8 @@ describe('visibleNav', () => {
       '/dashboard',
       '/catalogue',
       '/price-lists',
+      '/inventory',
+      '/inventory/transfers',
       '/setup',
       '/warranty-claims',
       '/shifts',
@@ -74,7 +76,19 @@ describe('visibleNav', () => {
     // A cashier holds `products.view`, so the catalogue is readable to
     // them — but they hold no create/edit/price grant, and every control
     // on those screens is gated separately.
-    expect(visibleNav(CASHIER).map((i) => i.to)).toEqual(['/catalogue', '/warranty-claims', '/shifts']);
+    // A cashier also holds `inventory.view`, so stock is readable to
+    // them — every mutation on those screens is a separate grant they do
+    // not hold, and the backend refuses each one regardless.
+    expect(visibleNav(CASHIER).map((i) => i.to)).toEqual([
+      '/catalogue',
+      '/inventory',
+      '/inventory/transfers',
+      '/warranty-claims',
+      '/shifts',
+    ]);
+    expect(CASHIER).not.toContain('inventory.adjust');
+    expect(CASHIER).not.toContain('inventory.transfer_create');
+    expect(CASHIER).not.toContain('warehouses.view');
     expect(CASHIER).not.toContain('shifts.reconcile');
     expect(CASHIER).not.toContain('products.edit');
     expect(CASHIER).not.toContain('pricelists.view');
@@ -85,6 +99,8 @@ describe('visibleNav', () => {
       '/dashboard',
       '/catalogue',
       '/price-lists',
+      '/inventory',
+      '/inventory/transfers',
       '/setup',
       '/warranty-claims',
       '/shifts',
@@ -107,6 +123,8 @@ describe('visibleNav', () => {
       '/dashboard',
       '/catalogue',
       '/price-lists',
+      '/inventory',
+      '/inventory/transfers',
       '/setup',
       '/warranty-claims',
       '/shifts',
@@ -117,7 +135,13 @@ describe('visibleNav', () => {
     // The role that builds the catalogue held none of Slice 1's three
     // grants and landed on /no-access. Phase 14 is the milestone that is
     // actually theirs.
-    expect(visibleNav(INVENTORY).map((i) => i.to)).toEqual(['/catalogue', '/price-lists', '/setup']);
+    expect(visibleNav(INVENTORY).map((i) => i.to)).toEqual([
+      '/catalogue',
+      '/price-lists',
+      '/inventory',
+      '/inventory/transfers',
+      '/setup',
+    ]);
     expect(INVENTORY).toContain('products.create');
     expect(INVENTORY).toContain('products.change_cost');
     // ...but NOT the shelf price, and NOT the ability to reprice the shop.
@@ -146,6 +170,7 @@ describe('visibleNav', () => {
 
   it('hides the setup entry when NONE of the five is held', () => {
     expect(visibleNav(['products.view']).map((i) => i.to)).toEqual(['/catalogue']);
+    expect(visibleNav(['inventory.view']).map((i) => i.to)).toEqual(['/inventory', '/inventory/transfers']);
   });
 
   it('applies requires AND requiresAny together, not either alone', () => {
@@ -174,6 +199,10 @@ describe('landingRoute', () => {
     // module they reach — the landing route follows the declared order,
     // not a guess about which screen suits the role.
     expect(landingRoute(CASHIER)).toBe('/catalogue');
+  });
+
+  it('sends an inventory-only account to the stock screen', () => {
+    expect(landingRoute(['inventory.view'])).toBe('/inventory');
   });
 
   it('sends an INVENTORY_MANAGER to the catalogue — their first reachable module', () => {
