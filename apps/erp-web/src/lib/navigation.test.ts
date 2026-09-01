@@ -62,6 +62,7 @@ describe('visibleNav', () => {
       '/price-lists',
       '/inventory',
       '/inventory/transfers',
+      '/sales',
       '/purchases',
       '/suppliers',
       '/setup',
@@ -85,6 +86,7 @@ describe('visibleNav', () => {
       '/catalogue',
       '/inventory',
       '/inventory/transfers',
+      '/sales',
       '/warranty-claims',
       '/shifts',
     ]);
@@ -97,6 +99,15 @@ describe('visibleNav', () => {
     expect(CASHIER).not.toContain('shifts.reconcile');
     expect(CASHIER).not.toContain('products.edit');
     expect(CASHIER).not.toContain('pricelists.view');
+    // Phase 17. A cashier DOES hold `sales.view` — they look up a receipt
+    // they rang up themselves — so the sales entry appears for them, and
+    // they hold `sales.pay` too, because taking money on an account sale
+    // is the till's own job. What the sale screens still withhold from
+    // them is cost and profit: those are `products.view_cost`, which the
+    // server checks before it attaches the keys at all.
+    expect(CASHIER).toContain('sales.view');
+    expect(CASHIER).toContain('sales.pay');
+    expect(CASHIER).not.toContain('products.view_cost');
   });
 
   it('gives a branch manager every destination, and no cost or profit grant with them', () => {
@@ -106,6 +117,7 @@ describe('visibleNav', () => {
       '/price-lists',
       '/inventory',
       '/inventory/transfers',
+      '/sales',
       '/purchases',
       '/suppliers',
       '/setup',
@@ -132,6 +144,7 @@ describe('visibleNav', () => {
       '/price-lists',
       '/inventory',
       '/inventory/transfers',
+      '/sales',
       '/purchases',
       '/suppliers',
       '/setup',
@@ -164,6 +177,9 @@ describe('visibleNav', () => {
     expect(INVENTORY).toContain('purchases.receive');
     expect(INVENTORY).not.toContain('purchases.approve');
     expect(INVENTORY).not.toContain('purchases.pay');
+    // Phase 17. Stock is theirs; the sales ledger is not — which is why
+    // no `/sales` entry appears in their navigation above.
+    expect(INVENTORY).not.toContain('sales.view');
   });
 
   it('splits purchasing across three roles — nobody can run an order alone', () => {
@@ -204,6 +220,7 @@ describe('visibleNav', () => {
   it('hides the setup entry when NONE of the five is held', () => {
     expect(visibleNav(['products.view']).map((i) => i.to)).toEqual(['/catalogue']);
     expect(visibleNav(['inventory.view']).map((i) => i.to)).toEqual(['/inventory', '/inventory/transfers']);
+    expect(visibleNav(['sales.view']).map((i) => i.to)).toEqual(['/sales']);
     expect(visibleNav(['purchases.view']).map((i) => i.to)).toEqual(['/purchases']);
     expect(visibleNav(['suppliers.view']).map((i) => i.to)).toEqual(['/suppliers']);
   });

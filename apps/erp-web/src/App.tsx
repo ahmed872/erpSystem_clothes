@@ -18,6 +18,9 @@ import { TransfersPage } from './pages/TransfersPage';
 import { TransferDetailPage } from './pages/TransferDetailPage';
 import { StockCountPage } from './pages/StockCountPage';
 import { SuppliersPage } from './pages/SuppliersPage';
+import { SalesPage } from './pages/SalesPage';
+import { SaleDetailPage } from './pages/SaleDetailPage';
+import { SaleReceiptPage } from './pages/SaleReceiptPage';
 import { PurchasesPage } from './pages/PurchasesPage';
 import { PurchaseCreatePage } from './pages/PurchaseCreatePage';
 import { PurchaseDetailPage } from './pages/PurchaseDetailPage';
@@ -111,6 +114,17 @@ function GuardedRoutes() {
         <Route path="/inventory/transfers" element={<TransfersPage />} />
         <Route path="/inventory/transfers/:transferId" element={<TransferDetailPage />} />
         <Route path="/inventory/counts/:countId" element={<StockCountPage />} />
+      </Route>
+      {/* Phase 17. The back office READS sales; it never rings one up.
+          Every screen here is `sales.view`, and the one mutation the ERP
+          offers — settling an outstanding balance — carries `sales.pay`,
+          checked on the control and again by the backend. The receipt is a
+          child of the sale rather than a sibling, so a deep link to it
+          cannot bypass the sale's own guard. */}
+      <Route element={<RequirePermission codes={['sales.view']} fallback={fallback} />}>
+        <Route path="/sales" element={<SalesPage />} />
+        <Route path="/sales/:saleId" element={<SaleDetailPage />} />
+        <Route path="/sales/:saleId/receipt" element={<SaleReceiptPage />} />
       </Route>
       {/* Phase 16. Reading a purchase is `purchases.view`; raising one is
           its own grant, so `/purchases/new` is gated separately and

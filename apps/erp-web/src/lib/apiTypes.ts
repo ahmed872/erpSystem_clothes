@@ -714,3 +714,184 @@ export interface PurchaseFilters {
   page?: number;
   limit?: number;
 }
+
+// ----------------------------------------------------------- Sales -------
+/**
+ * Phase 17. Traced to the live `sales` module — its controller, the zod
+ * schemas in `packages/shared-validation/src/sales.ts`, and the Prisma
+ * models.
+ *
+ * COST AND PROFIT ARE OPTIONAL, AND ARE ADDED RATHER THAN STRIPPED here —
+ * the opposite posture from Catalogue and Inventory, and equally safe.
+ * `GetSaleUseCase` computes `totalCost`/`grossProfit` on demand and
+ * ATTACHES them only for a caller holding `products.view_cost`; there is
+ * no cost column on Sale or SaleItem at all, so nothing can leak by
+ * accident. The receipt carries neither for ANYBODY — it is a document
+ * handed to a customer.
+ *
+ * NOTE WHAT THE LIST DOES NOT CARRY: `paidAmount`, `remainingAmount` and
+ * `paymentStatus` are computed by `computePaymentSummary` and exist only
+ * on the DETAIL. A list row therefore cannot say whether a sale is
+ * settled, and this app does not pretend otherwise — see
+ * `lib/sales.ts`.
+ */
+
+export type SaleStatus = 'COMPLETED' | 'VOIDED';
+export type SalePaymentStatus = 'PAID' | 'PARTIALLY_PAID' | 'UNPAID';
+export type SalePaymentMethod = 'CASH' | 'CARD' | 'WALLET' | 'OTHER';
+
+export interface SaleListRow {
+  id: string;
+  saleNumber: string;
+  status: SaleStatus;
+  branchId: string;
+  warehouseId: string;
+  customerId: string | null;
+  shiftId: string;
+  subtotal: string;
+  discountAmount: string;
+  taxAmount: string;
+  totalAmount: string;
+  notes: string | null;
+  createdAt: string;
+  exchangeForReturnId: string | null;
+  customer: { id: string; name: string } | null;
+  warehouse: { id: string; name: string } | null;
+}
+
+export interface SaleListResult {
+  data: SaleListRow[];
+  pagination: Pagination;
+}
+
+/** The five filters the live list query accepts. There is deliberately no
+ *  date range and no status filter — neither exists in the contract. */
+export interface SaleFilters {
+  saleNumber?: string;
+  customerId?: string;
+  warehouseId?: string;
+  branchId?: string;
+  shiftId?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface SaleItemRow {
+  id: string;
+  variantId: string;
+  quantity: string;
+  unitPrice: string;
+  discountAmount: string;
+  taxAmount: string;
+  taxRateSnapshot: string | null;
+  taxExempt: boolean;
+  lineTotal: string;
+  quantityReturned: string;
+  variant?: { id: string; sku: string };
+}
+
+export interface SalePaymentRow {
+  id: string;
+  amount: string;
+  method: SalePaymentMethod;
+  reference: string | null;
+  receivedAt: string;
+}
+
+export interface SaleReturnRow {
+  id: string;
+  returnNumber: string;
+  refundMethod: string | null;
+  refundAmount: string | null;
+  reason: string | null;
+  createdAt: string;
+  items: { id: string; saleItemId: string; variantId: string; quantity: string; unitPrice: string; condition: string }[];
+}
+
+export interface SaleDetail extends SaleListRow {
+  paidAmount: string;
+  remainingAmount: string;
+  paymentStatus: SalePaymentStatus;
+  items: SaleItemRow[];
+  payments: SalePaymentRow[];
+  returns: SaleReturnRow[];
+  shift: { id: string; openedBy: string; openedAt: string } | null;
+  /** Both gated by `products.view_cost` — absent, not null, when not held. */
+  totalCost?: string;
+  grossProfit?: string;
+}
+
+/**
+ * `GET /sales/:id/receipt` — the frozen Phase 10I contract, extended
+ * additively in Phase 12 with `serialUnits` and `promotions`. Reproduced
+ * here rather than imported because the two apps are separate packages;
+ * the shape is the POS's, field for field.
+ */
+export interface SaleReceipt {
+  business: {
+    name: string;
+    legalName: string | null;
+    taxNumber: string | null;
+    phone: string | null;
+    email: string | null;
+    addressLine: string | null;
+    city: string | null;
+    country: string | null;
+    logoUrl: string | null;
+    receiptHeader: string | null;
+    receiptFooter: string | null;
+    currency: string;
+    displayName: string;
+  };
+  branch: { id: string; name: string; address: string | null; phone: string | null };
+  register: { id: string; name: string; code: string } | null;
+  cashier: { id: string; name: string } | null;
+  sale: {
+    id: string;
+    saleNumber: string;
+    createdAt: string;
+    notes: string | null;
+    subtotal: string;
+    discountAmount: string;
+    taxAmount: string;
+    totalAmount: string;
+    paidAmount: string;
+    remainingAmount: string;
+    paymentStatus: SalePaymentStatus;
+    exchangeForReturn: { id: string; returnNumber: string } | null;
+  };
+  customer: { id: string; name: string; phone: string | null } | null;
+  items: {
+    id: string;
+    sku: string;
+    name: string;
+    alternativeName: string | null;
+    quantity: string;
+    unitPrice: string;
+    discountAmount: string;
+    taxAmount: string;
+    taxRatePercent: string | null;
+    taxExempt: boolean;
+    lineTotal: string;
+    quantityReturned: string;
+    serials: string[];
+    serialUnits: { id: string; serial: string }[];
+    /** The promotional part of `discountAmount`, snapshotted at the time
+     *  of sale. These do NOT sum to `discountAmount` — a manual discount
+     *  and a loyalty redemption live in that figure too — and nothing in
+     *  this app may add them up. */
+    promotions: { name: string; type: 'PERCENTAGE' | 'FIXED_AMOUNT' | 'BUY_X_GET_Y'; discountApplied: string }[];
+  }[];
+  taxBreakdown: { ratePercent: string; taxableAmount: string; taxAmount: string }[];
+  payments: { method: SalePaymentMethod | 'EXCHANGE_CREDIT'; amount: string; reference: string | null; receivedAt: string }[];
+  loyalty: { earned: string; redeemed: string };
+  returns: { returnNumber: string; createdAt: string; refundMethod: string | null; refundAmount: string | null }[];
+}
+
+export interface SaleCustomer {
+  id: string;
+  name: string;
+  phone: string | null;
+  email: string | null;
+  isActive: boolean;
+}
