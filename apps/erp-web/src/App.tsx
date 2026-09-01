@@ -18,6 +18,8 @@ import { TransfersPage } from './pages/TransfersPage';
 import { TransferDetailPage } from './pages/TransferDetailPage';
 import { StockCountPage } from './pages/StockCountPage';
 import { SuppliersPage } from './pages/SuppliersPage';
+import { CustomersPage } from './pages/CustomersPage';
+import { CustomerDetailPage } from './pages/CustomerDetailPage';
 import { SalesPage } from './pages/SalesPage';
 import { SaleDetailPage } from './pages/SaleDetailPage';
 import { SaleReceiptPage } from './pages/SaleReceiptPage';
@@ -125,6 +127,16 @@ function GuardedRoutes() {
         <Route path="/sales" element={<SalesPage />} />
         <Route path="/sales/:saleId" element={<SaleDetailPage />} />
         <Route path="/sales/:saleId/receipt" element={<SaleReceiptPage />} />
+      </Route>
+      {/* Phase 18. Reading a customer is `customers.view` and gates
+          both routes. Everything beyond reading carries its own grant,
+          checked on the control and again by the backend — and the
+          detail's loyalty and sales-history panels are separately gated
+          on `loyalty.view` and `sales.view`, which a customers-only role
+          does not hold. */}
+      <Route element={<RequirePermission codes={['customers.view']} fallback={fallback} />}>
+        <Route path="/customers" element={<CustomersPage />} />
+        <Route path="/customers/:customerId" element={<CustomerDetailPage />} />
       </Route>
       {/* Phase 16. Reading a purchase is `purchases.view`; raising one is
           its own grant, so `/purchases/new` is gated separately and

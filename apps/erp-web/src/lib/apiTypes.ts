@@ -895,3 +895,121 @@ export interface SaleCustomer {
   email: string | null;
   isActive: boolean;
 }
+
+// ====================================================================
+// Phase 18 — CUSTOMERS.
+//
+// Every shape below is the LIVE one, read off the running backend rather
+// than assumed. Two absences are load-bearing and are recorded here so no
+// screen invents them:
+//
+//   - there is NO `creditLimit` on the Customer model, in the create
+//     schema or in the update schema. A credit limit sent to either
+//     endpoint is silently stripped by a non-strict Zod object, so a UI
+//     offering the field would appear to save a number that was never
+//     stored.
+//   - `isActive` is NOT writable through PATCH either. It is set true at
+//     creation and false by DELETE, and nothing reverses it — see
+//     `CUSTOMER_REACTIVATION_UNSUPPORTED` in `lib/customers.ts`.
+// ====================================================================
+
+/** `GET /sales/customers` row. `balance` is the SERVER's ledger sum. */
+export interface CustomerRow {
+  id: string;
+  name: string;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  taxNumber: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** `SUM(CustomerTransaction.amount)`, computed on every read. Positive
+   *  means the customer owes the business. Never stored, never summed
+   *  here. */
+  balance: string;
+}
+
+export interface CustomerListResult {
+  data: CustomerRow[];
+  pagination: Pagination;
+}
+
+/** The three filters the live list query accepts, and no others. */
+export interface CustomerFilters {
+  /** Name OR phone, `contains`; an EXACT phone match is ranked first by
+   *  the server, which is why the browser never re-sorts the page. */
+  search?: string;
+  isActive?: boolean;
+  page?: number;
+  limit?: number;
+}
+
+export type CustomerTransactionType = 'SALE' | 'SALE_RETURN' | 'PAYMENT' | 'OPENING_BALANCE' | 'ADJUSTMENT';
+
+export interface CustomerTransactionRow {
+  id: string;
+  type: CustomerTransactionType;
+  amount: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  description: string | null;
+  createdAt: string;
+}
+
+/** `GET /sales/customers/:id`. The last 100 ledger rows, newest first —
+ *  the server takes 100 and offers no paging over them. */
+export interface CustomerDetail extends CustomerRow {
+  recentTransactions: CustomerTransactionRow[];
+}
+
+/** The exact five fields `createCustomerSchema` accepts. */
+export interface CustomerInput {
+  name: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  taxNumber?: string;
+}
+
+export type CustomerPointsType = 'EARN' | 'REDEEM' | 'RETURN_CLAWBACK' | 'ADJUSTMENT';
+
+/** `GET /sales/customers/:id/points` — `loyalty.view`. */
+export interface CustomerPointsBalance {
+  customerId: string;
+  customerName: string;
+  balance: string;
+  eventCount: number;
+  /** The server says so on the response itself: the balance is derived
+   *  from the ledger on every read and is never cached. */
+  derivation: string;
+}
+
+export interface CustomerPointsRow {
+  id: string;
+  type: CustomerPointsType;
+  /** Signed. Positive adds, negative removes; never zero. */
+  points: string;
+  basisAmount: string | null;
+  rateSnapshot: string | null;
+  referenceType: string | null;
+  referenceId: string | null;
+  description: string | null;
+  createdAt: string;
+}
+
+/** `GET /sales/customers/:id/points/ledger` — `loyalty.view`. `balance`
+ *  is the WHOLE customer's balance, never this page's subtotal and never
+ *  affected by the `type` filter. */
+export interface CustomerPointsLedger {
+  data: CustomerPointsRow[];
+  balance: string;
+  pagination: Pagination;
+}
+
+/** `POST /sales/customers/:id/points/adjust` — `loyalty.adjust`. */
+export interface AdjustPointsInput {
+  points: number;
+  reason: string;
+  idempotencyKey: string;
+}

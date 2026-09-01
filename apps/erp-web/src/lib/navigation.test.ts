@@ -63,6 +63,7 @@ describe('visibleNav', () => {
       '/inventory',
       '/inventory/transfers',
       '/sales',
+      '/customers',
       '/purchases',
       '/suppliers',
       '/setup',
@@ -87,6 +88,7 @@ describe('visibleNav', () => {
       '/inventory',
       '/inventory/transfers',
       '/sales',
+      '/customers',
       '/warranty-claims',
       '/shifts',
     ]);
@@ -107,6 +109,13 @@ describe('visibleNav', () => {
     // server checks before it attaches the keys at all.
     expect(CASHIER).toContain('sales.view');
     expect(CASHIER).toContain('sales.pay');
+    // Phase 18. A till creates customers, so a cashier holds
+    // `customers.view` and `customers.create` — but not `customers.edit`
+    // or `customers.delete`, which is why those controls do not render
+    // for them and the backend refuses them regardless.
+    expect(CASHIER).toContain('customers.create');
+    expect(CASHIER).not.toContain('customers.edit');
+    expect(CASHIER).not.toContain('customers.delete');
     expect(CASHIER).not.toContain('products.view_cost');
   });
 
@@ -118,6 +127,7 @@ describe('visibleNav', () => {
       '/inventory',
       '/inventory/transfers',
       '/sales',
+      '/customers',
       '/purchases',
       '/suppliers',
       '/setup',
@@ -145,6 +155,7 @@ describe('visibleNav', () => {
       '/inventory',
       '/inventory/transfers',
       '/sales',
+      '/customers',
       '/purchases',
       '/suppliers',
       '/setup',
@@ -180,6 +191,9 @@ describe('visibleNav', () => {
     // Phase 17. Stock is theirs; the sales ledger is not — which is why
     // no `/sales` entry appears in their navigation above.
     expect(INVENTORY).not.toContain('sales.view');
+    // Phase 18, the same line drawn again: they hold no customer surface
+    // either, which is why no `/customers` entry appears above.
+    expect(INVENTORY).not.toContain('customers.view');
   });
 
   it('splits purchasing across three roles — nobody can run an order alone', () => {
@@ -221,6 +235,7 @@ describe('visibleNav', () => {
     expect(visibleNav(['products.view']).map((i) => i.to)).toEqual(['/catalogue']);
     expect(visibleNav(['inventory.view']).map((i) => i.to)).toEqual(['/inventory', '/inventory/transfers']);
     expect(visibleNav(['sales.view']).map((i) => i.to)).toEqual(['/sales']);
+    expect(visibleNav(['customers.view']).map((i) => i.to)).toEqual(['/customers']);
     expect(visibleNav(['purchases.view']).map((i) => i.to)).toEqual(['/purchases']);
     expect(visibleNav(['suppliers.view']).map((i) => i.to)).toEqual(['/suppliers']);
   });
