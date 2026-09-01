@@ -9,3 +9,4 @@ export * from './components/ErrorBanner';
 export * from './components/Modal';
 export * from './components/DataTable';
 export * from './components/ConfirmDialog';
+export * from './components/Tabs';

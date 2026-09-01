@@ -187,3 +187,170 @@ export interface CashRegister {
   code: string;
   isActive: boolean;
 }
+
+// ------------------------------------------------------- Catalogue -------
+/**
+ * Phase 14. Traced to the live `catalog` module — `PRODUCT_INCLUDE` /
+ * `VARIANT_INCLUDE` in `domain/includes.ts` and the zod schemas in
+ * `packages/shared-validation/src/catalog.ts`.
+ *
+ * COST IS OPTIONAL EVERYWHERE IT APPEARS, and that is the whole cost
+ * model on these screens: the server DELETES `defaultCost` and `cost` for
+ * a caller without `products.view_cost` — on write responses as well as
+ * read ones, as of this milestone. The browser therefore renders what
+ * arrived and never decides the permission itself.
+ */
+
+export type ProductStatus = 'ACTIVE' | 'INACTIVE' | 'DISCONTINUED';
+export type ProductType = 'SIMPLE' | 'BUNDLE';
+export type VariantStatus = 'ACTIVE' | 'INACTIVE';
+
+export interface Uom {
+  id: string;
+  name: string;
+  code: string;
+  precision: number;
+  isActive: boolean;
+}
+
+export interface Category {
+  id: string;
+  name: string;
+  parentId: string | null;
+  description: string | null;
+  isActive: boolean;
+}
+
+export interface Brand {
+  id: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+}
+
+export interface AttributeValue {
+  id: string;
+  attributeId: string;
+  value: string;
+  sortOrder: number;
+}
+
+export interface Attribute {
+  id: string;
+  name: string;
+  isActive: boolean;
+  values: AttributeValue[];
+}
+
+export interface Tax {
+  id: string;
+  name: string;
+  ratePercent: string;
+  isActive: boolean;
+}
+
+export interface Barcode {
+  id: string;
+  variantId: string;
+  code: string;
+  isPrimary: boolean;
+}
+
+/** A variant as the catalogue detail screen receives it. */
+export interface Variant {
+  id: string;
+  productId: string;
+  sku: string;
+  status: VariantStatus;
+  sellingPrice: string;
+  /** Gated by `products.view_cost` — absent, not null, when not held. */
+  cost?: string;
+  weight: string | null;
+  barcodes: Barcode[];
+  attributeValues: { attributeValue: AttributeValue & { attribute: { id: string; name: string } } }[];
+}
+
+/** The lean row shape `GET /catalog/products` puts in its list. */
+export interface ProductListRow {
+  id: string;
+  sku: string;
+  name: string;
+  alternativeName: string | null;
+  type: ProductType;
+  status: ProductStatus;
+  defaultSellingPrice: string;
+  /** Gated by `products.view_cost`. */
+  defaultCost?: string;
+  categoryId: string | null;
+  brandId: string | null;
+  category: Category | null;
+  brand: Brand | null;
+  baseUom: Uom;
+  variants: { id: string; sku: string; status: VariantStatus }[];
+}
+
+export interface BundleItem {
+  bundleProductId: string;
+  componentVariantId: string;
+  quantity: string;
+  componentVariant: Variant & { product: { id: string; name: string; sku: string } };
+}
+
+/** The full record `GET /catalog/products/:id` returns. */
+export interface ProductDetail extends Omit<ProductListRow, 'variants'> {
+  description: string | null;
+  taxId: string | null;
+  taxExempt: boolean;
+  minimumStock: string | null;
+  maximumStock: string | null;
+  tracksLots: boolean;
+  tracksSerialNumbers: boolean;
+  baseUomId: string;
+  variants: Variant[];
+  bundleItems: BundleItem[];
+}
+
+export interface Pagination {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface ProductListResult {
+  data: ProductListRow[];
+  pagination: Pagination;
+}
+
+export interface ProductListFilters {
+  search?: string;
+  categoryId?: string;
+  brandId?: string;
+  status?: ProductStatus;
+  type?: ProductType;
+  page?: number;
+  limit?: number;
+}
+
+// --------------------------------------------------------- Pricing -------
+/**
+ * `PriceList` carries exactly two applicability signals — `isDefault` and
+ * `isActive` — and nothing else. There is no customer-, branch- or
+ * warehouse-scoped price list in the live schema, and this app does not
+ * invent one: see `lib/priceLists.ts`.
+ */
+export interface PriceList {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface PriceListEntry {
+  id: string;
+  priceListId: string;
+  variantId: string;
+  price: string;
+  variant: { id: string; sku: string; product: { id: string; name: string } };
+}

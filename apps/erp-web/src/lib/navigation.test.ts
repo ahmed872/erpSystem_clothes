@@ -41,14 +41,29 @@ describe('ERP_NAV', () => {
   it('labels every entry with an i18n key, never a literal — Arabic is the default', () => {
     for (const item of ERP_NAV) {
       expect(item.labelKey).toMatch(/^nav\./);
-      expect(item.requires.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('leaves no entry ungated: every destination demands at least one grant', () => {
+    // Either list satisfies this. `/setup` gates with `requiresAny`
+    // because it fronts five separately-granted things; the rest use
+    // `requires`. What must never appear is an entry demanding nothing.
+    for (const item of ERP_NAV) {
+      expect(item.requires.length + (item.requiresAny?.length ?? 0)).toBeGreaterThan(0);
     }
   });
 });
 
 describe('visibleNav', () => {
-  it('gives an owner every destination in this milestone', () => {
-    expect(visibleNav(OWNER).map((i) => i.to)).toEqual(['/dashboard', '/warranty-claims', '/shifts']);
+  it('gives an owner every destination in the product so far', () => {
+    expect(visibleNav(OWNER).map((i) => i.to)).toEqual([
+      '/dashboard',
+      '/catalogue',
+      '/price-lists',
+      '/setup',
+      '/warranty-claims',
+      '/shifts',
+    ]);
   });
 
   it('gives a cashier no dashboard — a till has no `reports.dashboard.view`', () => {
@@ -56,12 +71,24 @@ describe('visibleNav', () => {
     // (they read their own drawer at the till), so the shift list appears
     // — but whether they may RECONCILE one is `shifts.reconcile`, which
     // they do not hold, and which the page checks separately.
-    expect(visibleNav(CASHIER).map((i) => i.to)).toEqual(['/warranty-claims', '/shifts']);
+    // A cashier holds `products.view`, so the catalogue is readable to
+    // them — but they hold no create/edit/price grant, and every control
+    // on those screens is gated separately.
+    expect(visibleNav(CASHIER).map((i) => i.to)).toEqual(['/catalogue', '/warranty-claims', '/shifts']);
     expect(CASHIER).not.toContain('shifts.reconcile');
+    expect(CASHIER).not.toContain('products.edit');
+    expect(CASHIER).not.toContain('pricelists.view');
   });
 
-  it('gives a branch manager all three, and no cost or profit grant with them', () => {
-    expect(visibleNav(BRANCH_MANAGER).map((i) => i.to)).toEqual(['/dashboard', '/warranty-claims', '/shifts']);
+  it('gives a branch manager every destination, and no cost or profit grant with them', () => {
+    expect(visibleNav(BRANCH_MANAGER).map((i) => i.to)).toEqual([
+      '/dashboard',
+      '/catalogue',
+      '/price-lists',
+      '/setup',
+      '/warranty-claims',
+      '/shifts',
+    ]);
     // The reason the dashboard renders different tiles for this role: the
     // server deletes the cost and profit keys from their response.
     expect(BRANCH_MANAGER).not.toContain('products.view_cost');
@@ -76,11 +103,26 @@ describe('visibleNav', () => {
     // appears is a separate question, answered by usePermission on the
     // page — conflating them would hide claim history from the people who
     // audit it.
-    expect(visibleNav(ACCOUNTANT).map((i) => i.to)).toEqual(['/dashboard', '/warranty-claims', '/shifts']);
+    expect(visibleNav(ACCOUNTANT).map((i) => i.to)).toEqual([
+      '/dashboard',
+      '/catalogue',
+      '/price-lists',
+      '/setup',
+      '/warranty-claims',
+      '/shifts',
+    ]);
   });
 
-  it('gives an inventory manager nothing at all rather than an empty shell', () => {
-    expect(visibleNav(INVENTORY)).toEqual([]);
+  it('finally gives an INVENTORY_MANAGER a back office — Phase 13 gave them none', () => {
+    // The role that builds the catalogue held none of Slice 1's three
+    // grants and landed on /no-access. Phase 14 is the milestone that is
+    // actually theirs.
+    expect(visibleNav(INVENTORY).map((i) => i.to)).toEqual(['/catalogue', '/price-lists', '/setup']);
+    expect(INVENTORY).toContain('products.create');
+    expect(INVENTORY).toContain('products.change_cost');
+    // ...but NOT the shelf price, and NOT the ability to reprice the shop.
+    expect(INVENTORY).not.toContain('products.change_price');
+    expect(INVENTORY).not.toContain('pricelists.manage_prices');
   });
 
   it('requires ALL codes on an entry, not any of them', () => {
@@ -90,11 +132,31 @@ describe('visibleNav', () => {
   });
 
   it('is unaffected by grants it does not ask for', () => {
-    expect(visibleNav([...INVENTORY, 'shifts.view']).map((i) => i.to)).toEqual(['/shifts']);
+    expect(visibleNav(['shifts.view', 'inventory.receive']).map((i) => i.to)).toEqual(['/shifts']);
+  });
+
+  it('shows the setup entry for ANY one of the five things behind it', () => {
+    // `requiresAny`. Reference data fronts five separately-granted things;
+    // requiring all of them would hide the tax screen from the ACCOUNTANT,
+    // who holds `tax.manage` and none of the other four.
+    for (const grant of ['categories.view', 'brands.view', 'attributes.view', 'uoms.view', 'tax.view']) {
+      expect(visibleNav([grant]).map((i) => i.to)).toEqual(['/setup']);
+    }
+  });
+
+  it('hides the setup entry when NONE of the five is held', () => {
+    expect(visibleNav(['products.view']).map((i) => i.to)).toEqual(['/catalogue']);
+  });
+
+  it('applies requires AND requiresAny together, not either alone', () => {
+    const items: NavItem[] = [{ to: '/x', labelKey: 'nav.x', requires: ['must'], requiresAny: ['a', 'b'] }];
+    expect(visibleNav(['must'], items)).toEqual([]);
+    expect(visibleNav(['a'], items)).toEqual([]);
+    expect(visibleNav(['must', 'b'], items)).toEqual(items);
   });
 
   it('preserves the declared order rather than the order permissions arrived in', () => {
-    expect(visibleNav([...OWNER].reverse()).map((i) => i.to)).toEqual(['/dashboard', '/warranty-claims', '/shifts']);
+    expect(visibleNav([...OWNER].reverse()).map((i) => i.to)).toEqual(visibleNav(OWNER).map((i) => i.to));
   });
 });
 
@@ -107,7 +169,15 @@ describe('landingRoute', () => {
     // Never a constant `/dashboard`: that would redirect a shifts-only
     // user straight back out and read as a broken product.
     expect(landingRoute(['shifts.view'])).toBe('/shifts');
-    expect(landingRoute(CASHIER)).toBe('/warranty-claims');
+    expect(landingRoute(['warranty.view'])).toBe('/warranty-claims');
+    // A cashier holds `products.view`, so the catalogue is the first
+    // module they reach — the landing route follows the declared order,
+    // not a guess about which screen suits the role.
+    expect(landingRoute(CASHIER)).toBe('/catalogue');
+  });
+
+  it('sends an INVENTORY_MANAGER to the catalogue — their first reachable module', () => {
+    expect(landingRoute(INVENTORY)).toBe('/catalogue');
   });
 
   it('sends a branch manager and an accountant to the dashboard they both hold', () => {
@@ -116,7 +186,7 @@ describe('landingRoute', () => {
   });
 
   it('returns null — not a route — when the account has no ERP surface', () => {
-    expect(landingRoute(INVENTORY)).toBeNull();
+    expect(landingRoute(['inventory.receive'])).toBeNull();
     expect(landingRoute([])).toBeNull();
   });
 });

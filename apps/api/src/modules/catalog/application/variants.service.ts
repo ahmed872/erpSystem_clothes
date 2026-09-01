@@ -14,7 +14,7 @@ import { NotFoundDomainError, ValidationFailedError } from '../../../common/erro
 import { RequestUser } from '../../../common/decorators/current-user.decorator';
 import { assertSkuAvailable } from '../domain/sku-guard';
 import { resolveAttributeValues, attributeSignature } from '../domain/attribute-values';
-import { omitFields } from '../domain/omit-fields';
+import { stripVariantCost } from '../domain/omit-fields';
 import { VARIANT_INCLUDE } from '../domain/includes';
 
 @Injectable()
@@ -100,7 +100,9 @@ export class VariantsService {
         after: variant,
       });
 
-      return tx.productVariant.findUniqueOrThrow({ where: { id: variant.id }, include: VARIANT_INCLUDE });
+      const full = await tx.productVariant.findUniqueOrThrow({ where: { id: variant.id }, include: VARIANT_INCLUDE });
+      const permissions = await this.effectivePermissions.get(tx, actor.id);
+      return stripVariantCost(full, permissions?.has('products.view_cost') ?? false);
     });
   }
 
@@ -115,7 +117,7 @@ export class VariantsService {
       });
       if (!variant) throw new NotFoundDomainError('ProductVariant', variantId);
 
-      return canViewCost ? variant : omitFields(variant, ['cost']);
+      return stripVariantCost(variant, canViewCost);
     });
   }
 
@@ -150,7 +152,8 @@ export class VariantsService {
         after,
       });
 
-      return after;
+      const permissions = await this.effectivePermissions.get(tx, actor.id);
+      return stripVariantCost(after, permissions?.has('products.view_cost') ?? false);
     });
   }
 
@@ -186,7 +189,8 @@ export class VariantsService {
         reason: 'Cost change',
       });
 
-      return after;
+      const permissions = await this.effectivePermissions.get(tx, actor.id);
+      return stripVariantCost(after, permissions?.has('products.view_cost') ?? false);
     });
   }
 
@@ -222,7 +226,8 @@ export class VariantsService {
         reason: 'Selling price change',
       });
 
-      return after;
+      const permissions = await this.effectivePermissions.get(tx, actor.id);
+      return stripVariantCost(after, permissions?.has('products.view_cost') ?? false);
     });
   }
 
@@ -250,7 +255,7 @@ export class VariantsService {
 
       if (!variant) throw new NotFoundDomainError('ProductVariant');
 
-      return canViewCost ? variant : omitFields(variant, ['cost']);
+      return stripVariantCost(variant, canViewCost);
     });
   }
 }

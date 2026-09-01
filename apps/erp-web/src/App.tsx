@@ -3,11 +3,16 @@ import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import { SpinnerOverlay } from '@retail/ui-kit';
 import { useAuthStore } from './store/authStore';
 import { bootstrapSession } from './lib/bootstrap';
-import { RequireAuth, RequirePermission } from './components/Guards';
+import { RequireAnyPermission, RequireAuth, RequirePermission } from './components/Guards';
 import { AppShell } from './components/AppShell';
 import { landingRoute } from './lib/navigation';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
+import { CataloguePage } from './pages/CataloguePage';
+import { ProductCreatePage } from './pages/ProductCreatePage';
+import { ProductDetailPage } from './pages/ProductDetailPage';
+import { PriceListsPage } from './pages/PriceListsPage';
+import { SetupPage } from './pages/SetupPage';
 import { WarrantyClaimsPage } from './pages/WarrantyClaimsPage';
 import { ShiftsPage } from './pages/ShiftsPage';
 import { NoAccessPage } from './pages/NoAccessPage';
@@ -75,6 +80,34 @@ function GuardedRoutes() {
     <Routes location={location}>
       <Route element={<RequirePermission codes={['reports.dashboard.view']} fallback={fallback} />}>
         <Route path="/dashboard" element={<DashboardPage />} />
+      </Route>
+      {/* Phase 14. Each route is guarded on the SAME code its nav entry
+          asks for, and the backend guards every call behind it again.
+          Creating a product needs its own grant, so `/catalogue/new` is
+          gated separately from the list — and is declared BEFORE
+          `/catalogue/:productId` so it is not read as a product id. */}
+      <Route element={<RequirePermission codes={['products.view']} fallback={fallback} />}>
+        <Route path="/catalogue" element={<CataloguePage />} />
+        <Route element={<RequirePermission codes={['products.create']} fallback="/catalogue" />}>
+          <Route path="/catalogue/new" element={<ProductCreatePage />} />
+        </Route>
+        <Route path="/catalogue/:productId" element={<ProductDetailPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['pricelists.view']} fallback={fallback} />}>
+        <Route path="/price-lists" element={<PriceListsPage />} />
+      </Route>
+      {/* Reference data fronts five separately-granted things, so the
+          route admits anyone holding ANY of them and each TAB re-checks
+          its own grant. */}
+      <Route
+        element={
+          <RequireAnyPermission
+            codes={['categories.view', 'brands.view', 'attributes.view', 'uoms.view', 'tax.view']}
+            fallback={fallback}
+          />
+        }
+      >
+        <Route path="/setup" element={<SetupPage />} />
       </Route>
       <Route element={<RequirePermission codes={['warranty.view']} fallback={fallback} />}>
         <Route path="/warranty-claims" element={<WarrantyClaimsPage />} />

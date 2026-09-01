@@ -26,6 +26,20 @@ export interface NavItem {
   labelKey: string;
   /** Every code must be held for this entry to appear. */
   requires: PermissionCode[];
+  /**
+   * Phase 14 — at least ONE of these must be held, in addition to
+   * everything in `requires`.
+   *
+   * Needed because one destination can front several independently-granted
+   * things. Reference data is the case: categories, brands, attributes,
+   * units and taxes each have their own grants, and an ACCOUNTANT holds
+   * `tax.manage` and none of the other four. Requiring all of them would
+   * hide the tax screen from the very role that manages tax; requiring
+   * none would show an empty page to someone who holds nothing. So the
+   * entry appears when any one tab behind it is reachable, and each TAB
+   * re-checks its own grant.
+   */
+  requiresAny?: PermissionCode[];
 }
 
 /**
@@ -37,6 +51,14 @@ export interface NavItem {
  */
 export const ERP_NAV: NavItem[] = [
   { to: '/dashboard', labelKey: 'nav.dashboard', requires: ['reports.dashboard.view'] },
+  { to: '/catalogue', labelKey: 'nav.catalogue', requires: ['products.view'] },
+  { to: '/price-lists', labelKey: 'nav.priceLists', requires: ['pricelists.view'] },
+  {
+    to: '/setup',
+    labelKey: 'nav.setup',
+    requires: [],
+    requiresAny: ['categories.view', 'brands.view', 'attributes.view', 'uoms.view', 'tax.view'],
+  },
   { to: '/warranty-claims', labelKey: 'nav.warrantyClaims', requires: ['warranty.view'] },
   { to: '/shifts', labelKey: 'nav.shifts', requires: ['shifts.view'] },
 ];
@@ -44,7 +66,11 @@ export const ERP_NAV: NavItem[] = [
 /** The entries this caller may see. */
 export function visibleNav(permissions: PermissionCode[], items: NavItem[] = ERP_NAV): NavItem[] {
   const held = new Set(permissions);
-  return items.filter((item) => item.requires.every((code) => held.has(code)));
+  return items.filter(
+    (item) =>
+      item.requires.every((code) => held.has(code)) &&
+      (item.requiresAny === undefined || item.requiresAny.some((code) => held.has(code))),
+  );
 }
 
 /**

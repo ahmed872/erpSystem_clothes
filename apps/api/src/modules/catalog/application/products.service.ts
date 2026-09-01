@@ -7,7 +7,7 @@ import { ConflictDomainError, NotFoundDomainError, ValidationFailedError } from 
 import { RequestUser } from '../../../common/decorators/current-user.decorator';
 import { assertSkuAvailable } from '../domain/sku-guard';
 import { resolveAttributeValues, attributeSignature } from '../domain/attribute-values';
-import { omitFields } from '../domain/omit-fields';
+import { omitFields, stripProductCost } from '../domain/omit-fields';
 import { PRODUCT_INCLUDE } from '../domain/includes';
 
 @Injectable()
@@ -159,7 +159,8 @@ export class ProductsService {
       });
 
       const full = await tx.product.findUniqueOrThrow({ where: { id: product.id }, include: PRODUCT_INCLUDE });
-      return full;
+      const permissions = await this.effectivePermissions.get(tx, actor.id);
+      return stripProductCost(full, permissions?.has('products.view_cost') ?? false);
     });
   }
 
@@ -214,11 +215,7 @@ export class ProductsService {
       });
       if (!product) throw new NotFoundDomainError('Product', productId);
 
-      if (canViewCost) return product;
-      return {
-        ...omitFields(product, ['defaultCost']),
-        variants: product.variants.map((v) => omitFields(v, ['cost'])),
-      };
+      return stripProductCost(product, canViewCost);
     });
   }
 
@@ -272,7 +269,8 @@ export class ProductsService {
         after,
       });
 
-      return after;
+      const permissions = await this.effectivePermissions.get(tx, actor.id);
+      return stripProductCost(after, permissions?.has('products.view_cost') ?? false);
     });
   }
 

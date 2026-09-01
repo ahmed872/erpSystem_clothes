@@ -25,3 +25,20 @@ export function RequirePermission({ codes, fallback }: { codes: string[]; fallba
   if (!codes.every((c) => held.has(c))) return <Navigate to={fallback} replace />;
   return <Outlet />;
 }
+
+/**
+ * Phase 14 — a route that fronts several independently-granted sections.
+ *
+ * Reference data is the case: categories, brands, attributes, units and
+ * taxes each carry their own grants, and an ACCOUNTANT holds `tax.manage`
+ * and none of the other four. Requiring all of them would lock the tax
+ * screen away from the role that manages tax. So the route admits anyone
+ * holding AT LEAST ONE, and each tab inside re-checks its own — which is
+ * still visibility only, since the backend refuses every call regardless.
+ */
+export function RequireAnyPermission({ codes, fallback }: { codes: string[]; fallback: string }) {
+  const permissions = useAuthStore((s) => s.permissions);
+  const held = new Set(permissions);
+  if (!codes.some((c) => held.has(c))) return <Navigate to={fallback} replace />;
+  return <Outlet />;
+}
