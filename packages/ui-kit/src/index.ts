@@ -7,3 +7,5 @@ export * from './components/Spinner';
 export * from './components/EmptyState';
 export * from './components/ErrorBanner';
 export * from './components/Modal';
+export * from './components/DataTable';
+export * from './components/ConfirmDialog';

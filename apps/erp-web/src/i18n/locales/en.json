@@ -1,0 +1,152 @@
+{
+  "app": {
+    "title": "Retail ERP"
+  },
+  "login": {
+    "title": "Back office",
+    "subtitle": "Sign in to manage your business",
+    "businessSlug": "Business slug",
+    "email": "Email",
+    "password": "Password",
+    "submit": "Sign in",
+    "submitting": "Signing in..."
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "warrantyClaims": "Warranty claims",
+    "shifts": "Shifts",
+    "language": "العربية",
+    "logout": "Log out"
+  },
+  "common": {
+    "loading": "Loading",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "save": "Save",
+    "back": "Back",
+    "close": "Close",
+    "done": "Done",
+    "search": "Search",
+    "noResults": "Nothing to show",
+    "requestId": "Reference"
+  },
+  "errors": {
+    "title": {
+      "VALIDATION_FAILED": "Check the highlighted fields",
+      "FORBIDDEN": "Not permitted",
+      "UNAUTHORIZED": "Sign-in required",
+      "SESSION_EXPIRED": "Sign-in required",
+      "NOT_FOUND": "Not found",
+      "CONFLICT": "Cannot complete this action",
+      "INSUFFICIENT_STOCK": "Not enough stock",
+      "UNKNOWN_ERROR": "Something went wrong"
+    },
+    "hint": {
+      "FORBIDDEN": "Your account does not allow this. Ask a business owner.",
+      "UNAUTHORIZED": "Sign in again to continue.",
+      "SESSION_EXPIRED": "Your session has ended. Sign in again to continue.",
+      "CONFLICT": "Something changed since this screen loaded. Check the details and try again."
+    }
+  },
+  "noAccess": {
+    "title": "No back-office modules are available to your account",
+    "body": "Your permissions do not currently include any of the back-office areas built so far. Ask a business owner if you need access."
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "explainer": "Every figure below is computed by the server from the ledger and the sale records.",
+    "from": "From",
+    "to": "To",
+    "rangeHint": "Leave both empty for the default range.",
+    "kpi": {
+      "sales": "Sales",
+      "netSales": "Net sales",
+      "discounts": "Discounts",
+      "transactions": "Transactions",
+      "averageInvoice": "Average invoice",
+      "receivables": "Receivables",
+      "payables": "Payables",
+      "cashBalance": "Cash balance",
+      "bankBalance": "Bank balance",
+      "totalCost": "Purchase cost",
+      "cogs": "Cost of goods sold",
+      "inventoryValue": "Inventory value",
+      "grossProfit": "Gross profit",
+      "netProfit": "Net profit"
+    },
+    "topProducts": "Best selling",
+    "slowestProducts": "Slowest moving",
+    "product": "Product",
+    "sku": "SKU",
+    "quantity": "Quantity",
+    "revenue": "Revenue",
+    "profit": "Profit",
+    "limitationsTitle": "What these figures do and do not include"
+  },
+  "claims": {
+    "title": "Warranty claims",
+    "explainer": "Claims raised at the till are decided here, after inspection.",
+    "noneClaimed": "No warranty has an open claim",
+    "noClaims": "No claims on this warranty",
+    "serial": "Serial",
+    "sale": "Sale",
+    "customer": "Customer",
+    "walkIn": "Walk-in",
+    "warrantyStatus": "Warranty",
+    "claimCount": "Claims",
+    "coverEnds": "Cover ends",
+    "cover": "Cover",
+    "days": "{{days}} days",
+    "history": "Claim history",
+    "warranty": {
+      "ACTIVE": "Under warranty",
+      "EXPIRED": "Expired",
+      "CLAIMED": "Claimed",
+      "VOID": "Void"
+    },
+    "status": {
+      "OPEN": "Open",
+      "RESOLVED": "Resolved",
+      "REJECTED": "Rejected"
+    },
+    "resolveAction": "Decide",
+    "resolveTitle": "Decide this claim",
+    "resolveWarning": "A decision is final: a claim cannot be reopened once resolved or rejected.",
+    "resolveSubmit": "Record the decision",
+    "outcome": "Outcome",
+    "resolutionNote": "What was decided, and why",
+    "resolvedAs": "Claim {{status}}"
+  },
+  "shifts": {
+    "title": "Shifts",
+    "explainer": "Cashiers close blind. The expected figure and the variance are reviewed here.",
+    "none": "No shifts yet",
+    "register": "Register",
+    "openedAt": "Opened",
+    "closedAt": "Closed",
+    "openingFloat": "Opening float",
+    "cashIn": "Cash in",
+    "cashOut": "Cash out",
+    "expectedCash": "Expected cash",
+    "countedCash": "Counted cash",
+    "variance": "Variance",
+    "varianceKind": {
+      "OVERAGE": "over",
+      "SHORTAGE": "short",
+      "BALANCED": "balanced"
+    },
+    "state": "State",
+    "stateLabel": {
+      "OPEN": "Open",
+      "AWAITING_RECONCILIATION": "Awaiting review",
+      "RECONCILED": "Reviewed"
+    },
+    "reconcileAction": "Accept and sign off",
+    "reconcileTitle": "Sign off this shift",
+    "reconcileWarning": "This records that you accepted the variance. It cannot change the counted amount, and the accounting entry was already posted when the shift closed. A shift can be signed off once.",
+    "reconcileSubmit": "Sign off",
+    "reconcileNote": "Note",
+    "reconciledTitle": "Shift signed off",
+    "alreadyReconciled": "This shift has already been signed off."
+  }
+}

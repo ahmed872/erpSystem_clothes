@@ -7,11 +7,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace=@retail/shared-types --workspace=@retail/shared-validation --workspace=@retail/ui-kit && npm run build --workspace=api --workspace=@retail/pos-web",
-    "test": "npm run test --workspace=api && npm run test --workspace=@retail/pos-web",
+    "build": "npm run build --workspace=@retail/shared-types --workspace=@retail/shared-validation --workspace=@retail/ui-kit && npm run build --workspace=api --workspace=@retail/pos-web --workspace=@retail/erp-web",
+    "test": "npm run test --workspace=api && npm run test --workspace=@retail/pos-web && npm run test --workspace=@retail/erp-web",
     "test:e2e": "npm run test:e2e --workspace=api",
-    "lint": "npm run lint --workspace=api && npm run lint --workspace=@retail/pos-web",
-    "typecheck": "npm run typecheck --workspace=api && npm run typecheck --workspace=@retail/ui-kit && npm run typecheck --workspace=@retail/pos-web",
+    "lint": "npm run lint --workspace=api && npm run lint --workspace=@retail/pos-web && npm run lint --workspace=@retail/erp-web",
+    "typecheck": "npm run typecheck --workspace=api && npm run typecheck --workspace=@retail/ui-kit && npm run typecheck --workspace=@retail/pos-web && npm run typecheck --workspace=@retail/erp-web",
     "prisma:migrate": "npm run prisma:migrate --workspace=api",
     "prisma:generate": "npm run prisma:generate --workspace=api"
   },

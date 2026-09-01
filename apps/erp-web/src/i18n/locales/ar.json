@@ -1,0 +1,152 @@
+{
+  "app": {
+    "title": "إدارة المتجر"
+  },
+  "login": {
+    "title": "الإدارة الخلفية",
+    "subtitle": "سجّل الدخول لإدارة نشاطك",
+    "businessSlug": "معرّف النشاط",
+    "email": "البريد الإلكتروني",
+    "password": "كلمة المرور",
+    "submit": "تسجيل الدخول",
+    "submitting": "جارٍ تسجيل الدخول..."
+  },
+  "nav": {
+    "dashboard": "لوحة المعلومات",
+    "warrantyClaims": "مطالبات الضمان",
+    "shifts": "الورديات",
+    "language": "English",
+    "logout": "تسجيل الخروج"
+  },
+  "common": {
+    "loading": "جارٍ التحميل",
+    "retry": "إعادة المحاولة",
+    "cancel": "إلغاء",
+    "save": "حفظ",
+    "back": "رجوع",
+    "close": "إغلاق",
+    "done": "تم",
+    "search": "بحث",
+    "noResults": "لا يوجد ما يُعرض",
+    "requestId": "المرجع"
+  },
+  "errors": {
+    "title": {
+      "VALIDATION_FAILED": "راجع الحقول المحددة",
+      "FORBIDDEN": "غير مسموح",
+      "UNAUTHORIZED": "يلزم تسجيل الدخول",
+      "SESSION_EXPIRED": "يلزم تسجيل الدخول",
+      "NOT_FOUND": "غير موجود",
+      "CONFLICT": "تعذّر إتمام هذا الإجراء",
+      "INSUFFICIENT_STOCK": "المخزون غير كافٍ",
+      "UNKNOWN_ERROR": "حدث خطأ ما"
+    },
+    "hint": {
+      "FORBIDDEN": "صلاحيات حسابك لا تسمح بذلك. راجع مالك النشاط.",
+      "UNAUTHORIZED": "سجّل الدخول مرة أخرى للمتابعة.",
+      "SESSION_EXPIRED": "انتهت جلستك. سجّل الدخول مرة أخرى للمتابعة.",
+      "CONFLICT": "تغيّر شيء منذ فتح هذه الشاشة. راجع التفاصيل وحاول مجدداً."
+    }
+  },
+  "noAccess": {
+    "title": "لا تتوفر لحسابك أي وحدات في الإدارة الخلفية",
+    "body": "لا تشمل صلاحياتك حالياً أياً من أقسام الإدارة الخلفية المتاحة. راجع مالك النشاط إذا كنت بحاجة إلى صلاحية."
+  },
+  "dashboard": {
+    "title": "لوحة المعلومات",
+    "explainer": "كل رقم هنا يحسبه الخادم من دفتر الأستاذ وسجلات المبيعات.",
+    "from": "من",
+    "to": "إلى",
+    "rangeHint": "اترك الحقلين فارغين للفترة الافتراضية.",
+    "kpi": {
+      "sales": "المبيعات",
+      "netSales": "صافي المبيعات",
+      "discounts": "الخصومات",
+      "transactions": "عدد العمليات",
+      "averageInvoice": "متوسط الفاتورة",
+      "receivables": "الذمم المدينة",
+      "payables": "الذمم الدائنة",
+      "cashBalance": "رصيد النقدية",
+      "bankBalance": "رصيد البنك",
+      "totalCost": "تكلفة المشتريات",
+      "cogs": "تكلفة البضاعة المباعة",
+      "inventoryValue": "قيمة المخزون",
+      "grossProfit": "مجمل الربح",
+      "netProfit": "صافي الربح"
+    },
+    "topProducts": "الأكثر مبيعاً",
+    "slowestProducts": "الأبطأ حركة",
+    "product": "المنتج",
+    "sku": "الرمز",
+    "quantity": "الكمية",
+    "revenue": "الإيراد",
+    "profit": "الربح",
+    "limitationsTitle": "ما تشمله هذه الأرقام وما لا تشمله"
+  },
+  "claims": {
+    "title": "مطالبات الضمان",
+    "explainer": "المطالبات المسجَّلة على الصندوق يُبتّ فيها هنا بعد الفحص.",
+    "noneClaimed": "لا يوجد ضمان عليه مطالبة مفتوحة",
+    "noClaims": "لا توجد مطالبات على هذا الضمان",
+    "serial": "الرقم التسلسلي",
+    "sale": "عملية البيع",
+    "customer": "العميل",
+    "walkIn": "عميل نقدي",
+    "warrantyStatus": "الضمان",
+    "claimCount": "المطالبات",
+    "coverEnds": "نهاية التغطية",
+    "cover": "التغطية",
+    "days": "{{days}} يوماً",
+    "history": "سجل المطالبات",
+    "warranty": {
+      "ACTIVE": "ضمان ساري",
+      "EXPIRED": "منتهي",
+      "CLAIMED": "توجد مطالبة",
+      "VOID": "ملغى"
+    },
+    "status": {
+      "OPEN": "مفتوحة",
+      "RESOLVED": "تمت المعالجة",
+      "REJECTED": "مرفوضة"
+    },
+    "resolveAction": "البتّ في المطالبة",
+    "resolveTitle": "البتّ في هذه المطالبة",
+    "resolveWarning": "القرار نهائي: لا يمكن إعادة فتح المطالبة بعد معالجتها أو رفضها.",
+    "resolveSubmit": "تسجيل القرار",
+    "outcome": "النتيجة",
+    "resolutionNote": "ما تقرر ولماذا",
+    "resolvedAs": "المطالبة: {{status}}"
+  },
+  "shifts": {
+    "title": "الورديات",
+    "explainer": "يغلق الكاشير الوردية بشكل أعمى. المبلغ المتوقع والفرق يُراجعان هنا.",
+    "none": "لا توجد ورديات بعد",
+    "register": "الصندوق",
+    "openedAt": "فُتحت",
+    "closedAt": "أُغلقت",
+    "openingFloat": "العهدة الافتتاحية",
+    "cashIn": "النقد الداخل",
+    "cashOut": "النقد الخارج",
+    "expectedCash": "النقد المتوقع",
+    "countedCash": "النقد المعدود",
+    "variance": "الفرق",
+    "varianceKind": {
+      "OVERAGE": "زيادة",
+      "SHORTAGE": "عجز",
+      "BALANCED": "مطابق"
+    },
+    "state": "الحالة",
+    "stateLabel": {
+      "OPEN": "مفتوحة",
+      "AWAITING_RECONCILIATION": "بانتظار المراجعة",
+      "RECONCILED": "تمت المراجعة"
+    },
+    "reconcileAction": "اعتماد الوردية",
+    "reconcileTitle": "اعتماد هذه الوردية",
+    "reconcileWarning": "يسجّل هذا أنك قبلت الفرق. لا يغيّر المبلغ المعدود، والقيد المحاسبي سُجّل بالفعل عند إغلاق الوردية. تُعتمد الوردية مرة واحدة.",
+    "reconcileSubmit": "اعتماد",
+    "reconcileNote": "ملاحظة",
+    "reconciledTitle": "تم اعتماد الوردية",
+    "alreadyReconciled": "سبق اعتماد هذه الوردية."
+  }
+}
