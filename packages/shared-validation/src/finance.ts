@@ -1,3 +1,4 @@
+import { queryBooleanSchema } from './primitives';
 import { z } from 'zod';
 
 /**
@@ -36,7 +37,7 @@ export type UpdateCashRegisterInput = z.infer<typeof updateCashRegisterSchema>;
 
 export const listCashRegistersQuerySchema = z.object({
   branchId: z.string().uuid().optional(),
-  includeInactive: z.coerce.boolean().default(false),
+  includeInactive: queryBooleanSchema.default(false),
 });
 export type ListCashRegistersQuery = z.infer<typeof listCashRegistersQuerySchema>;
 

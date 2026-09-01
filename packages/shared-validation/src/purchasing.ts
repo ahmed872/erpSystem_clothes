@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { positiveQuantitySchema } from './catalog';
-import { nameSchema } from './primitives';
+import { nameSchema, queryBooleanSchema } from './primitives';
 
 const isoDate = z.string().datetime();
 const notesSchema = z.string().trim().max(1000);
@@ -22,7 +22,7 @@ export type UpdateSupplierInput = z.infer<typeof updateSupplierSchema>;
 
 export const supplierListQuerySchema = z.object({
   search: z.string().trim().max(200).optional(),
-  isActive: z.coerce.boolean().optional(),
+  isActive: queryBooleanSchema.optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { positiveQuantitySchema } from './catalog';
-import { nameSchema } from './primitives';
+import { nameSchema, queryBooleanSchema } from './primitives';
 
 const notesSchema = z.string().trim().max(1000);
 const nonNegativeMoneySchema = z.number().finite().nonnegative().max(999_999_999_999);
@@ -20,7 +20,7 @@ export type UpdateCustomerInput = z.infer<typeof updateCustomerSchema>;
 
 export const customerListQuerySchema = z.object({
   search: z.string().trim().max(200).optional(),
-  isActive: z.coerce.boolean().optional(),
+  isActive: queryBooleanSchema.optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });

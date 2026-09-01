@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { nameSchema } from './primitives';
+import { nameSchema, queryBooleanSchema } from './primitives';
 
 /** NUMERIC(18,4)-range money/quantity value. Never NaN/Infinity, never negative. */
 export const moneySchema = z.number().finite().nonnegative().max(999_999_999_999);
@@ -253,7 +253,7 @@ export type VariantLookupQuery = z.infer<typeof variantLookupQuerySchema>;
 
 export const catalogSyncQuerySchema = z.object({
   updatedSince: z.string().datetime().optional(),
-  includeInactive: z.coerce.boolean().optional().default(false),
+  includeInactive: queryBooleanSchema.optional().default(false),
 });
 export type CatalogSyncQuery = z.infer<typeof catalogSyncQuerySchema>;
 

@@ -563,3 +563,154 @@ export interface ReconciliationResult {
     difference: string;
   }[];
 }
+
+// ------------------------------------------------------ Purchasing -------
+/**
+ * Phase 16. Traced to the live `purchasing` module — its controllers, the
+ * zod schemas in `packages/shared-validation/src/purchasing.ts`, and the
+ * Prisma models.
+ *
+ * NOTE WHAT IS *NOT* OPTIONAL HERE, unlike Catalogue and Inventory. A
+ * purchase order's `unitCost`, `lineTotal`, `subtotal` and `totalAmount`
+ * ARE the document — they are what the business agreed to pay a supplier
+ * — and the live contract gates them with `purchases.view`, not with
+ * `products.view_cost`. There is no purchase-cost sub-permission in the
+ * permission matrix, and an audit of every purchasing response confirmed
+ * none of them carries the PROTECTED figures (`Product.defaultCost`,
+ * `ProductVariant.cost`, `StockBalance.averageCost`): variants are
+ * projected to `{id, sku}` throughout. So these fields are typed
+ * required, because they always arrive for anyone who may read the
+ * document at all.
+ */
+
+export type PurchaseStatus = 'DRAFT' | 'APPROVED' | 'PARTIALLY_RECEIVED' | 'RECEIVED' | 'CANCELLED';
+export type PurchasePaymentMethod = 'CASH' | 'BANK_TRANSFER' | 'CHEQUE' | 'CARD' | 'OTHER';
+
+export interface Supplier {
+  id: string;
+  name: string;
+  contactPerson: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  taxNumber: string | null;
+  paymentTermsDays: number | null;
+  isActive: boolean;
+  createdAt: string;
+  /** Server-computed outstanding payable. Never derived in the browser. */
+  balance?: string;
+}
+
+export interface SupplierListResult {
+  data: Supplier[];
+  pagination: Pagination;
+}
+
+export interface SupplierFilters {
+  search?: string;
+  isActive?: boolean;
+  page?: number;
+  limit?: number;
+}
+
+export interface PurchaseItem {
+  id: string;
+  purchaseId: string;
+  variantId: string;
+  quantityOrdered: string;
+  quantityReceived: string;
+  quantityReturned: string;
+  unitCost: string;
+  taxAmount: string;
+  discountAmount: string;
+  lineTotal: string;
+  variant?: { id: string; sku: string };
+}
+
+export interface PurchaseReceiptItem {
+  id: string;
+  purchaseItemId: string;
+  variantId: string;
+  quantityReceived: string;
+  unitCost: string;
+}
+
+export interface PurchaseReceipt {
+  id: string;
+  receiptNumber: string;
+  warehouseId: string;
+  idempotencyKey: string | null;
+  notes: string | null;
+  receivedBy: string | null;
+  receivedAt: string;
+  items: PurchaseReceiptItem[];
+}
+
+export interface PurchaseReturnItem {
+  id: string;
+  purchaseItemId: string;
+  variantId: string;
+  quantity: string;
+  unitCost: string;
+}
+
+export interface PurchaseReturn {
+  id: string;
+  returnNumber: string;
+  warehouseId: string;
+  reason: string | null;
+  createdAt: string;
+  items: PurchaseReturnItem[];
+}
+
+export interface PurchasePayment {
+  id: string;
+  amount: string;
+  method: PurchasePaymentMethod;
+  reference: string | null;
+  notes: string | null;
+  paidAt: string;
+}
+
+export interface PurchaseListRow {
+  id: string;
+  purchaseNumber: string;
+  status: PurchaseStatus;
+  supplierId: string;
+  warehouseId: string;
+  orderDate: string;
+  expectedDate: string | null;
+  subtotal: string;
+  taxAmount: string;
+  discountAmount: string;
+  totalAmount: string;
+  createdAt: string;
+  supplier?: { id: string; name: string };
+  warehouse?: { id: string; name: string };
+}
+
+export interface PurchaseDetail extends PurchaseListRow {
+  notes: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  cancelledBy: string | null;
+  cancelledAt: string | null;
+  cancelReason: string | null;
+  items: PurchaseItem[];
+  receipts: PurchaseReceipt[];
+  returns: PurchaseReturn[];
+  payments: PurchasePayment[];
+}
+
+export interface PurchaseListResult {
+  data: PurchaseListRow[];
+  pagination: Pagination;
+}
+
+export interface PurchaseFilters {
+  supplierId?: string;
+  warehouseId?: string;
+  status?: PurchaseStatus;
+  page?: number;
+  limit?: number;
+}

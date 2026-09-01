@@ -17,6 +17,10 @@ import { InventoryPage } from './pages/InventoryPage';
 import { TransfersPage } from './pages/TransfersPage';
 import { TransferDetailPage } from './pages/TransferDetailPage';
 import { StockCountPage } from './pages/StockCountPage';
+import { SuppliersPage } from './pages/SuppliersPage';
+import { PurchasesPage } from './pages/PurchasesPage';
+import { PurchaseCreatePage } from './pages/PurchaseCreatePage';
+import { PurchaseDetailPage } from './pages/PurchaseDetailPage';
 import { WarrantyClaimsPage } from './pages/WarrantyClaimsPage';
 import { ShiftsPage } from './pages/ShiftsPage';
 import { NoAccessPage } from './pages/NoAccessPage';
@@ -107,6 +111,22 @@ function GuardedRoutes() {
         <Route path="/inventory/transfers" element={<TransfersPage />} />
         <Route path="/inventory/transfers/:transferId" element={<TransferDetailPage />} />
         <Route path="/inventory/counts/:countId" element={<StockCountPage />} />
+      </Route>
+      {/* Phase 16. Reading a purchase is `purchases.view`; raising one is
+          its own grant, so `/purchases/new` is gated separately and
+          declared BEFORE `/purchases/:purchaseId` so the static segment
+          is never read as an id. Every lifecycle action beyond reading
+          carries its own grant, checked on the control and again by the
+          backend. */}
+      <Route element={<RequirePermission codes={['purchases.view']} fallback={fallback} />}>
+        <Route path="/purchases" element={<PurchasesPage />} />
+        <Route element={<RequirePermission codes={['purchases.create']} fallback="/purchases" />}>
+          <Route path="/purchases/new" element={<PurchaseCreatePage />} />
+        </Route>
+        <Route path="/purchases/:purchaseId" element={<PurchaseDetailPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['suppliers.view']} fallback={fallback} />}>
+        <Route path="/suppliers" element={<SuppliersPage />} />
       </Route>
       <Route element={<RequirePermission codes={['pricelists.view']} fallback={fallback} />}>
         <Route path="/price-lists" element={<PriceListsPage />} />

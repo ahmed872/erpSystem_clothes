@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { nameSchema } from './primitives';
+import { nameSchema, queryBooleanSchema } from './primitives';
 
 const accountCodeSchema = z.string().trim().min(1).max(20);
 
@@ -18,7 +18,7 @@ export const updateAccountSchema = z.object({
 export type UpdateAccountInput = z.infer<typeof updateAccountSchema>;
 
 export const accountListQuerySchema = z.object({
-  isActive: z.coerce.boolean().optional(),
+  isActive: queryBooleanSchema.optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(100),
 });

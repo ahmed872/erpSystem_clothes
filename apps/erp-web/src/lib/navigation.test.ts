@@ -62,6 +62,8 @@ describe('visibleNav', () => {
       '/price-lists',
       '/inventory',
       '/inventory/transfers',
+      '/purchases',
+      '/suppliers',
       '/setup',
       '/warranty-claims',
       '/shifts',
@@ -87,6 +89,9 @@ describe('visibleNav', () => {
       '/shifts',
     ]);
     expect(CASHIER).not.toContain('inventory.adjust');
+    // A till has no purchasing surface whatever.
+    expect(CASHIER).not.toContain('purchases.view');
+    expect(CASHIER).not.toContain('suppliers.view');
     expect(CASHIER).not.toContain('inventory.transfer_create');
     expect(CASHIER).not.toContain('warehouses.view');
     expect(CASHIER).not.toContain('shifts.reconcile');
@@ -101,6 +106,8 @@ describe('visibleNav', () => {
       '/price-lists',
       '/inventory',
       '/inventory/transfers',
+      '/purchases',
+      '/suppliers',
       '/setup',
       '/warranty-claims',
       '/shifts',
@@ -125,6 +132,8 @@ describe('visibleNav', () => {
       '/price-lists',
       '/inventory',
       '/inventory/transfers',
+      '/purchases',
+      '/suppliers',
       '/setup',
       '/warranty-claims',
       '/shifts',
@@ -140,6 +149,8 @@ describe('visibleNav', () => {
       '/price-lists',
       '/inventory',
       '/inventory/transfers',
+      '/purchases',
+      '/suppliers',
       '/setup',
     ]);
     expect(INVENTORY).toContain('products.create');
@@ -147,6 +158,28 @@ describe('visibleNav', () => {
     // ...but NOT the shelf price, and NOT the ability to reprice the shop.
     expect(INVENTORY).not.toContain('products.change_price');
     expect(INVENTORY).not.toContain('pricelists.manage_prices');
+    // Phase 16's separation of duties: they raise and receive orders but
+    // neither commit the business to one nor settle it.
+    expect(INVENTORY).toContain('purchases.create');
+    expect(INVENTORY).toContain('purchases.receive');
+    expect(INVENTORY).not.toContain('purchases.approve');
+    expect(INVENTORY).not.toContain('purchases.pay');
+  });
+
+  it('splits purchasing across three roles — nobody can run an order alone', () => {
+    // The matrix, asserted as data: raising, approving and paying are
+    // held by three different roles, which is why the detail screen
+    // renders one control per grant rather than one "process" button.
+    expect(INVENTORY).toContain('purchases.create');
+    expect(BRANCH_MANAGER).toContain('purchases.approve');
+    expect(ACCOUNTANT).toContain('purchases.pay');
+
+    expect(BRANCH_MANAGER).not.toContain('purchases.create');
+    expect(BRANCH_MANAGER).not.toContain('purchases.receive');
+    expect(BRANCH_MANAGER).not.toContain('purchases.pay');
+    expect(ACCOUNTANT).not.toContain('purchases.create');
+    expect(ACCOUNTANT).not.toContain('purchases.approve');
+    expect(ACCOUNTANT).not.toContain('purchases.receive');
   });
 
   it('requires ALL codes on an entry, not any of them', () => {
@@ -171,6 +204,8 @@ describe('visibleNav', () => {
   it('hides the setup entry when NONE of the five is held', () => {
     expect(visibleNav(['products.view']).map((i) => i.to)).toEqual(['/catalogue']);
     expect(visibleNav(['inventory.view']).map((i) => i.to)).toEqual(['/inventory', '/inventory/transfers']);
+    expect(visibleNav(['purchases.view']).map((i) => i.to)).toEqual(['/purchases']);
+    expect(visibleNav(['suppliers.view']).map((i) => i.to)).toEqual(['/suppliers']);
   });
 
   it('applies requires AND requiresAny together, not either alone', () => {
