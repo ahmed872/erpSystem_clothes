@@ -341,4 +341,263 @@ describe('Receipts and the business profile (e2e, real Postgres)', () => {
       await receipt('00000000-0000-0000-0000-000000000000').expect(404);
     });
   });
+  // ==================================================================
+  // Phase 12 (approved decision D2) — WHY THIS LINE WAS CHEAPER.
+  //
+  // The receipt showed one unexplained lump discount and no way to tell
+  // what had earned it: `discountAmount` mixes manual, promotional and
+  // loyalty reductions, so it could never explain itself. `promotions` names
+  // the promotional part from the snapshot the sale wrote.
+  //
+  // The additive guarantee runs through every case below: no existing field
+  // changes, `discountAmount` keeps its meaning, and nothing on this
+  // document names a cost.
+  // ==================================================================
+  describe('D2: promotion provenance on the customer-facing receipt', () => {
+    let d2seq = 0;
+
+    async function stockedProduct(price: number) {
+      const { productId, variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, `D2-${d2seq++}`, {
+        defaultCost: 40,
+        defaultSellingPrice: price,
+      });
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/opening-stock')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 40 })
+        .expect(201);
+      return { productId, variantId };
+    }
+
+    async function promoteProduct(productId: string, percentageValue: number, name: string) {
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/promotions')
+        .set('Authorization', auth())
+        .send({
+          name,
+          type: 'PERCENTAGE',
+          percentageValue,
+          targetType: 'PRODUCT',
+          targetId: productId,
+          validFrom: '2020-01-01',
+          validTo: '2099-12-31',
+        })
+        .expect(201);
+      return res.body.data.id as string;
+    }
+
+    const receiptOf = (saleId: string, token = auth()) =>
+      request(app.getHttpServer()).get(`/api/v1/sales/${saleId}/receipt`).set('Authorization', token);
+
+    it('1. NAMES THE PROMOTION that made a line cheaper, with the figure the server applied', async () => {
+      const { productId, variantId } = await stockedProduct(100);
+      await promoteProduct(productId, 25, `Quarter off ${d2seq++}`);
+
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 2, unitPrice: 100 }],
+          payments: [{ amount: 150, method: 'CASH' }],
+        })
+        .expect(201);
+
+      const receipt = await receiptOf(sale.body.data.id).expect(200);
+      const line = receipt.body.data.items[0];
+
+      expect(line.promotions).toHaveLength(1);
+      expect(line.promotions[0]).toMatchObject({ type: 'PERCENTAGE', discountApplied: '50' });
+      expect(line.promotions[0].name).toMatch(/^Quarter off/);
+
+      // The figure named agrees with what the SERVER recorded against this
+      // line - read from the same snapshot table, not recomputed.
+      const applications = await admin.salePromotionApplication.findMany({ where: { saleItemId: line.id } });
+      expect(applications).toHaveLength(1);
+      expect(line.promotions[0].discountApplied).toBe(applications[0].discountApplied.toString());
+      expect(line.promotions[0].name).toBe(applications[0].promotionName);
+    });
+
+    it('2. A LINE NO PROMOTION REACHED carries an empty array, not a missing field', async () => {
+      const { variantId } = await stockedProduct(100);
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 100, method: 'CASH' }],
+        })
+        .expect(201);
+
+      const receipt = await receiptOf(sale.body.data.id).expect(200);
+      // The `serials` convention on this same object, followed rather than
+      // a new omission rule invented.
+      expect(receipt.body.data.items[0]).toHaveProperty('promotions');
+      expect(receipt.body.data.items[0].promotions).toEqual([]);
+      expect(receipt.body.data.items[0].discountAmount).toBe('0');
+    });
+
+    it('3. MULTIPLE LINES each carry their OWN promotion, and an unpromoted line stays empty', async () => {
+      const promoted = await stockedProduct(100);
+      const alsoPromoted = await stockedProduct(200);
+      const plain = await stockedProduct(50);
+      await promoteProduct(promoted.productId, 10, `Ten off ${d2seq++}`);
+      await promoteProduct(alsoPromoted.productId, 50, `Half off ${d2seq++}`);
+
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [
+            { variantId: promoted.variantId, quantity: 1, unitPrice: 100 },
+            { variantId: alsoPromoted.variantId, quantity: 1, unitPrice: 200 },
+            { variantId: plain.variantId, quantity: 1, unitPrice: 50 },
+          ],
+          // 90 + 100 + 50
+          payments: [{ amount: 240, method: 'CASH' }],
+        })
+        .expect(201);
+
+      const receipt = await receiptOf(sale.body.data.id).expect(200);
+      const byVariantDiscount = new Map<string, string[]>();
+      for (const item of receipt.body.data.items) {
+        byVariantDiscount.set(item.sku, item.promotions.map((p: { discountApplied: string }) => p.discountApplied));
+      }
+      // One promotion per promoted line - BD-10/BD-11 select the BEST
+      // applicable promotion only, so this is one each and never a pile.
+      const discounts = [...byVariantDiscount.values()].map((v) => v.join(',')).sort();
+      expect(discounts).toEqual(['', '10', '100']);
+    });
+
+    it('4. A HISTORICAL RECEIPT KEEPS THE PROMOTION IT WAS SOLD UNDER, after the promotion is renamed', async () => {
+      const { productId, variantId } = await stockedProduct(100);
+      const promotionId = await promoteProduct(productId, 20, `Original name ${d2seq++}`);
+
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 80, method: 'CASH' }],
+        })
+        .expect(201);
+
+      const before = await receiptOf(sale.body.data.id).expect(200);
+      const nameAtSale = before.body.data.items[0].promotions[0].name;
+
+      // The shop renames the promotion, and then retires it entirely.
+      await request(app.getHttpServer())
+        .patch(`/api/v1/promotions/${promotionId}`)
+        .set('Authorization', auth())
+        .send({ name: `Renamed later ${d2seq++}`, isActive: false })
+        .expect(200);
+
+      const after = await receiptOf(sale.body.data.id).expect(200);
+      // THE POINT: the reprint says what it said on the day. The live
+      // promotion's current name is exactly what must not appear.
+      expect(after.body.data.items[0].promotions[0].name).toBe(nameAtSale);
+      expect(after.body.data.items[0].promotions[0].name).not.toMatch(/Renamed later/);
+      expect(after.body.data.items[0].promotions[0].discountApplied).toBe('20');
+      expect(after.body.data.items[0].lineTotal).toBe(before.body.data.items[0].lineTotal);
+    });
+
+    it('5. EXPOSES NO COST, MARGIN OR RULE INTERNALS, promoted line or not', async () => {
+      const { productId, variantId } = await stockedProduct(100);
+      await promoteProduct(productId, 30, `Cost check ${d2seq++}`);
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 70, method: 'CASH' }],
+        })
+        .expect(201);
+
+      const receipt = await receiptOf(sale.body.data.id).expect(200);
+      const body = JSON.stringify(receipt.body);
+      expect(body).not.toMatch(/"cost"|unitCost|averageCost|cogs|margin|profit/i);
+      // `ruleSnapshot` carries the PRE-CAP computed figure and the rule's
+      // own configuration - neither belongs on a customer's document.
+      expect(body).not.toMatch(/ruleSnapshot|percentageValue|targetType|promotionId/i);
+      // The owner holds `products.view_cost` and still gets no cost here:
+      // a receipt is a document handed to a customer.
+      expect(receipt.body.data.items[0].promotions[0]).toEqual({
+        name: expect.any(String),
+        type: 'PERCENTAGE',
+        discountApplied: '30',
+      });
+    });
+
+    it('6. TENANT ISOLATION: another business cannot read this receipt at all', async () => {
+      const { productId, variantId } = await stockedProduct(100);
+      await promoteProduct(productId, 10, `Isolation ${d2seq++}`);
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items: [{ variantId, quantity: 1, unitPrice: 100 }],
+          payments: [{ amount: 90, method: 'CASH' }],
+        })
+        .expect(201);
+
+      const other = await setupSalesFixture(app, `receipt-d2x${d2seq++}`);
+      await receiptOf(sale.body.data.id, `Bearer ${other.accessToken}`).expect(404);
+    });
+
+    it('7/9. EVERY PRE-EXISTING RECEIPT FIELD SURVIVES UNCHANGED, and discountAmount keeps its meaning', async () => {
+      const { productId, variantId } = await stockedProduct(100);
+      await promoteProduct(productId, 20, `Compatibility ${d2seq++}`);
+
+      // A MANUAL discount as well, so the line's discountAmount is provably
+      // NOT just the promotion. The tender comes from the SERVER's own
+      // quote rather than arithmetic invented here - reimplementing the
+      // BD-11 cap in a test would be the very duplication this milestone
+      // exists to avoid.
+      const items = [{ variantId, quantity: 1, unitPrice: 100, discountAmount: 5 }];
+      const quote = await request(app.getHttpServer())
+        .post('/api/v1/sales/quote')
+        .set('Authorization', auth())
+        .send({ warehouseId: biz.warehouseId, items })
+        .expect(200);
+
+      const sale = await request(app.getHttpServer())
+        .post('/api/v1/sales')
+        .set('Authorization', auth())
+        .send({
+          warehouseId: biz.warehouseId,
+          items,
+          payments: [{ amount: Number(quote.body.data.totals.amountDue), method: 'CASH' }],
+        })
+        .expect(201);
+
+      const receipt = await receiptOf(sale.body.data.id).expect(200);
+      const line = receipt.body.data.items[0];
+
+      // The whole shape a consumer already relies on.
+      for (const field of [
+        'id', 'sku', 'name', 'alternativeName', 'quantity', 'unitPrice', 'discountAmount',
+        'taxAmount', 'taxRatePercent', 'taxExempt', 'lineTotal', 'quantityReturned', 'serials', 'serialUnits',
+      ]) {
+        expect(line).toHaveProperty(field);
+      }
+      for (const field of ['business', 'branch', 'register', 'cashier', 'sale', 'customer', 'items', 'taxBreakdown', 'payments', 'loyalty', 'returns']) {
+        expect(receipt.body.data).toHaveProperty(field);
+      }
+
+      // discountAmount is STILL the line's TOTAL discount - the manual
+      // reduction AND the promotional one. The promotion entry names only
+      // its own contribution, and the two must never be read as the same
+      // number. Asserted as a RELATIONSHIP against the server's own
+      // figures, so this stays true whatever the cap arithmetic is.
+      const application = await admin.salePromotionApplication.findFirstOrThrow({ where: { saleItemId: line.id } });
+      expect(line.promotions[0].discountApplied).toBe(application.discountApplied.toString());
+      expect(Number(line.promotions[0].discountApplied)).toBeGreaterThan(0);
+      expect(Number(line.promotions[0].discountApplied)).toBeLessThan(Number(line.discountAmount));
+    });
+  });
 });

@@ -5,7 +5,9 @@ Phase 12 — POS Web (**POS loose ends complete.** ERP Web NOT started, offline 
 
 ### POS loose ends (Phase 12 milestone)
 
-Two blockers, five UX gaps and four of the five approved product decisions. **D2 (promotion provenance on the receipt) was NOT implemented** — it genuinely requires a change to the frozen Phase 10I receipt contract, which the brief said to report before making; the exact requirement is recorded below.
+Two blockers, five UX gaps and all five approved product decisions.
+
+**D2 — why this line was cheaper.** The receipt showed one unexplained lump discount: `items[].discountAmount` mixes manual, promotional and loyalty reductions and could never explain itself. `GET /sales/:id/receipt` now also returns `items[].promotions: [{ name, type, discountApplied }]`, read from the snapshotted `SalePromotionApplication` the sale wrote — so a renamed or retired promotion cannot rewrite a historical receipt. Purely additive: no existing field removed, renamed or changed in meaning, and an unpromoted line carries `[]` following the `serials` convention already on that object. `ruleSnapshot` is deliberately not projected — it holds the pre-cap figure and the rule's configuration, neither of which belongs on a customer's document.
 
 **D3 — the selling price is the shop's, not the till's.** `POST /sales` and `/sales/quote` took `unitPrice` from the request and price lists were consulted by nothing. `resolveSalePricing` — the one pricing pipeline both callers run — now resolves the active default price list's configured price first, so quote and sale cannot disagree. `products.change_price` remains the approved override. A variant with no configured price is unaffected, which is every pre-existing sale (800/800 e2e unchanged).
 

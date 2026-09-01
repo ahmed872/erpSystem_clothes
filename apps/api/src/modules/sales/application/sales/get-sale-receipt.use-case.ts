@@ -44,6 +44,25 @@ export class GetSaleReceiptUseCase {
             include: {
               variant: { select: { id: true, sku: true, product: { select: { name: true, alternativeName: true } } } },
               SaleItemSerial: { include: { serialNumber: { select: { serial: true } } } },
+              /**
+               * Phase 12 (approved decision D2) — WHY THIS LINE WAS
+               * CHEAPER.
+               *
+               * Read from `SalePromotionApplication`, which the sale wrote
+               * at the time: `promotionName` is the name AS IT WAS, and
+               * `discountApplied` is the EFFECTIVE contribution after the
+               * BD-11 cap. Renaming or ending a promotion later therefore
+               * cannot rewrite what a historical receipt says - the same
+               * reason every other figure on this document is a snapshot.
+               *
+               * The `promotion` relation is deliberately NOT joined: the
+               * live promotion's current name and rules are exactly what a
+               * reprint must not show.
+               */
+              promotionApplications: {
+                select: { promotionName: true, promotionType: true, discountApplied: true },
+                orderBy: { createdAt: 'asc' },
+              },
             },
           },
           payments: { orderBy: { receivedAt: 'asc' } },
@@ -174,6 +193,31 @@ export class GetSaleReceiptUseCase {
            * needed an identity to pick a unit off a receipt.
            */
           serialUnits: i.SaleItemSerial.map((x) => ({ id: x.serialNumberId, serial: x.serialNumber.serial })),
+          /**
+           * Phase 12 (D2). PURELY ADDITIVE, and `discountAmount` above is
+           * untouched and unchanged in meaning: it remains the line's TOTAL
+           * discount - manual, promotional and loyalty together - which is
+           * precisely why it could never explain itself. These name the
+           * promotional part of it.
+           *
+           * An empty array for a line no promotion reached, following the
+           * `serials` convention on this same object rather than inventing
+           * an omission rule. The sum of `discountApplied` is NOT asserted
+           * to equal `discountAmount` and must not be read that way: a
+           * manual discount and a loyalty redemption also live in that
+           * figure, and the server remains the only thing that adds any of
+           * it up.
+           *
+           * No cost, no margin, no rule internals: `ruleSnapshot` is
+           * deliberately not projected - it carries the pre-cap computed
+           * figure and the rule's own configuration, neither of which
+           * belongs on a document handed to a customer.
+           */
+          promotions: i.promotionApplications.map((p) => ({
+            name: p.promotionName,
+            type: p.promotionType,
+            discountApplied: p.discountApplied.toString(),
+          })),
         })),
         taxBreakdown: [...taxByRate.values()]
           .sort((a, b) => Number(a.ratePercent) - Number(b.ratePercent))

@@ -29,6 +29,7 @@ function receiptItem(over: Partial<SaleReceipt['items'][number]> = {}): SaleRece
     quantityReturned: '0',
     serials: ['SN-1'],
     serialUnits: [{ id: 'sn-id-1', serial: 'SN-1' }],
+    promotions: [],
     ...over,
   };
 }

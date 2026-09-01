@@ -69,6 +69,18 @@ export function ReceiptPage() {
                     {item.serials.length > 0 && (
                       <div className="numeric text-[10px] text-neutral-400">SN: {item.serials.join(', ')}</div>
                     )}
+                    {/* Phase 12 (D2) — WHY THIS LINE WAS CHEAPER.
+                        A customer previously saw one unexplained lump
+                        discount at the foot of the receipt and no way to
+                        tell what had earned it. Each promotion the SERVER
+                        applied is named here with the figure the SERVER
+                        recorded; nothing is summed, derived or recomputed
+                        in the browser, and `discountAmount` is untouched. */}
+                    {item.promotions.map((promo, index) => (
+                      <div key={index} className="text-[10px] text-success-700" data-testid="receipt-promotion">
+                        {promo.name} · −{formatMoney(promo.discountApplied)}
+                      </div>
+                    ))}
                   </td>
                   <td className="numeric py-1 text-end font-semibold">{formatMoney(item.lineTotal)}</td>
                 </tr>

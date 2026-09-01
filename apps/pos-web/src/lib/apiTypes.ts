@@ -446,6 +446,19 @@ export interface SaleReceipt {
      * `get-sale-receipt.use-case.ts` for why the identity lives here and
      * not behind a variant-wide serial lookup. */
     serialUnits: Array<{ id: string; serial: string }>;
+    /**
+     * Phase 12 (approved decision D2) — the promotional part of
+     * `discountAmount`, named.
+     *
+     * Snapshotted at the time of sale: `name` is the promotion's name AS
+     * IT WAS, and `discountApplied` its effective contribution after the
+     * server's cap. Empty for a line no promotion reached.
+     *
+     * These do NOT sum to `discountAmount` — a manual discount and a
+     * loyalty redemption live in that figure too — and nothing in this app
+     * may add them up. They are displayed, and only displayed.
+     */
+    promotions: Array<{ name: string; type: 'PERCENTAGE' | 'FIXED_AMOUNT' | 'BUY_X_GET_Y'; discountApplied: string }>;
   }>;
   taxBreakdown: Array<{ ratePercent: string; taxableAmount: string; taxAmount: string }>;
   payments: Array<{ method: SalePaymentMethod | 'EXCHANGE_CREDIT'; amount: string; reference: string | null; receivedAt: string }>;
