@@ -67,6 +67,11 @@ describe('visibleNav', () => {
       '/purchases',
       '/suppliers',
       '/setup',
+      '/reports/sales',
+      '/reports/purchasing',
+      '/reports/inventory',
+      '/reports/financial',
+      '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
     ]);
@@ -131,6 +136,10 @@ describe('visibleNav', () => {
       '/purchases',
       '/suppliers',
       '/setup',
+      '/reports/sales',
+      '/reports/purchasing',
+      '/reports/inventory',
+      '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
     ]);
@@ -138,6 +147,13 @@ describe('visibleNav', () => {
     // server deletes the cost and profit keys from their response.
     expect(BRANCH_MANAGER).not.toContain('products.view_cost');
     expect(BRANCH_MANAGER).not.toContain('reports.view_profit');
+    // Phase 19. They read the sales and inventory reports and are refused
+    // the financial ones outright, which is why `/reports/financial` is
+    // absent above while `/reports/reconciliation` is present: that entry
+    // is reachable on EITHER report grant and each tab re-checks its own.
+    expect(BRANCH_MANAGER).not.toContain('reports.financial.view');
+    expect(BRANCH_MANAGER).toContain('reports.sales.view');
+    expect(BRANCH_MANAGER).toContain('reports.inventory.view');
   });
 
   it('gives an accountant all three: `warranty.claim` gates the CONTROL, not the screen', () => {
@@ -159,6 +175,11 @@ describe('visibleNav', () => {
       '/purchases',
       '/suppliers',
       '/setup',
+      '/reports/sales',
+      '/reports/purchasing',
+      '/reports/inventory',
+      '/reports/financial',
+      '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
     ]);
@@ -194,6 +215,13 @@ describe('visibleNav', () => {
     // Phase 18, the same line drawn again: they hold no customer surface
     // either, which is why no `/customers` entry appears above.
     expect(INVENTORY).not.toContain('customers.view');
+    // Phase 19. They hold `products.view_cost` but NO report grant at
+    // all, which is the distinction that matters: cost visibility is not
+    // reporting access, and no `/reports/*` entry appears for them.
+    expect(INVENTORY).toContain('products.view_cost');
+    expect(INVENTORY).not.toContain('reports.inventory.view');
+    expect(INVENTORY).not.toContain('reports.sales.view');
+    expect(INVENTORY).not.toContain('reports.financial.view');
   });
 
   it('splits purchasing across three roles — nobody can run an order alone', () => {
@@ -236,6 +264,11 @@ describe('visibleNav', () => {
     expect(visibleNav(['inventory.view']).map((i) => i.to)).toEqual(['/inventory', '/inventory/transfers']);
     expect(visibleNav(['sales.view']).map((i) => i.to)).toEqual(['/sales']);
     expect(visibleNav(['customers.view']).map((i) => i.to)).toEqual(['/customers']);
+    // Phase 19. Each report grant reaches exactly its own screens, and
+    // the reconciliation entry appears on either of the two.
+    expect(visibleNav(['reports.sales.view']).map((i) => i.to)).toEqual(['/reports/sales', '/reports/purchasing']);
+    expect(visibleNav(['reports.inventory.view']).map((i) => i.to)).toEqual(['/reports/inventory', '/reports/reconciliation']);
+    expect(visibleNav(['reports.financial.view']).map((i) => i.to)).toEqual(['/reports/financial', '/reports/reconciliation']);
     expect(visibleNav(['purchases.view']).map((i) => i.to)).toEqual(['/purchases']);
     expect(visibleNav(['suppliers.view']).map((i) => i.to)).toEqual(['/suppliers']);
   });

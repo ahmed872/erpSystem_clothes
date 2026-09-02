@@ -26,6 +26,11 @@ import { SaleReceiptPage } from './pages/SaleReceiptPage';
 import { PurchasesPage } from './pages/PurchasesPage';
 import { PurchaseCreatePage } from './pages/PurchaseCreatePage';
 import { PurchaseDetailPage } from './pages/PurchaseDetailPage';
+import { SalesReportsPage } from './pages/SalesReportsPage';
+import { PurchasingReportPage } from './pages/PurchasingReportPage';
+import { InventoryReportsPage } from './pages/InventoryReportsPage';
+import { FinancialReportsPage } from './pages/FinancialReportsPage';
+import { ReconciliationPage } from './pages/ReconciliationPage';
 import { WarrantyClaimsPage } from './pages/WarrantyClaimsPage';
 import { ShiftsPage } from './pages/ShiftsPage';
 import { NoAccessPage } from './pages/NoAccessPage';
@@ -169,6 +174,27 @@ function GuardedRoutes() {
         }
       >
         <Route path="/setup" element={<SetupPage />} />
+      </Route>
+      {/* Phase 19. Each report screen is guarded on the SAME grant its
+          endpoints demand, and the backend guards every call again.
+          Purchasing's summary lives under `reports.sales.view` in the
+          live contract — not under `purchases.view` — so its route asks
+          for that. Reconciliation fronts two different grants and admits
+          a caller holding EITHER, with each tab re-checking its own. */}
+      <Route element={<RequirePermission codes={['reports.sales.view']} fallback={fallback} />}>
+        <Route path="/reports/sales" element={<SalesReportsPage />} />
+        <Route path="/reports/purchasing" element={<PurchasingReportPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['reports.inventory.view']} fallback={fallback} />}>
+        <Route path="/reports/inventory" element={<InventoryReportsPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['reports.financial.view']} fallback={fallback} />}>
+        <Route path="/reports/financial" element={<FinancialReportsPage />} />
+      </Route>
+      <Route
+        element={<RequireAnyPermission codes={['reports.inventory.view', 'reports.financial.view']} fallback={fallback} />}
+      >
+        <Route path="/reports/reconciliation" element={<ReconciliationPage />} />
       </Route>
       <Route element={<RequirePermission codes={['warranty.view']} fallback={fallback} />}>
         <Route path="/warranty-claims" element={<WarrantyClaimsPage />} />

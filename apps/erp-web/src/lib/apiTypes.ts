@@ -1013,3 +1013,298 @@ export interface AdjustPointsInput {
   reason: string;
   idempotencyKey: string;
 }
+
+// ====================================================================
+// Phase 19 — REPORTING & ANALYTICS.
+//
+// Every shape below is the LIVE one, read off the running backend. Three
+// facts about this family shape all of it:
+//
+//   1. COST AND PROFIT KEYS ARE OPTIONAL EVERYWHERE THEY APPEAR. The
+//      server DELETES them for a caller lacking `products.view_cost` /
+//      `reports.view_profit` rather than nulling them, so every such
+//      field is `?:` and every screen asks whether the response CARRIED
+//      it — never whether a grant is held.
+//   2. THE FINANCIAL FAMILY IS THE DOCUMENTED EXCEPTION. Owner Decision
+//      (Phase 19): `reports.financial.view` IMPLIES visibility of the
+//      financial reports' own contents, so P&L, Balance Sheet, the
+//      General Ledger and the inventory-GL reconciliation carry their
+//      figures unconditionally for any holder of that grant. Those
+//      fields are therefore REQUIRED, not optional.
+//   3. `limitations` IS PART OF THE CONTRACT. The server states in prose
+//      what each figure does NOT include; the screens print it verbatim.
+// ====================================================================
+
+export interface ReportRange {
+  from: string;
+  /** EXCLUSIVE. The server resolves an inclusive calendar `to` into the
+   *  instant starting the next day, in the BUSINESS's own timezone. */
+  to: string;
+  timezone: string;
+}
+
+/** The window control's own state. `from`/`to` are `YYYY-MM-DD` calendar
+ *  dates as the caller types them; the server owns their interpretation. */
+export interface ReportRangeParams {
+  from?: string;
+  to?: string;
+  branchId?: string;
+}
+
+// ------------------------------------------------------------- Sales -----
+
+export interface SalesSummary {
+  subtotal: string;
+  discountAmount: string;
+  netSales: string;
+  taxAmount: string;
+  totalAmount: string;
+  transactionCount: number;
+  averageInvoice: string;
+  returnedQuantity: string;
+  /** `products.view_cost`. */
+  cogs?: string;
+  /** `reports.view_profit`. */
+  grossProfit?: string;
+}
+
+export interface SalesSummaryResult {
+  data: SalesSummary;
+  range: ReportRange;
+}
+
+/** One row of any of the five by-dimension reports — the same shape for
+ *  all of them, which is why one screen renders all five. */
+export interface DimensionRow {
+  key: string;
+  label: string;
+  quantity: string;
+  netSales: string;
+  transactionCount: number;
+  /** `products.view_cost`. */
+  cogs?: string;
+  /** `reports.view_profit`. */
+  grossProfit?: string;
+}
+
+export interface DimensionResult {
+  data: DimensionRow[];
+  pagination: Pagination;
+  range: ReportRange;
+}
+
+export interface SalesReturnReportRow {
+  id: string;
+  returnNumber: string;
+  saleId: string;
+  saleNumber: string;
+  isWalkIn: boolean;
+  returnValue: string;
+  createdAt: string;
+  items: { variantId: string; sku: string; productName: string; quantity: string; unitPrice: string; condition: string }[];
+}
+
+export interface SalesReturnsResult {
+  data: SalesReturnReportRow[];
+  summary: {
+    sellableValue: string;
+    damagedValue: string;
+    customerReturnValue: string;
+    walkInReturnValue: string;
+    glRevenueReversalNote: string;
+  };
+  pagination: Pagination;
+  range: ReportRange;
+}
+
+export interface PurchasingSummary {
+  receiptCount: number;
+  receivedQuantity: string;
+  returnCount: number;
+  returnedQuantity: string;
+  paidToSuppliers: string;
+  /** All three `products.view_cost`. */
+  totalCost?: string;
+  returnedCost?: string;
+  netPurchaseCost?: string;
+}
+
+export interface PurchasingSummaryResult {
+  data: PurchasingSummary;
+  range: ReportRange;
+}
+
+// --------------------------------------------------------- Inventory -----
+
+export interface ValuationRow {
+  variantId: string;
+  sku: string;
+  productName: string;
+  warehouseId: string;
+  warehouseName: string;
+  quantityOnHand: string;
+  averageCost?: string;
+  inventoryValue?: string;
+}
+
+export interface ValuationResult {
+  data: ValuationRow[];
+  summary: { variantCount: number; inventoryValue?: string };
+  pagination: Pagination;
+}
+
+export interface MovementReportRow {
+  id: string;
+  createdAt: string;
+  movementType: string;
+  variantId: string;
+  sku: string;
+  productName: string;
+  warehouseName: string;
+  quantityBase: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  reason: string | null;
+  isNegativeStock: boolean;
+  unitCostAtMovement?: string;
+  movementValue?: string;
+}
+
+export interface MovementReportResult {
+  data: MovementReportRow[];
+  pagination: Pagination;
+  range: ReportRange;
+}
+
+export interface DamageLossRow {
+  id: string;
+  createdAt: string;
+  movementType: string;
+  sku: string;
+  productName: string;
+  quantity: string;
+  reason: string | null;
+  unitCostAtMovement?: string;
+  movementValue?: string;
+}
+
+export interface DamageLossResult {
+  data: DamageLossRow[];
+  summary: { movementType: string; quantity: string; movementCount: number; movementValue?: string }[];
+  pagination: Pagination;
+  range: ReportRange;
+}
+
+export interface SlowMovingRow {
+  variantId: string;
+  sku: string;
+  productName: string;
+  warehouseId: string;
+  warehouseName: string;
+  quantityOnHand: string;
+  lastSaleAt: string | null;
+  daysWithoutSale: number;
+  averageCost?: string;
+  inventoryValue?: string;
+}
+
+export interface SlowMovingResult {
+  data: SlowMovingRow[];
+  pagination: Pagination;
+  criteria: { days: number; definition: string };
+}
+
+// --------------------------------------------------------- Financial -----
+
+export interface GeneralLedgerRow {
+  journalEntryId: string;
+  entryNumber: string;
+  entryDate: string;
+  sourceType: string;
+  sourceId: string | null;
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  accountType: string;
+  debit: string;
+  credit: string;
+  description: string | null;
+}
+
+export interface GeneralLedgerResult {
+  data: GeneralLedgerRow[];
+  pagination: Pagination;
+  range: ReportRange;
+}
+
+/** Owner Decision (Phase 19): required, not optional — `reports.financial.view`
+ *  carries the whole statement, profit lines included. */
+export interface ProfitAndLossResult {
+  data: {
+    netRevenue: string;
+    costOfGoodsSold: string;
+    grossProfit: string;
+    inventoryRelatedOperatingExpenses: { inventoryShrinkage: string; internalConsumption: string; total: string };
+    otherIncome: string;
+    netProfit: string;
+  };
+  limitations: Record<string, string>;
+  range: ReportRange;
+}
+
+export interface BalanceSheetAccount {
+  accountId: string;
+  code: string;
+  name: string;
+  balance: string;
+}
+
+export interface BalanceSheetResult {
+  data: {
+    asAt: string;
+    assets: { accounts: BalanceSheetAccount[]; total: string };
+    liabilities: { accounts: BalanceSheetAccount[]; total: string };
+    equity: { accounts: BalanceSheetAccount[]; currentPeriodEarnings: string; total: string };
+    totalLiabilitiesAndEquity: string;
+    /** The server's own equation check — never recomputed here. */
+    balanced: boolean;
+  };
+  limitations: Record<string, string>;
+}
+
+export interface PartyBalanceRow {
+  id: string;
+  name: string;
+  balance: string;
+}
+
+export interface ReceivablesResult {
+  data: PartyBalanceRow[];
+  summary: { totalReceivable?: string; totalPayable?: string; customerCount?: number; supplierCount?: number };
+  pagination: Pagination;
+  limitations: Record<string, string>;
+}
+
+// ---------------------------------------------------- Reconciliation -----
+
+export interface ReconciliationExclusion {
+  excludedBy: string;
+  movementType: string;
+  reason: string;
+  excludedValue?: string;
+  excludedMovementCount?: number;
+}
+
+export interface ReconciliationResult {
+  summary: {
+    sourceA: string;
+    sourceB: string;
+    expectedRelationship: string;
+    exclusions?: ReconciliationExclusion[];
+    reconciled?: boolean;
+    discrepancyCount?: number;
+    [key: string]: unknown;
+  };
+  data: Record<string, unknown>[];
+  pagination: Pagination;
+}

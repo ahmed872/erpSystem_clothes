@@ -65,6 +65,25 @@ export const ERP_NAV: NavItem[] = [
     requires: [],
     requiresAny: ['categories.view', 'brands.view', 'attributes.view', 'uoms.view', 'tax.view'],
   },
+  {
+    to: '/reports/sales',
+    labelKey: 'nav.salesReports',
+    requires: ['reports.sales.view'],
+  },
+  { to: '/reports/purchasing', labelKey: 'nav.purchasingReport', requires: ['reports.sales.view'] },
+  { to: '/reports/inventory', labelKey: 'nav.inventoryReports', requires: ['reports.inventory.view'] },
+  { to: '/reports/financial', labelKey: 'nav.financialReports', requires: ['reports.financial.view'] },
+  {
+    /* Phase 19 — reconciliation fronts FOUR reports behind TWO different
+       grants: the inventory ledger is `reports.inventory.view`, the other
+       three are `reports.financial.view`. A BRANCH_MANAGER holds only the
+       first, so the entry appears for either and each TAB re-checks its
+       own grant. */
+    to: '/reports/reconciliation',
+    labelKey: 'nav.reconciliation',
+    requires: [],
+    requiresAny: ['reports.inventory.view', 'reports.financial.view'],
+  },
   { to: '/warranty-claims', labelKey: 'nav.warrantyClaims', requires: ['warranty.view'] },
   { to: '/shifts', labelKey: 'nav.shifts', requires: ['shifts.view'] },
 ];
