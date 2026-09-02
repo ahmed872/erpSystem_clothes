@@ -1,7 +1,163 @@
 # PROJECT STATE SUMMARY
 
 ## Current Phase
-Phase 12 — POS Web (**POS loose ends complete.** ERP Web NOT started, offline sync NOT started.)
+
+**Phase 21 — Post-administration hardening and release gate.** The core ERP
+is implemented through Phase 20 and this phase adds no product feature: it
+re-runs the whole verification suite, walks the cross-module chains
+end-to-end, re-checks the security and data-integrity invariants, and
+classifies what is left.
+
+**Phases 12–20 are closed.** The record below was consolidated during Phase
+21 from the phase commits themselves (`git log` is the primary source for
+every line of it); nothing in it is reconstructed from memory, and where a
+detail was not established by an approved record it is not asserted here.
+
+Everything from `## Phase 12 — Returns` downwards is the record as it stood
+at the close of Phase 11/12 and is **left exactly as written**. History is
+not edited to match a later state — including the two lines Phase 21 found
+stale, which are corrected here rather than rewritten there:
+
+- The old `## Current Phase` line said "Phase 12 — POS Web … ERP Web NOT
+  started". Superseded by this section.
+- The old `## Screens` section said "None (still backend-only)". That was
+  true when written and has not been true since Phase 12. The product now
+  has two frontends — see **Frontends** below.
+
+---
+
+## Completed phases 12–20 (consolidated in Phase 21)
+
+Every phase from 13 onward is a **frontend** phase over contracts that
+already existed. The recurring discipline across all of them, stated once
+rather than eight times:
+
+- **No endpoint was invented for UI convenience.** Where a screen wanted a
+  capability the backend did not offer, the gap was reported and the screen
+  went without it.
+- **No calculator was duplicated in the browser.** Money, stock, tax,
+  points, COGS and cost are computed server-side; each phase's `lib/`
+  module has a test that asserts mechanically that no export is named after
+  an arithmetic it must not perform.
+- **No role name is used for authorization anywhere.** Navigation, routes
+  and controls resolve from `GET /permissions/me`; the backend re-checks
+  every call regardless.
+
+| Phase | What it delivered | Backend change |
+|---|---|---|
+| **12** POS Web | The till: sign-in through shift close, returns, exchanges, held sales, cash drawer, warranty, receipts. Plus the D1–D5 product decisions and the B1/B2/U1–U4 loose ends. | Additive receipt fields; effective-permissions endpoint |
+| **13** ERP foundation | `apps/erp-web` and its first vertical slice — dashboard, warranty-claim resolution, shift reconciliation. `DataTable`/`ConfirmDialog` into the shared ui-kit; navigation generated from grants. | None |
+| **14** Catalogue | Product list, detail, create; variants, barcodes, bundles, tax assignment; price lists; reference data. | **Security fix**: catalogue WRITE paths returned cost to callers without `products.view_cost` |
+| **15** Inventory | Balances, movement history, lots and serials, ledger integrity check, adjustments, transfers, stock counts. | **Security fix**: inventory WRITE paths returned `averageCost`/`cogsPerUnit` to callers without `products.view_cost` |
+| **16** Purchasing | Suppliers with server-side search and payable balances; purchase orders through DRAFT→RECEIVED, receiving with serials and idempotency, returns, payments. | **Defect fix**: `?isActive=false` meant `true` — `z.coerce.boolean()` on a query string. Five call sites |
+| **17** Sales | Back-office sales list, detail, receipt, and settling an outstanding balance. The ERP reads sales; it never rings one up. | None |
+| **18** Customers | Identity, balance, loyalty points, purchase history, and the one loyalty adjustment the contract offers. | None |
+| **19** Reporting | Five report screens over the 22 existing reporting endpoints. | None |
+| **20** Administration | Users, Roles, Organisation (branches + warehouses), Business settings, Tax settings, Audit log. | **Decision B**: role-administration lockout and system-role rename protection |
+
+### The three security defects found by building the UI
+
+Each was found by the mandated cost audit at the start of a phase, was
+reachable rather than theoretical, was reproduced with a custom role before
+the fix and re-verified after, and carries its own regression test:
+
+1. **Phase 14 — catalogue.** Read paths stripped cost; write paths did not.
+   Renaming a product returned its cost to a merchandiser holding
+   `products.edit` without `products.view_cost`. Fixed once in
+   `stripProductCost`/`stripVariantCost`, applied on every path.
+2. **Phase 15 — inventory.** The same class in a second module: opening
+   stock, receipts, consumptions and adjustments each returned the engine's
+   freshly-recomputed `averageCost` (and consumption also `cogsPerUnit`).
+   Worse than the catalogue case, because a warehouse's moving-average cost
+   is solvable from repeated receipts at known quantities. Fixed once in
+   `stripStockCost`.
+3. **Phase 16 — purchasing.** Audited, and came back **clean**: purchasing
+   projects the variant to `{id, sku}` throughout. Recorded as a verified
+   result rather than an assumption.
+
+### Phase 20 — Decision B, as approved and implemented
+
+The owner's approved decision, enforced in `UpdateRoleUseCase`:
+
+1. Custom roles remain editable.
+2. System roles remain permission-editable.
+3. A role update is **rejected** if the resulting permissions would remove
+   `roles.edit` or `roles.view` from a role the caller holds.
+4. System roles cannot be renamed.
+5. All existing last-owner protections are preserved.
+6. The backend enforces all of it.
+7. No role-name-based authorization.
+8. No permission redesign.
+
+Rule 3 reads the caller's own assignments from `user_roles` for the user id
+on the verified access token — never a role name, never anything from the
+request body — and is scoped to lockout: a role the caller does **not** hold
+can still have those codes removed, because that locks nobody out. The
+refusal is a 409, not a 403: the caller genuinely holds `roles.edit`; what
+is wrong is the resulting state. The browser mirrors the rule to explain a
+refusal in advance and decides nothing.
+
+## Frontends
+
+Two, sharing one design system (`packages/ui-kit`), one API client, one auth
+model and one permission model.
+
+- **`apps/pos-web`** — the till. 14 screens.
+- **`apps/erp-web`** — the back office. 34 screens across catalogue,
+  pricing, inventory, transfers, counts, purchasing, suppliers, sales,
+  customers, reporting, reconciliation, warranty, shifts and administration.
+
+Arabic is the default language and the default direction is RTL; both apps
+carry full EN/AR key parity (958 keys in the ERP bundle), and every screen
+is verified at 390px in both directions.
+
+---
+
+## Phase 21 — hardening and release gate
+
+No product feature was added and no approved behaviour was changed. What
+Phase 21 contributed:
+
+- **`apps/api/test/phase21-release-gate.e2e-spec.ts`** — the cross-module
+  chains as continuous flows in one tenant (catalogue→price→stock→sale→
+  payment→customer ledger→general ledger→report; purchase→receive→stock→
+  supplier→payment→report; sale return→stock→books→customer→report;
+  transfer→source→destination; user→role→effective permissions→API
+  authorization; business→branch→warehouse→user access), plus the data
+  invariants asserted over the whole tenant after every chain has run.
+  Sixty-five module specs each prove their own module; none of them walked
+  a chain, and the seams between modules are what a release gate is for.
+- Two limitations **pinned as executable negatives** rather than left as
+  prose: there is no purchase-total preview endpoint, and the generic stock
+  primitives accept a movement with no provenance at all.
+
+### Known issues added by Phases 12–21
+
+These are **new** entries; the Phase 8 register (#26–#82) below is unchanged
+and none of its entries was reopened.
+
+| # | Issue | Class |
+|---|---|---|
+| **P17-1** | `GET /sales` returns raw sale rows with **no payment summary**, so a list screen cannot show a payment column without deriving one — which would call every fully-paid cash sale unpaid. Pinned as a negative in `erp-sales.e2e-spec.ts`. | Contract limitation |
+| **P17-2** | `saleListQuerySchema` accepts no date range and no status filter, so the sales list offers neither. | Contract limitation |
+| **P16-1** | There is **no purchase-total preview endpoint** (`/sales/quote` has no purchasing equivalent), so the ERP purchase form shows no running total. Pinned as a negative in the Phase 21 gate. | Contract limitation |
+| **P21-1** | **`PurchaseItem` rows are returned in no defined order.** No purchase read or write path puts an `orderBy` on `items`, so PostgreSQL returns them in whatever order it likes — normally insertion order, but not once the heap has been reused. A UI rendering a purchase order can therefore show its lines in a different order between two reads. Discovered as an intermittent positional-index failure in `erp-purchasing.e2e-spec.ts`; **both line totals were correct**, only their order was not. Present on the untouched Phase 19 baseline; unrelated to Phases 20 and 21. | Real defect (cosmetic) |
+| **P21-2** | The generic stock primitives (`POST /inventory/receipts` and siblings) take `movementType`, `referenceType`, `referenceId` and `reason` from the caller, all optional — so a caller supplying none writes a movement typed `PURCHASE` that names no purchase and states no reason. Nothing in the product does this; the endpoint permits it. | Real defect (traceability) |
+| **P20-1** | `GET /users` takes no `search`, `status`, `page` or `limit`, so the users screen narrows the list it received in the browser and says so. | Contract limitation |
+| **P20-2** | There is no `GET /users/:id`, so there is no user-detail route. | Contract limitation |
+| **P19-1** | `financial-reports.use-case.ts` and `reconciliation.use-case.ts` do not call `applyVisibility`, so `reports.financial.view` alone yields the full P&L including profit lines. **The owner decided this is correct** — a P&L without its profit lines has its purpose removed, and the General Ledger under the same grant already exposes the COGS lines. Pinned by tests in both directions. | Approved decision |
+
+### Deferred register, carried forward unchanged
+
+Nothing below is approved or planned, and Phases 12–21 added nothing to it
+and removed nothing from it: `FinancialAccount` (SCOPE-2) · hard inventory
+reservation · offline sync · e-invoicing / jurisdiction-aware tax documents
+· email / SMS delivery · multi-tax stacking · returned-goods inspection
+workflow · legacy serial migration · card / wallet settlement · self-service
+password-reset delivery · shared-store (Redis) rate limiting · new promotion
+types · loyalty expiry.
+
+---
 
 ### POS loose ends (Phase 12 milestone)
 
@@ -875,7 +1031,12 @@ Role-template grants: `BUSINESS_OWNER` all four. `ACCOUNTANT`, `BRANCH_MANAGER`,
 **Phase 8E added no endpoint and no permission.** Two request fields were added, both client-supplied and both joining their document's idempotency fingerprint: `serials` on a sale item (**required** for a serial-tracked variant, rejected for others, count must equal quantity) and `serials` on a return item (same rules, for the units coming back). Serial capture is part of `sales.create`; serial return is part of `sales.return`.
 
 ## Screens
-None (still backend-only - unchanged from Phases 1-5; still flagging this for your review).
+
+> **Corrected in Phase 21.** This section read *"None (still backend-only -
+> unchanged from Phases 1-5; still flagging this for your review)."* It was
+> true when written and has not been true since Phase 12. The original text
+> is preserved in this note; the current state is under **Frontends** at the
+> top of this file — two apps, 48 screens.
 
 ## Tests and Results
 **Phase 5**: E2E: 46 tests, 6 files (40 at initial implementation + 6 added during the release-gate review) - `sales-customers.e2e-spec.ts` (6), `sales-shifts.e2e-spec.ts` (5), `sales-lifecycle.e2e-spec.ts` (13), `sales-returns.e2e-spec.ts` (7), `sales-concurrency-and-isolation.e2e-spec.ts` (14, seven real-concurrency tests), `sales-wac-reconciliation.e2e-spec.ts` (1). See the prior revision of this file for the full per-test breakdown.
