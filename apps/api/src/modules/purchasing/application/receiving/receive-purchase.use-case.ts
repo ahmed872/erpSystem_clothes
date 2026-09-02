@@ -13,6 +13,7 @@ import { AccountingEngineService } from '../../../../engines/accounting/accounti
 import { buildPurchaseReceiptJournalLines } from '../../../accounting/domain/purchase-journal-lines';
 import { assertIdempotentReplayMatches } from '../../../../common/domain/idempotency';
 import { createSerialsForReceipt, assertNoSerialsForUntrackedVariant } from '../../../inventory/domain/lot-and-serial';
+import { DOCUMENT_LINE_ORDER } from '../../domain/document-line-order';
 
 const RECEIVABLE_STATUSES = new Set(['APPROVED', 'PARTIALLY_RECEIVED']);
 
@@ -74,7 +75,7 @@ export class ReceivePurchaseUseCase {
       if (input.idempotencyKey) {
         const existing = await tx.purchaseReceipt.findFirst({
           where: { businessId: actor.tenantId, idempotencyKey: input.idempotencyKey },
-          include: { items: { include: { serials: { include: { serialNumber: { select: { serial: true } } } } } } },
+          include: { items: { include: { serials: { include: { serialNumber: { select: { serial: true } } } } }, orderBy: DOCUMENT_LINE_ORDER } },
         });
         if (existing) {
           // PRE-EXISTING DEFECT FIXED IN PHASE 10 (10I). This used to
@@ -106,7 +107,10 @@ export class ReceivePurchaseUseCase {
         where: { id: purchaseId, businessId: actor.tenantId },
         // Phase 10 (10D): the variant's product carries `tracksSerialNumbers`,
         // and only the server may decide whether a line needs serials.
-        include: { items: { include: { variant: { include: { product: { select: { tracksSerialNumbers: true } } } } } }, warehouse: true },
+        include: {
+          items: { include: { variant: { include: { product: { select: { tracksSerialNumbers: true } } } } }, orderBy: DOCUMENT_LINE_ORDER },
+          warehouse: true,
+        },
       });
       if (!purchase) throw new NotFoundDomainError('Purchase', purchaseId);
       if (!RECEIVABLE_STATUSES.has(purchase.status)) {
@@ -255,7 +259,10 @@ export class ReceivePurchaseUseCase {
         data: { status: fullyReceived ? 'RECEIVED' : 'PARTIALLY_RECEIVED' },
       });
 
-      const finalReceipt = await tx.purchaseReceipt.findUniqueOrThrow({ where: { id: receipt.id }, include: { items: true } });
+      const finalReceipt = await tx.purchaseReceipt.findUniqueOrThrow({
+        where: { id: receipt.id },
+        include: { items: { orderBy: DOCUMENT_LINE_ORDER } },
+      });
 
       await this.audit.record(tx, {
         businessId: actor.tenantId,

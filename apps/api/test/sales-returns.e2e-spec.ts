@@ -57,7 +57,7 @@ describe('Sales: sale returns (e2e, real Postgres)', () => {
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 20, unitCost: 100 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 20, unitCost: 100 })
       .expect(201); // avg cost now drifts way up
 
     const originalMovement = await admin.stockMovement.findFirstOrThrow({

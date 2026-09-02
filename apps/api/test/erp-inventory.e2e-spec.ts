@@ -236,7 +236,7 @@ describe('ERP inventory (e2e, real Postgres)', () => {
       const receipt = await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', bearer(keeperToken))
-        .send({ warehouseId: secondWarehouseId, variantId, quantity: 5, unitCost: 222 })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: secondWarehouseId, variantId, quantity: 5, unitCost: 222 })
         .expect(201);
       expect(receipt.body.data).not.toHaveProperty('averageCost');
 
@@ -606,7 +606,7 @@ describe('ERP inventory (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', bearer(ownerToken))
-        .send({ warehouseId: biz.warehouseId, variantId: serialVariantId, quantity: 2, unitCost: 200, serials: ['INV-SN-1', 'INV-SN-2'] })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId: serialVariantId, quantity: 2, unitCost: 200, serials: ['INV-SN-1', 'INV-SN-2'] })
         .expect(201);
 
       const transfer = await request(app.getHttpServer())

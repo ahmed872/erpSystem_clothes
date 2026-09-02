@@ -60,7 +60,7 @@ describe('Sale quote (e2e, real Postgres)', () => {
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: serials.length, unitCost: 10, serials })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: serials.length, unitCost: 10, serials })
       .expect(201);
     return variantId;
   }

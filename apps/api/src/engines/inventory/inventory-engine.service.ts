@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { Prisma, StockMovementType } from '@prisma/client';
 import { TenantTx } from '../../common/prisma/prisma.service';
 import { InsufficientStockDomainError } from '../../common/errors/domain-error';
+import { assertDocumentProvenance } from './document-provenance';
 
 interface MovementBaseParams {
   businessId: string;
@@ -96,6 +97,13 @@ interface BalanceRow {
 @Injectable()
 export class InventoryEngineService {
   async applyMovement(tx: TenantTx, params: ApplyMovementParams): Promise<ApplyMovementResult> {
+    // Phase 22 (P21-2). Checked BEFORE the balance is locked and before
+    // stock availability, deliberately: a movement that cannot say where
+    // it came from is malformed whatever the shelf holds, and a caller
+    // who omits the reference should be told THAT rather than handed a
+    // 409 about stock they were never going to be allowed to move.
+    assertDocumentProvenance(params);
+
     const delta = new Prisma.Decimal(params.quantityDelta);
     if (delta.isZero()) {
       throw new Error('InventoryEngine.applyMovement: quantityDelta cannot be zero');
@@ -116,6 +124,12 @@ export class InventoryEngineService {
     tx: TenantTx,
     params: ApplyAbsoluteQuantityParams,
   ): Promise<ApplyMovementResult | NoMovementResult> {
+    // The same guard on the other public entry. In practice this path
+    // writes ADJUSTMENT (stock-count approval), which is exempt — but the
+    // check belongs on every door into the engine, not on the one that
+    // happens to need it today.
+    assertDocumentProvenance(params);
+
     const balanceRow = await this.lockOrCreateBalance(tx, params.businessId, params.warehouseId, params.variantId);
     const currentQty = new Prisma.Decimal(balanceRow.quantity_on_hand);
     const target = new Prisma.Decimal(params.targetQuantity);

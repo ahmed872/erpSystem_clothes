@@ -44,6 +44,16 @@ describe('InventoryEngineService (WAC math, unit)', () => {
     createdBy: 'user-1',
   };
 
+  /**
+   * Phase 22 (P21-2): PURCHASE, SALE, SALES_RETURN and PURCHASE_RETURN
+   * movements must name the document they came from — the engine refuses
+   * them otherwise, on the same path that writes the row. These WAC cases
+   * are about cost arithmetic rather than provenance, so they carry a
+   * plausible reference and go on testing what they were written to test.
+   */
+  const fromPurchase = { referenceType: 'PurchaseReceipt', referenceId: 'receipt-1' };
+  const fromSale = { referenceType: 'Sale', referenceId: 'sale-1' };
+
   it('first-ever increase sets the average cost to the input cost directly', async () => {
     const engine = new InventoryEngineService();
     const { tx } = makeFakeTx({ quantityOnHand: '0', averageCost: '0' });
@@ -52,6 +62,7 @@ describe('InventoryEngineService (WAC math, unit)', () => {
       ...baseParams,
       quantityDelta: 100,
       movementType: 'PURCHASE',
+      ...fromPurchase,
       unitCostOverride: 10,
       allowNegative: false,
     });
@@ -71,6 +82,7 @@ describe('InventoryEngineService (WAC math, unit)', () => {
       ...baseParams,
       quantityDelta: 50,
       movementType: 'PURCHASE',
+      ...fromPurchase,
       unitCostOverride: 16,
       allowNegative: false,
     });
@@ -87,6 +99,7 @@ describe('InventoryEngineService (WAC math, unit)', () => {
       ...baseParams,
       quantityDelta: -30,
       movementType: 'SALE',
+      ...fromSale,
       // unitCostOverride is deliberately omitted AND would be ignored even
       // if given - COGS always comes from the ledger's current average.
       allowNegative: false,
@@ -104,6 +117,7 @@ describe('InventoryEngineService (WAC math, unit)', () => {
       ...baseParams,
       quantityDelta: -10,
       movementType: 'SALE',
+      ...fromSale,
       allowNegative: false,
     });
     expect(sale.movement.unitCostAtMovement.toString()).toBe('10');
@@ -117,6 +131,7 @@ describe('InventoryEngineService (WAC math, unit)', () => {
       ...baseParams,
       quantityDelta: 10,
       movementType: 'PURCHASE',
+      ...fromPurchase,
       unitCostOverride: 100,
       allowNegative: false,
     });
@@ -132,6 +147,7 @@ describe('InventoryEngineService (WAC math, unit)', () => {
         ...baseParams,
         quantityDelta: -10,
         movementType: 'SALE',
+        ...fromSale,
         allowNegative: false,
       }),
     ).rejects.toBeInstanceOf(InsufficientStockDomainError);
@@ -148,6 +164,7 @@ describe('InventoryEngineService (WAC math, unit)', () => {
       ...baseParams,
       quantityDelta: -10,
       movementType: 'SALE',
+      ...fromSale,
       allowNegative: true,
     });
 
@@ -164,6 +181,7 @@ describe('InventoryEngineService (WAC math, unit)', () => {
       ...baseParams,
       quantityDelta: 20,
       movementType: 'PURCHASE',
+      ...fromPurchase,
       unitCostOverride: 15,
       allowNegative: false,
     });

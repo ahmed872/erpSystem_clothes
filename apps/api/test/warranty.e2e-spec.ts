@@ -47,7 +47,7 @@ describe('Warranty (e2e, real Postgres)', () => {
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt',
         warehouseId: biz.warehouseId,
         variantId: serialVariantId,
         quantity: 3,
@@ -197,7 +197,7 @@ describe('Warranty (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId: otherVariantId, quantity: 1, unitCost: 1, serials: ['WTY-SN-OTHER'] })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId: otherVariantId, quantity: 1, unitCost: 1, serials: ['WTY-SN-OTHER'] })
         .expect(201);
       const foreign = await admin.serialNumber.findFirstOrThrow({ where: { serial: 'WTY-SN-OTHER' } });
 
@@ -653,7 +653,7 @@ describe('Warranty (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId: serialVariantId, quantity: 1, unitCost: 100, serials: ['WTY-SN-UNSOLD'] })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId: serialVariantId, quantity: 1, unitCost: 100, serials: ['WTY-SN-UNSOLD'] })
         .expect(201);
       const unsold = await admin.serialNumber.findFirstOrThrow({ where: { serial: 'WTY-SN-UNSOLD' } });
 
@@ -701,7 +701,7 @@ describe('Warranty (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: serials.length, unitCost: 100, serials })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: serials.length, unitCost: 100, serials })
         .expect(201);
 
       const sale = await request(app.getHttpServer())
@@ -855,7 +855,7 @@ describe('Warranty (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId: newVariantId, quantity: 1, unitCost: 100, serials: [newSerialName] })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId: newVariantId, quantity: 1, unitCost: 100, serials: [newSerialName] })
         .expect(201);
 
       const exchange = await request(app.getHttpServer())
@@ -902,7 +902,7 @@ describe('Warranty (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: ['XSALE-1', 'XSALE-2'] })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: ['XSALE-1', 'XSALE-2'] })
         .expect(201);
 
       const saleA = await request(app.getHttpServer())
@@ -949,7 +949,7 @@ describe('Warranty (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: ['CUST-1', 'CUST-2'] })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: ['CUST-1', 'CUST-2'] })
         .expect(201);
 
       const accountSale = await request(app.getHttpServer())
@@ -1001,7 +1001,7 @@ describe('Warranty (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 1, unitCost: 100, serials: ['RACE-1'] })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 1, unitCost: 100, serials: ['RACE-1'] })
         .expect(201);
       const sale = await request(app.getHttpServer())
         .post('/api/v1/sales')

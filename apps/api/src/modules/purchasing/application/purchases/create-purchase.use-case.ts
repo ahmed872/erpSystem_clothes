@@ -7,6 +7,7 @@ import { AuditService } from '../../../audit/audit.service';
 import { NotFoundDomainError, ValidationFailedError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { documentNumberFromId } from '../../../../common/domain/document-number';
+import { DOCUMENT_LINE_ORDER } from '../../domain/document-line-order';
 
 /**
  * Creates a Purchase document in DRAFT status with its line items. This
@@ -85,7 +86,7 @@ export class CreatePurchaseUseCase {
           createdBy: actor.id,
           items: { create: itemsData },
         },
-        include: { items: true },
+        include: { items: { orderBy: DOCUMENT_LINE_ORDER } },
       });
 
       await this.audit.record(tx, {

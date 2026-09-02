@@ -15,6 +15,7 @@ import { AccountingEngineService } from '../../../../engines/accounting/accounti
 import { buildPurchaseReturnJournalLines } from '../../../accounting/domain/purchase-journal-lines';
 import { assertNoSerialsForUntrackedVariant } from '../../../inventory/domain/lot-and-serial';
 import { returnSerialsToSupplier } from '../../../inventory/domain/serial-movements';
+import { DOCUMENT_LINE_ORDER } from '../../domain/document-line-order';
 
 /**
  * A purchase return is a single-step atomic action (not a draft/confirm
@@ -48,7 +49,7 @@ export class CreatePurchaseReturnUseCase {
         where: { id: purchaseId, businessId: actor.tenantId },
         // Phase 10 (10D): only the server may decide whether a line needs
         // serials, so the product's tracking flag comes with the item.
-        include: { items: { include: { variant: { include: { product: { select: { tracksSerialNumbers: true } } } } } } },
+        include: { items: { include: { variant: { include: { product: { select: { tracksSerialNumbers: true } } } } }, orderBy: DOCUMENT_LINE_ORDER } },
       });
       if (!purchase) throw new NotFoundDomainError('Purchase', purchaseId);
 
@@ -189,7 +190,10 @@ export class CreatePurchaseReturnUseCase {
         });
       }
 
-      const finalReturn = await tx.purchaseReturn.findUniqueOrThrow({ where: { id: purchaseReturn.id }, include: { items: true } });
+      const finalReturn = await tx.purchaseReturn.findUniqueOrThrow({
+        where: { id: purchaseReturn.id },
+        include: { items: { orderBy: DOCUMENT_LINE_ORDER } },
+      });
 
       await this.audit.record(tx, {
         businessId: actor.tenantId,

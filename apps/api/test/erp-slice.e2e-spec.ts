@@ -72,7 +72,7 @@ describe('ERP first vertical slice (e2e, real Postgres)', () => {
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', bearer(ownerToken))
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: ['ERP-SN-1', 'ERP-SN-2'] })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: ['ERP-SN-1', 'ERP-SN-2'] })
       .expect(201);
 
     const sale = await request(app.getHttpServer())

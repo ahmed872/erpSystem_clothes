@@ -153,7 +153,7 @@ describe('Inventory: adjustments and stock counts (e2e, real Postgres)', () => {
       await request(app.getHttpServer())
         .post('/api/v1/inventory/consumptions')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 20 })
+        .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 20 })
         .expect(201);
       // Live balance is now 80.
 

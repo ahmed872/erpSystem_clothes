@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../../../common/prisma/prisma.service';
 import { NotFoundDomainError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
+import { DOCUMENT_LINE_ORDER } from '../../domain/document-line-order';
 
 @Injectable()
 export class GetPurchaseUseCase {
@@ -14,9 +15,9 @@ export class GetPurchaseUseCase {
         include: {
           supplier: { select: { id: true, name: true } },
           warehouse: { select: { id: true, name: true } },
-          items: { include: { variant: { select: { id: true, sku: true } } } },
-          receipts: { include: { items: true }, orderBy: { receivedAt: 'desc' } },
-          returns: { include: { items: true }, orderBy: { createdAt: 'desc' } },
+          items: { include: { variant: { select: { id: true, sku: true } } }, orderBy: DOCUMENT_LINE_ORDER },
+          receipts: { include: { items: { orderBy: DOCUMENT_LINE_ORDER } }, orderBy: { receivedAt: 'desc' } },
+          returns: { include: { items: { orderBy: DOCUMENT_LINE_ORDER } }, orderBy: { createdAt: 'desc' } },
           payments: { orderBy: { paidAt: 'desc' } },
         },
       });

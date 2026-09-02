@@ -4,6 +4,7 @@ import { AuditService } from '../../../audit/audit.service';
 import { ConflictDomainError, NotFoundDomainError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { lockPurchase } from '../../domain/lock-purchase';
+import { DOCUMENT_LINE_ORDER } from '../../domain/document-line-order';
 
 /**
  * DRAFT -> APPROVED. Approval is deliberately a separate step from
@@ -23,7 +24,10 @@ export class ApprovePurchaseUseCase {
   async execute(actor: RequestUser, purchaseId: string) {
     return this.prisma.withTenant(actor.tenantId, async (tx) => {
       await lockPurchase(tx, actor.tenantId, purchaseId);
-      const purchase = await tx.purchase.findFirst({ where: { id: purchaseId, businessId: actor.tenantId }, include: { items: true } });
+      const purchase = await tx.purchase.findFirst({
+        where: { id: purchaseId, businessId: actor.tenantId },
+        include: { items: { orderBy: DOCUMENT_LINE_ORDER } },
+      });
       if (!purchase) throw new NotFoundDomainError('Purchase', purchaseId);
       if (purchase.status !== 'DRAFT') {
         throw new ConflictDomainError(`Only a DRAFT purchase can be approved (current status: ${purchase.status})`);
@@ -35,7 +39,7 @@ export class ApprovePurchaseUseCase {
       const updated = await tx.purchase.update({
         where: { id: purchaseId },
         data: { status: 'APPROVED', approvedBy: actor.id, approvedAt: new Date() },
-        include: { items: true },
+        include: { items: { orderBy: DOCUMENT_LINE_ORDER } },
       });
 
       await this.audit.record(tx, {

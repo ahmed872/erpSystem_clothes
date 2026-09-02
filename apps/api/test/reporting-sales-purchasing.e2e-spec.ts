@@ -92,7 +92,7 @@ describe('Reporting: sales and purchasing reports (e2e, real Postgres)', () => {
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId: variantA, quantity: 100, unitCost: 40 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId: variantA, quantity: 100, unitCost: 40 })
       .expect(201);
 
     const after = await request(app.getHttpServer()).get('/api/v1/reports/sales/summary').set('Authorization', auth()).expect(200);

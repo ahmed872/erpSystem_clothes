@@ -100,6 +100,8 @@ export class DashboardUseCase {
           cashAndBank:
             'cashBalance and bankBalance are General Ledger account balances reflecting recorded sales/purchase activity only. There is no cash deposit, withdrawal, or owner-drawings capability, so these are not a complete treasury position.',
           lowStock: 'A Low Stock KPI is not available: no reorder-point or minimum-stock threshold field exists to define "low".',
+          loyaltyPoints:
+            'Loyalty points post no General Ledger fact when earned, so netRevenue and netProfit reflect redemptions (a discount on the redeeming sale) but never an accrual for points still outstanding. Outstanding loyalty points are measurable through the append-only CustomerPoints ledger but are NOT represented as a General Ledger liability during the controlled pilot.',
         },
         range: { from: ctx.range.from.toISOString(), to: ctx.range.toExclusive.toISOString(), timezone: ctx.range.timezone },
       };

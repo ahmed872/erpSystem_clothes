@@ -43,7 +43,7 @@ describe('Inventory: concurrency, tenant isolation, permissions (e2e, real Postg
           request(app.getHttpServer())
             .post('/api/v1/inventory/consumptions')
             .set('Authorization', auth())
-            .send({ warehouseId: biz.warehouseId, variantId, quantity: 1 }),
+            .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 1 }),
         ),
       );
 
@@ -75,7 +75,7 @@ describe('Inventory: concurrency, tenant isolation, permissions (e2e, real Postg
           request(app.getHttpServer())
             .post('/api/v1/inventory/consumptions')
             .set('Authorization', auth())
-            .send({ warehouseId: biz.warehouseId, variantId, quantity: 3 }),
+            .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 3 }),
         ),
       );
 
@@ -103,7 +103,7 @@ describe('Inventory: concurrency, tenant isolation, permissions (e2e, real Postg
           request(app.getHttpServer())
             .post('/api/v1/inventory/receipts')
             .set('Authorization', auth())
-            .send({ warehouseId: biz.warehouseId, variantId, quantity: 10, unitCost })
+            .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 10, unitCost })
             .expect(201),
         ),
       );
@@ -158,14 +158,14 @@ describe('Inventory: concurrency, tenant isolation, permissions (e2e, real Postg
       const receive = await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', `Bearer ${cashierToken}`)
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 1, unitCost: 1 })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 1, unitCost: 1 })
         .expect(403);
       expect(receive.body.error.code).toBe('FORBIDDEN');
 
       const consume = await request(app.getHttpServer())
         .post('/api/v1/inventory/consumptions')
         .set('Authorization', `Bearer ${cashierToken}`)
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 1 })
+        .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 1 })
         .expect(403);
       expect(consume.body.error.code).toBe('FORBIDDEN');
 
@@ -217,7 +217,7 @@ describe('Inventory: concurrency, tenant isolation, permissions (e2e, real Postg
       const receive = await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', `Bearer ${other.accessToken}`)
-        .send({ warehouseId: other.warehouseId, variantId, quantity: 1, unitCost: 1 })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: other.warehouseId, variantId, quantity: 1, unitCost: 1 })
         .expect(404);
       expect(receive.body.error.code).toBe('NOT_FOUND');
     });

@@ -47,7 +47,7 @@ describe('Sales: WAC / historical cost reconciliation across Inventory + Purchas
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 10, unitCost: 10 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 10, unitCost: 10 })
       .expect(201);
     let balance = await admin.stockBalance.findFirstOrThrow({ where: { businessId: biz.businessId, variantId } });
     expect(Number(balance.averageCost)).toBeCloseTo(7.5, 4);
@@ -70,7 +70,7 @@ describe('Sales: WAC / historical cost reconciliation across Inventory + Purchas
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 10, unitCost: 20 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 10, unitCost: 20 })
       .expect(201);
     balance = await admin.stockBalance.findFirstOrThrow({ where: { businessId: biz.businessId, variantId } });
     expect(Number(balance.averageCost)).toBeCloseTo(12.5, 4);

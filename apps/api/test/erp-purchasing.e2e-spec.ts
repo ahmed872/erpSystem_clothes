@@ -452,7 +452,22 @@ describe('ERP purchasing (e2e, real Postgres)', () => {
       expect(Number(created.body.data.taxAmount)).toBe(55);
       expect(Number(created.body.data.discountAmount)).toBe(5);
       expect(Number(created.body.data.totalAmount)).toBe(750);
-      expect(Number(created.body.data.items[0].lineTotal)).toBe(310);
+
+      // Lines are located BY VARIANT, never by index. Phase 22 (P21-1)
+      // gave document lines a deterministic order (`createdAt`, then `id`
+      // as the tiebreaker, because a single nested create stamps every row
+      // with the same transaction timestamp). That order is STABLE across
+      // reads — which is the property that matters and is asserted in
+      // `purchasing-line-order.e2e-spec.ts` — but it is not entry order,
+      // and no column records entry order. This assertion used to read
+      // `items[0]` and passed only because the unordered query happened to
+      // come back that way; that is exactly the fragility P21-1 removed.
+      const byVariant = new Map<string, { lineTotal: string }>(
+        created.body.data.items.map((i: { variantId: string; lineTotal: string }) => [i.variantId, i]),
+      );
+      expect(byVariant.size).toBe(2);
+      expect(Number(byVariant.get(variantId)!.lineTotal)).toBe(310); // 3 x 100 + 15 - 5
+      expect(Number(byVariant.get(serialVariantId)!.lineTotal)).toBe(440); // 2 x 200 + 40
       // `branchId` is derived from the warehouse, never accepted.
       expect(created.body.data.branchId).toBe(biz.branchId);
       expect(created.body.data.status).toBe('DRAFT');

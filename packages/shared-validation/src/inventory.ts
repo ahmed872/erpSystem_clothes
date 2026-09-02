@@ -26,6 +26,41 @@ export const recordOpeningStockSchema = z.object({
 });
 export type RecordOpeningStockInput = z.infer<typeof recordOpeningStockSchema>;
 
+/**
+ * Phase 22 (P21-2) — THE REQUEST-LEVEL HALF OF THE PROVENANCE RULE.
+ *
+ * `movementType` on these two primitives DEFAULTS to a document type
+ * (PURCHASE on the receive side, SALE on the consume side) while
+ * `referenceType`/`referenceId` were optional — so the shortest possible
+ * valid request wrote a movement claiming a document and naming none.
+ *
+ * A caller gets a clear 422 here at the edge. The GUARANTEE lives in
+ * `InventoryEngineService`, which refuses the same thing on the single
+ * path that writes a movement row, for every caller including ones that
+ * never pass through this schema. This is the friendly half; that is the
+ * authoritative half.
+ *
+ * The adjustment family is untouched: those types have no document by
+ * definition and keep their existing reason-based contract.
+ */
+const DOCUMENT_MOVEMENT_TYPES = ['PURCHASE', 'SALE', 'SALES_RETURN', 'PURCHASE_RETURN'] as const;
+
+function requireDocumentProvenance(
+  value: { movementType?: string; referenceType?: string; referenceId?: string },
+  ctx: z.RefinementCtx,
+): void {
+  if (!value.movementType || !(DOCUMENT_MOVEMENT_TYPES as readonly string[]).includes(value.movementType)) return;
+  for (const field of ['referenceType', 'referenceId'] as const) {
+    if (!value[field]) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field],
+        message: `A ${value.movementType} movement must identify the document it came from`,
+      });
+    }
+  }
+}
+
 export const receiveStockSchema = z.object({
   warehouseId: z.string().uuid(),
   variantId: z.string().uuid(),
@@ -37,7 +72,7 @@ export const receiveStockSchema = z.object({
   referenceId: referenceIdSchema.optional(),
   reason: reasonSchema.optional(),
   ...lotAndSerialFields,
-});
+}).superRefine(requireDocumentProvenance);
 export type ReceiveStockInput = z.infer<typeof receiveStockSchema>;
 
 export const consumeStockSchema = z.object({
@@ -51,7 +86,7 @@ export const consumeStockSchema = z.object({
   reason: reasonSchema.optional(),
   lotId: z.string().uuid().optional(),
   serials: z.array(serialCode).max(10_000).optional(),
-});
+}).superRefine(requireDocumentProvenance);
 export type ConsumeStockInput = z.infer<typeof consumeStockSchema>;
 
 export const adjustStockSchema = z.object({

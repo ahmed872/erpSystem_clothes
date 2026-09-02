@@ -56,7 +56,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     const r1 = await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 16 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 16 })
       .expect(201);
     expect(r1.body.data.quantityOnHand).toBe('150');
     expect(r1.body.data.averageCost).toBe('12');
@@ -65,7 +65,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     const r2 = await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 18 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 18 })
       .expect(201);
     expect(r2.body.data.quantityOnHand).toBe('200');
     expect(r2.body.data.averageCost).toBe('13.5');
@@ -81,13 +81,13 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 16 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 50, unitCost: 16 })
       .expect(201); // avg now 12
 
     const sale = await request(app.getHttpServer())
       .post('/api/v1/inventory/consumptions')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 30 })
+      .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 30 })
       .expect(201);
     expect(sale.body.data.quantityOnHand).toBe('120');
     expect(sale.body.data.cogsPerUnit).toBe('12');
@@ -105,7 +105,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     const sale = await request(app.getHttpServer())
       .post('/api/v1/inventory/consumptions')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 10 })
+      .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 10 })
       .expect(201);
     expect(sale.body.data.cogsPerUnit).toBe('10');
 
@@ -113,7 +113,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 10, unitCost: 1000 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 10, unitCost: 1000 })
       .expect(201);
 
     // ...but the historical sale movement's own unit_cost_at_movement in
@@ -128,14 +128,14 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     const badWarehouse = await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: '00000000-0000-0000-0000-000000000000', variantId, quantity: 1, unitCost: 1 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: '00000000-0000-0000-0000-000000000000', variantId, quantity: 1, unitCost: 1 })
       .expect(404);
     expect(badWarehouse.body.error.code).toBe('NOT_FOUND');
 
     const badVariant = await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId: '00000000-0000-0000-0000-000000000000', quantity: 1, unitCost: 1 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId: '00000000-0000-0000-0000-000000000000', quantity: 1, unitCost: 1 })
       .expect(404);
     expect(badVariant.body.error.code).toBe('NOT_FOUND');
   });
@@ -146,14 +146,14 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     const zeroReceive = await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 0, unitCost: 1 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 0, unitCost: 1 })
       .expect(422);
     expect(zeroReceive.body.error.code).toBe('VALIDATION_FAILED');
 
     const negativeReceive = await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: -5, unitCost: 1 })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: -5, unitCost: 1 })
       .expect(422);
     expect(negativeReceive.body.error.code).toBe('VALIDATION_FAILED');
 
@@ -184,7 +184,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     const res = await request(app.getHttpServer())
       .post('/api/v1/inventory/receipts')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 5, unitCost: 120, uomId: biz.cartonUomId })
+      .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 5, unitCost: 120, uomId: biz.cartonUomId })
       .expect(201);
     expect(res.body.data.quantityOnHand).toBe('60');
     expect(res.body.data.averageCost).toBe('10');
@@ -202,7 +202,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
       const res = await request(app.getHttpServer())
         .post('/api/v1/inventory/consumptions')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 10 })
+        .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 10 })
         .expect(409);
       expect(res.body.error.code).toBe('INSUFFICIENT_STOCK');
 
@@ -241,7 +241,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
       const res = await request(app.getHttpServer())
         .post('/api/v1/inventory/consumptions')
         .set('Authorization', `Bearer ${login.body.data.accessToken}`)
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 10 })
+        .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 10 })
         .expect(409);
       expect(res.body.error.code).toBe('INSUFFICIENT_STOCK');
     });
@@ -264,7 +264,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
       const res = await request(app.getHttpServer())
         .post('/api/v1/inventory/consumptions')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 8 })
+        .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 8 })
         .expect(201);
       expect(res.body.data.quantityOnHand).toBe('-3');
 
@@ -283,7 +283,7 @@ describe('Inventory: opening stock, receive, consume, WAC (e2e, real Postgres)',
     await request(app.getHttpServer())
       .post('/api/v1/inventory/consumptions')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId, quantity: 15 })
+      .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId, quantity: 15 })
       .expect(201);
 
     const clean = await request(app.getHttpServer())

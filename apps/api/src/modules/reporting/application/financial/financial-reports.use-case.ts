@@ -23,6 +23,13 @@ import { dateRangeWhere } from '../../domain/date-range';
  *     such activity" when the truth is "cannot be recorded". DEFERRED.
  *   - AR/AP aging buckets: no due-date/payment-terms field exists.
  *     Plain balances only. BLOCKED BY DEPENDENCY.
+ *   - A loyalty-points liability: points are earned and redeemed entirely
+ *     in the append-only CustomerPoints ledger and post NO journal entry,
+ *     so no GL fact backs a liability line and inventing one here would
+ *     be exactly the "re-derive an accounting fact from documents" this
+ *     class refuses to do everywhere else. Accepted for the controlled
+ *     pilot and stated in `limitations` on both statements it affects
+ *     (P&L timing, Balance Sheet liabilities) rather than left implicit.
  *
  * Note on branch scope: the Chart of Accounts is business-scoped (Phase 6
  * decision - Account has no branchId), so financial statements are
@@ -133,6 +140,8 @@ export class FinancialReportsUseCase {
           discounts: 'Discounts are not a P&L line: revenue is posted already net of discount, so no General Ledger fact backs a separate discount figure. See the sales reports for discount metrics.',
           walkInReturns:
             'Walk-in (no-customer) sale returns DO reverse revenue from Phase 10 onward, because the refund tender handed back is recorded as a real operational fact (this closed limitation #32). Walk-in returns recorded BEFORE Phase 10 carry no refund fact and did not reduce revenue; those historical entries are never rewritten, so periods spanning that change may show the older treatment.',
+          loyaltyPoints:
+            'Loyalty points are recognised on REDEMPTION, not on earning. Earning posts no General Ledger fact, so nothing is accrued in the period a point was earned; redeeming applies a line discount, so revenue in the redeeming period is already net of it. Net Revenue and Net Profit therefore carry a timing mismatch between the period that earned a point and the period that honoured it. Outstanding loyalty points are measurable through the append-only CustomerPoints ledger (the balance is SUM(points) per customer) but are NOT represented as a General Ledger liability during the controlled pilot.',
         },
         range: { from: ctx.range.from.toISOString(), to: ctx.range.toExclusive.toISOString(), timezone: ctx.range.timezone },
       };
@@ -198,6 +207,8 @@ export class FinancialReportsUseCase {
           currentPeriodEarnings:
             'Current Period Earnings is computed live as SUM(Revenue) - SUM(Expenses) from posted journal lines. No year-end closing process exists yet, so this figure is cumulative since inception rather than scoped to a fiscal year.',
           expenseScope: 'Expenses reflected here are inventory-related only - no expense-management module exists (see the P&L limitations).',
+          loyaltyPoints:
+            'Outstanding loyalty points are measurable through the append-only CustomerPoints ledger (the balance is SUM(points) per customer) but are NOT represented as a General Ledger liability during the controlled pilot. No accounting mapping exists for loyalty and no journal entry is posted when points are earned, so the Liabilities section above excludes the redeemable value of unredeemed points; redemption is recognised only when it happens, as a discount on the redeeming sale. Assets = Liabilities + Equity still holds exactly for what IS posted - this is an omitted obligation, not an imbalance.',
         },
       };
     });

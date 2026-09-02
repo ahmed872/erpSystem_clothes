@@ -346,15 +346,15 @@ describe('Phase 21 release gate: cross-module chains (e2e, real Postgres)', () =
       await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt',
           warehouseId: biz.warehouseId,
           variantId,
           quantity: 10,
           unitCost: 900,
-          // The generic stock-in primitive takes its provenance from the
-          // caller; a caller that supplies none writes an unattributed
-          // movement. Recorded as a known limitation of this endpoint and
-          // pinned below.
+          // Phase 22 (P21-2): the generic stock-in primitive still takes
+          // its provenance from the caller, but a PURCHASE movement may no
+          // longer omit it — hence the reference above. The reason is
+          // additional colour, never a substitute for the document id.
           reason: 'Gate re-cost: a later, dearer receipt',
         })
         .expect(201);
@@ -853,11 +853,27 @@ describe('Phase 21 release gate: cross-module chains (e2e, real Postgres)', () =
 
       // Every movement written by a DOCUMENT flow — a sale, a return, a
       // purchase receipt, a transfer — names the document that caused it.
-      // Movements written by the generic stock primitives take their
-      // provenance from the caller instead, and carry a reason rather than
-      // a document id: an OPENING_BALANCE is the declared starting point
+      // Phase 22 (P21-2) turned that from a habit of the callers into a
+      // rule of the engine: a PURCHASE, SALE, SALES_RETURN or
+      // PURCHASE_RETURN movement CANNOT be written without one, so the
+      // assertion below is now exhaustive over those types rather than
+      // over whatever happened to carry a reference.
+      //
+      // The adjustment family is deliberately exempt and still carries a
+      // reason instead: an OPENING_BALANCE is the declared starting point
       // of the ledger, not the consequence of a transaction, and there is
       // no document for it to name.
+      const DOCUMENT_TYPES = ['PURCHASE', 'SALE', 'SALES_RETURN', 'PURCHASE_RETURN'];
+      const mustNameADocument = movements.filter((m) => DOCUMENT_TYPES.includes(m.movementType));
+      expect(mustNameADocument.length).toBeGreaterThan(0);
+      for (const movement of mustNameADocument) {
+        expect({ type: movement.movementType, hasType: !!movement.referenceType, hasId: !!movement.referenceId }).toEqual({
+          type: movement.movementType,
+          hasType: true,
+          hasId: true,
+        });
+      }
+
       const documentDriven = movements.filter((m) => m.referenceType !== null);
       expect(documentDriven.length).toBeGreaterThan(0);
       for (const movement of documentDriven) {
@@ -953,29 +969,61 @@ describe('Phase 21 release gate: cross-module chains (e2e, real Postgres)', () =
       expect(reserved).toHaveLength(0);
     });
 
-    it('the generic stock primitives accept a movement with NO provenance at all', async () => {
-      // `POST /inventory/receipts` and its siblings take `movementType`,
-      // `referenceType`, `referenceId` and `reason` from the caller, all
-      // optional. A caller that supplies none writes a movement typed
-      // PURCHASE that names no purchase and states no reason — the balance
-      // is still correct and still equals the sum of its movements, but the
-      // row is untraceable to anything. Nothing in the product does this;
-      // the endpoint permits it. Pinned so the gap is visible rather than
-      // rediscovered.
+    /**
+     * CLOSED IN PHASE 22 (P21-2). This gate used to pin the OPPOSITE
+     * assertion: that `POST /inventory/receipts` and its siblings would
+     * happily write a movement typed PURCHASE naming no purchase, leaving
+     * a row whose balance was correct but which was traceable to nothing.
+     * That gap is now shut — a PURCHASE, SALE, SALES_RETURN or
+     * PURCHASE_RETURN movement must name the document it came from, at
+     * the schema layer AND inside the engine that writes the row.
+     *
+     * The assertion is inverted rather than deleted, so the history of
+     * the gap survives in the file that reported it, and a regression
+     * that reopened it would fail HERE, in the release gate, and not only
+     * in the dedicated provenance spec.
+     */
+    it('CLOSED: the generic stock primitives now REFUSE a movement with no provenance', async () => {
       const { variantId } = await createSimpleProduct(app, biz.accessToken, biz.uomId, 'GATE-NO-PROVENANCE', {
         defaultCost: 1,
       });
-      await request(app.getHttpServer())
+
+      const refused = await request(app.getHttpServer())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
         .send({ warehouseId: biz.warehouseId, variantId, quantity: 1, unitCost: 1 })
+        .expect(422);
+      expect(refused.body.error.code).toBe('VALIDATION_FAILED');
+
+      // Refused means NOTHING was written — not a movement, not a balance.
+      expect(await admin.stockMovement.count({ where: { variantId } })).toBe(0);
+
+      // Half a reference is still no reference.
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/receipts')
+        .set('Authorization', auth())
+        .send({ referenceType: 'PurchaseReceipt', warehouseId: biz.warehouseId, variantId, quantity: 1, unitCost: 1 })
+        .expect(422);
+      expect(await admin.stockMovement.count({ where: { variantId } })).toBe(0);
+
+      // With provenance it goes through, and the row names its origin.
+      await request(app.getHttpServer())
+        .post('/api/v1/inventory/receipts')
+        .set('Authorization', auth())
+        .send({
+          referenceType: 'PurchaseReceipt',
+          referenceId: 'gate-receipt',
+          warehouseId: biz.warehouseId,
+          variantId,
+          quantity: 1,
+          unitCost: 1,
+        })
         .expect(201);
 
       const movement = await admin.stockMovement.findFirstOrThrow({ where: { variantId } });
       expect(movement.movementType).toBe('PURCHASE');
-      expect(movement.referenceType).toBeNull();
-      expect(movement.referenceId).toBeNull();
-      expect(movement.reason).toBeNull();
+      expect(movement.referenceType).toBe('PurchaseReceipt');
+      expect(movement.referenceId).toBe('gate-receipt');
     });
 
     it('there is no purchase-total preview endpoint, so no pre-write figure can be reconciled', async () => {

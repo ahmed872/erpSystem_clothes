@@ -8,6 +8,23 @@
     "rootDir": "./src",
     "baseUrl": "./",
     "incremental": true,
+    // Phase 22 — MUST live inside `outDir`.
+    //
+    // `nest build` runs with `deleteOutDir: true`: it removes `dist/` and
+    // then compiles. TypeScript's default build-info path is next to the
+    // tsconfig, i.e. OUTSIDE the directory that just got deleted - so
+    // after any prior `tsc` run (the `typecheck` script uses this very
+    // config with `--noEmit`, and still writes build-info), the compiler
+    // read a build-info saying "everything is up to date", emitted
+    // NOTHING, and exited 0. The result was a silent, successful-looking
+    // build with an empty `dist/`, and `npm start` dying on
+    // `Cannot find module 'dist/main'`. A CI pipeline that typechecks
+    // before it builds - the normal order - shipped nothing.
+    //
+    // Keeping the build-info under `outDir` ties its lifetime to the
+    // output it describes: deleting one deletes the other, so "up to
+    // date" can never outlive the files it is a claim about.
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo",
     "skipLibCheck": true,
     "strict": true,
     "strictNullChecks": true,

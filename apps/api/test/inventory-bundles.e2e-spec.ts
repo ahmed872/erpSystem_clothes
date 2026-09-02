@@ -55,7 +55,7 @@ describe('Inventory: bundle consumption (e2e, real Postgres)', () => {
     const sale = await request(app.getHttpServer())
       .post('/api/v1/inventory/consumptions')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId: bundleVariantId, quantity: 3 })
+      .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId: bundleVariantId, quantity: 3 })
       .expect(201);
     expect(sale.body.data.componentsConsumed).toHaveLength(1);
     expect(sale.body.data.componentsConsumed[0]).toMatchObject({ variantId: chargerVariantId, quantityConsumed: '3' });
@@ -105,7 +105,7 @@ describe('Inventory: bundle consumption (e2e, real Postgres)', () => {
     await request(app.getHttpServer())
       .post('/api/v1/inventory/consumptions')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId: bundleVariantId, quantity: 4 })
+      .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId: bundleVariantId, quantity: 4 })
       .expect(201);
 
     const phoneBalance = await admin.stockBalance.findFirstOrThrow({ where: { businessId: biz.businessId, variantId: phoneVariantId } });
@@ -148,7 +148,7 @@ describe('Inventory: bundle consumption (e2e, real Postgres)', () => {
     const res = await request(app.getHttpServer())
       .post('/api/v1/inventory/consumptions')
       .set('Authorization', auth())
-      .send({ warehouseId: biz.warehouseId, variantId: bundleVariantId, quantity: 5 })
+      .send({ referenceType: 'Sale', referenceId: 'fixture-sale', warehouseId: biz.warehouseId, variantId: bundleVariantId, quantity: 5 })
       .expect(409);
     expect(res.body.error.code).toBe('INSUFFICIENT_STOCK');
 

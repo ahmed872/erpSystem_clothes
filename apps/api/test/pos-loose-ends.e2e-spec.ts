@@ -296,7 +296,7 @@ describe('POS loose ends: D1/D3/D4/D5 (e2e, real Postgres)', () => {
       await request(server())
         .post('/api/v1/inventory/receipts')
         .set('Authorization', auth())
-        .send({ warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: [soldSerial, unsoldSerial] })
+        .send({ referenceType: 'PurchaseReceipt', referenceId: 'fixture-receipt', warehouseId: biz.warehouseId, variantId, quantity: 2, unitCost: 100, serials: [soldSerial, unsoldSerial] })
         .expect(201);
       const sale = await request(server())
         .post('/api/v1/sales')

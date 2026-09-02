@@ -6,6 +6,7 @@ import { AuditService } from '../../../audit/audit.service';
 import { ConflictDomainError, NotFoundDomainError, ValidationFailedError } from '../../../../common/errors/domain-error';
 import { RequestUser } from '../../../../common/decorators/current-user.decorator';
 import { lockPurchase } from '../../domain/lock-purchase';
+import { DOCUMENT_LINE_ORDER } from '../../domain/document-line-order';
 
 /**
  * Only a DRAFT purchase may be edited - once APPROVED, the business has
@@ -27,7 +28,10 @@ export class UpdatePurchaseUseCase {
   async execute(actor: RequestUser, purchaseId: string, input: UpdatePurchaseInput) {
     return this.prisma.withTenant(actor.tenantId, async (tx) => {
       await lockPurchase(tx, actor.tenantId, purchaseId);
-      const before = await tx.purchase.findFirst({ where: { id: purchaseId, businessId: actor.tenantId }, include: { items: true } });
+      const before = await tx.purchase.findFirst({
+        where: { id: purchaseId, businessId: actor.tenantId },
+        include: { items: { orderBy: DOCUMENT_LINE_ORDER } },
+      });
       if (!before) throw new NotFoundDomainError('Purchase', purchaseId);
       if (before.status !== 'DRAFT') {
         throw new ConflictDomainError(`Only a DRAFT purchase can be edited (current status: ${before.status})`);
@@ -92,7 +96,7 @@ export class UpdatePurchaseUseCase {
           discountAmount,
           totalAmount,
         },
-        include: { items: true },
+        include: { items: { orderBy: DOCUMENT_LINE_ORDER } },
       });
 
       await this.audit.record(tx, {
