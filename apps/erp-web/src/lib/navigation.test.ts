@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ERP_NAV, landingRoute, visibleNav } from './navigation';
 import type { NavItem } from './navigation';
-import { ROLE_TEMPLATE_PERMISSIONS } from '@retail/shared-types';
+import { PERMISSION_CODES, ROLE_TEMPLATE_PERMISSIONS } from '@retail/shared-types';
 
 /**
  * Phase 13 (ERP foundation).
@@ -33,8 +33,28 @@ const INVENTORY = [...ROLE_TEMPLATE_PERMISSIONS.INVENTORY_MANAGER];
 describe('ERP_NAV', () => {
   it('names no role anywhere — authorization is by grant, never by job title', () => {
     const serialized = JSON.stringify(ERP_NAV);
-    for (const role of ['BUSINESS_OWNER', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_MANAGER', 'CASHIER', 'role', 'Role']) {
+    for (const role of Object.keys(ROLE_TEMPLATE_PERMISSIONS)) {
       expect(serialized).not.toContain(role);
+    }
+  });
+
+  /**
+   * Phase 20 replaced a substring check for the words "role"/"Role" with
+   * the assertion it was standing in for. That check could not survive an
+   * administration surface — `roles.view` is a permission CODE and
+   * `/admin/roles` is a route — and passing it would have meant either
+   * dropping the roles screen or naming it something it is not. What
+   * actually matters is checked directly instead, and more strictly than
+   * before: every code the map gates on is a real code in the live
+   * catalogue, so nothing here can be a role name, a job title, or a
+   * typo that silently hides a destination from everyone.
+   */
+  it('gates only on codes that exist in the live permission catalogue', () => {
+    const catalogue = new Set<string>(PERMISSION_CODES);
+    for (const item of ERP_NAV) {
+      for (const code of [...item.requires, ...(item.requiresAny ?? [])]) {
+        expect(catalogue.has(code)).toBe(true);
+      }
     }
   });
 
@@ -74,6 +94,12 @@ describe('visibleNav', () => {
       '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
+      '/admin/users',
+      '/admin/roles',
+      '/admin/organisation',
+      '/admin/business',
+      '/admin/tax',
+      '/admin/audit-log',
     ]);
   });
 
@@ -96,7 +122,17 @@ describe('visibleNav', () => {
       '/customers',
       '/warranty-claims',
       '/shifts',
+      // Phase 20. A cashier holds `branches.view` and nothing else
+      // administrative, so the organisation entry appears and its
+      // warehouses TAB does not — the same requiresAny shape reference
+      // data uses. No users, roles, business, tax or audit surface.
+      '/admin/organisation',
     ]);
+    expect(CASHIER).not.toContain('users.view');
+    expect(CASHIER).not.toContain('roles.view');
+    expect(CASHIER).not.toContain('audit.view');
+    expect(CASHIER).not.toContain('business.view');
+    expect(CASHIER).not.toContain('tax.view');
     expect(CASHIER).not.toContain('inventory.adjust');
     // A till has no purchasing surface whatever.
     expect(CASHIER).not.toContain('purchases.view');
@@ -142,7 +178,18 @@ describe('visibleNav', () => {
       '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
+      // Phase 20. A branch manager administers PEOPLE but not the
+      // permission model: they hold `users.view` and no `roles.view`, so
+      // the roles entry is absent while the users entry is present.
+      '/admin/users',
+      '/admin/organisation',
+      '/admin/business',
+      '/admin/tax',
+      '/admin/audit-log',
     ]);
+    expect(BRANCH_MANAGER).toContain('users.view');
+    expect(BRANCH_MANAGER).not.toContain('roles.view');
+    expect(BRANCH_MANAGER).not.toContain('roles.edit');
     // The reason the dashboard renders different tiles for this role: the
     // server deletes the cost and profit keys from their response.
     expect(BRANCH_MANAGER).not.toContain('products.view_cost');
@@ -182,7 +229,17 @@ describe('visibleNav', () => {
       '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
+      // Phase 20. An accountant reads the organisation, the business
+      // profile, the tax settings and the trail — and administers
+      // neither users nor roles.
+      '/admin/organisation',
+      '/admin/business',
+      '/admin/tax',
+      '/admin/audit-log',
     ]);
+    expect(ACCOUNTANT).not.toContain('users.view');
+    expect(ACCOUNTANT).not.toContain('roles.view');
+    expect(ACCOUNTANT).toContain('audit.view');
   });
 
   it('finally gives an INVENTORY_MANAGER a back office — Phase 13 gave them none', () => {
@@ -197,7 +254,20 @@ describe('visibleNav', () => {
       '/purchases',
       '/suppliers',
       '/setup',
+      // Phase 20. Stock lives in warehouses, so they read the
+      // organisation; they hold `tax.view` (a product carries a tax) but
+      // no `tax.manage`, and the tax settings screen renders read-only
+      // for them. No users, roles, business profile or audit trail.
+      '/admin/organisation',
+      '/admin/tax',
     ]);
+    expect(INVENTORY).toContain('warehouses.view');
+    expect(INVENTORY).toContain('tax.view');
+    expect(INVENTORY).not.toContain('tax.manage');
+    expect(INVENTORY).not.toContain('users.view');
+    expect(INVENTORY).not.toContain('roles.view');
+    expect(INVENTORY).not.toContain('business.view');
+    expect(INVENTORY).not.toContain('audit.view');
     expect(INVENTORY).toContain('products.create');
     expect(INVENTORY).toContain('products.change_cost');
     // ...but NOT the shelf price, and NOT the ability to reprice the shop.
@@ -254,9 +324,47 @@ describe('visibleNav', () => {
     // `requiresAny`. Reference data fronts five separately-granted things;
     // requiring all of them would hide the tax screen from the ACCOUNTANT,
     // who holds `tax.manage` and none of the other four.
-    for (const grant of ['categories.view', 'brands.view', 'attributes.view', 'uoms.view', 'tax.view']) {
+    for (const grant of ['categories.view', 'brands.view', 'attributes.view', 'uoms.view']) {
       expect(visibleNav([grant]).map((i) => i.to)).toEqual(['/setup']);
     }
+    // `tax.view` reaches the setup screen AND, since Phase 20, the tax
+    // settings screen: the rate table and the business's pricing mode are
+    // two different things behind the same read grant.
+    expect(visibleNav(['tax.view']).map((i) => i.to)).toEqual(['/setup', '/admin/tax']);
+  });
+
+  /**
+   * Phase 20 — administration, as data.
+   *
+   * Each entry appears for exactly the grant its route and its endpoints
+   * demand, and organisation appears on EITHER of the two grants behind
+   * it with each tab re-checking its own.
+   */
+  it('shows each administration entry for exactly its own grant', () => {
+    expect(visibleNav(['users.view']).map((i) => i.to)).toEqual(['/admin/users']);
+    expect(visibleNav(['roles.view']).map((i) => i.to)).toEqual(['/admin/roles']);
+    expect(visibleNav(['business.view']).map((i) => i.to)).toEqual(['/admin/business']);
+    expect(visibleNav(['audit.view']).map((i) => i.to)).toEqual(['/admin/audit-log']);
+  });
+
+  it('shows the organisation entry on EITHER branches or warehouses', () => {
+    expect(visibleNav(['branches.view']).map((i) => i.to)).toEqual(['/admin/organisation']);
+    expect(visibleNav(['warehouses.view']).map((i) => i.to)).toEqual(['/admin/organisation']);
+    expect(visibleNav(['branches.view', 'warehouses.view']).map((i) => i.to)).toEqual(['/admin/organisation']);
+  });
+
+  it('hides every administration entry from an account holding none of their grants', () => {
+    expect(visibleNav(['products.view']).map((i) => i.to)).toEqual(['/catalogue']);
+  });
+
+  it('does not let an EDIT grant alone reveal a screen — the READ grant is what shows it', () => {
+    // `roles.edit` without `roles.view` is a set nobody is seeded with,
+    // but a tenant can build it. The entry stays hidden, and the backend
+    // refuses the list call regardless.
+    expect(visibleNav(['roles.edit']).map((i) => i.to)).toEqual([]);
+    expect(visibleNav(['users.edit']).map((i) => i.to)).toEqual([]);
+    expect(visibleNav(['business.edit']).map((i) => i.to)).toEqual([]);
+    expect(visibleNav(['tax.manage']).map((i) => i.to)).toEqual([]);
   });
 
   it('hides the setup entry when NONE of the five is held', () => {

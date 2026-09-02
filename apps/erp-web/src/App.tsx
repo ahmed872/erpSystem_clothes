@@ -33,6 +33,12 @@ import { FinancialReportsPage } from './pages/FinancialReportsPage';
 import { ReconciliationPage } from './pages/ReconciliationPage';
 import { WarrantyClaimsPage } from './pages/WarrantyClaimsPage';
 import { ShiftsPage } from './pages/ShiftsPage';
+import { UsersPage } from './pages/UsersPage';
+import { RolesPage } from './pages/RolesPage';
+import { OrganisationPage } from './pages/OrganisationPage';
+import { BusinessSettingsPage } from './pages/BusinessSettingsPage';
+import { TaxSettingsPage } from './pages/TaxSettingsPage';
+import { AuditLogPage } from './pages/AuditLogPage';
 import { NoAccessPage } from './pages/NoAccessPage';
 
 /** On a fresh load with a persisted session, re-read the caller's effective
@@ -201,6 +207,32 @@ function GuardedRoutes() {
       </Route>
       <Route element={<RequirePermission codes={['shifts.view']} fallback={fallback} />}>
         <Route path="/shifts" element={<ShiftsPage />} />
+      </Route>
+      {/* Phase 20 — administration. Each route is guarded on the SAME code
+          its nav entry and its endpoints ask for, and the backend guards
+          every call behind it again. There is deliberately NO
+          `/admin/users/:id`: the contract has no user-detail endpoint, so
+          a detail route would be a screen with nothing to load.
+          Organisation fronts two separate grants and admits a caller
+          holding EITHER, with each tab re-checking its own — the same
+          shape reference data and reconciliation already use. */}
+      <Route element={<RequirePermission codes={['users.view']} fallback={fallback} />}>
+        <Route path="/admin/users" element={<UsersPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['roles.view']} fallback={fallback} />}>
+        <Route path="/admin/roles" element={<RolesPage />} />
+      </Route>
+      <Route element={<RequireAnyPermission codes={['branches.view', 'warehouses.view']} fallback={fallback} />}>
+        <Route path="/admin/organisation" element={<OrganisationPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['business.view']} fallback={fallback} />}>
+        <Route path="/admin/business" element={<BusinessSettingsPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['tax.view']} fallback={fallback} />}>
+        <Route path="/admin/tax" element={<TaxSettingsPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['audit.view']} fallback={fallback} />}>
+        <Route path="/admin/audit-log" element={<AuditLogPage />} />
       </Route>
       <Route path="/no-access" element={<NoAccessPage />} />
       <Route path="/" element={<LandingRedirect />} />

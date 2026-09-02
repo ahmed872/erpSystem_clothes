@@ -86,6 +86,31 @@ export const ERP_NAV: NavItem[] = [
   },
   { to: '/warranty-claims', labelKey: 'nav.warrantyClaims', requires: ['warranty.view'] },
   { to: '/shifts', labelKey: 'nav.shifts', requires: ['shifts.view'] },
+  /* Phase 20 — administration. Each entry asks for the SAME grant its
+     route and its endpoints ask for, and the backend refuses every call
+     behind it regardless. Two of them front more than one thing:
+
+       - Organisation is branches AND warehouses, which are separate
+         grants a role may hold either of, so it appears for either and
+         each TAB re-checks its own.
+       - Tax settings reads `GET /settings/tax` under `tax.view` and
+         writes it under `tax.manage`; the READ is what decides whether
+         the destination is worth showing.
+
+     Business settings is `business.view` and NOT `settings.view`: the
+     generic key/value store has no screen, deliberately (see
+     `BusinessSettingsPage`). */
+  { to: '/admin/users', labelKey: 'nav.users', requires: ['users.view'] },
+  { to: '/admin/roles', labelKey: 'nav.roles', requires: ['roles.view'] },
+  {
+    to: '/admin/organisation',
+    labelKey: 'nav.organisation',
+    requires: [],
+    requiresAny: ['branches.view', 'warehouses.view'],
+  },
+  { to: '/admin/business', labelKey: 'nav.businessSettings', requires: ['business.view'] },
+  { to: '/admin/tax', labelKey: 'nav.taxSettings', requires: ['tax.view'] },
+  { to: '/admin/audit-log', labelKey: 'nav.auditLog', requires: ['audit.view'] },
 ];
 
 /** The entries this caller may see. */

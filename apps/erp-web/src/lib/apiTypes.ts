@@ -380,7 +380,11 @@ export interface Warehouse {
   businessId: string;
   branchId: string;
   name: string;
-  code: string;
+  /** Phase 20: corrected against the live model. `GET /warehouses` returns
+   *  `isDefault` and there is no `code` column on `warehouses` at all —
+   *  the field declared here previously never arrived, and nothing in the
+   *  app had read it. */
+  isDefault: boolean;
   isActive: boolean;
 }
 
@@ -1307,4 +1311,164 @@ export interface ReconciliationResult {
   };
   data: Record<string, unknown>[];
   pagination: Pagination;
+}
+
+// ==================================================== Administration =====
+/**
+ * Phase 20 — ADMINISTRATION.
+ *
+ * Traced to the live contracts exactly as everything above it is:
+ * `/users`, `/roles`, `/permissions`, `/branches`, `/warehouses`,
+ * `/business`, `/settings/tax` and `/audit-logs`. Nothing speculative is
+ * declared — there is no user-detail response shape here because the
+ * backend has no user-detail endpoint, and no settings-blob shape because
+ * this app never edits the generic key/value store.
+ *
+ * `passwordHash` appears nowhere in this file and cannot: the server
+ * selects through `USER_SAFE_SELECT`, so it never reaches the wire.
+ */
+
+export type UserStatus = 'ACTIVE' | 'SUSPENDED';
+
+/** A user as `GET /users` returns them — roles and branches denormalised
+ *  to `{ id, name }` pairs by the server, not joined in the browser. */
+export interface AdminUser {
+  id: string;
+  businessId: string;
+  name: string;
+  email: string;
+  status: UserStatus;
+  lastLoginAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  userRoles: { role: { id: string; name: string } }[];
+  userBranches: { branch: { id: string; name: string } }[];
+}
+
+/** The shape `POST /users`, `PATCH /users/:id` and `DELETE /users/:id`
+ *  return: the safe user projection WITHOUT the role/branch joins the list
+ *  adds. Typed separately rather than pretending it carries them. */
+export interface AdminUserSummary {
+  id: string;
+  businessId: string;
+  name: string;
+  email: string;
+  status: UserStatus;
+  lastLoginAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** `POST /users/:id/password` — the count of live sessions the reset
+ *  killed. Every device that user was signed in on is signed out. */
+export interface PasswordResetResult {
+  revokedSessions: number;
+}
+
+/** A role with its permission grants, as `/roles` returns it. `isSystem`
+ *  marks a seeded template: still permission-editable, never renameable
+ *  (Decision B rules 2 and 4). */
+export interface Role {
+  id: string;
+  businessId: string;
+  name: string;
+  isSystem: boolean;
+  createdAt: string;
+  updatedAt: string;
+  rolePermissions: { permission: { id: string; code: string; description: string } }[];
+}
+
+/** An entry in the GLOBAL permission catalogue (`GET /permissions`, gated
+ *  on `permissions.view`). Not tenant-scoped — the codes are the
+ *  product's, the grants are the tenant's. */
+export interface PermissionCatalogEntry {
+  id: string;
+  code: PermissionCode;
+  description: string;
+}
+
+export interface Branch {
+  id: string;
+  businessId: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** `GET /business` — the shop's own identity, as printed on a receipt.
+ *  Every profile field is nullable free text: the product validates none
+ *  of them against any national invoicing regime because it has not been
+ *  told which one applies. */
+export interface BusinessProfile {
+  id: string;
+  name: string;
+  slug: string;
+  currency: string;
+  timezone: string;
+  status: string;
+  legalName: string | null;
+  taxNumber: string | null;
+  registrationNumber: string | null;
+  phone: string | null;
+  email: string | null;
+  addressLine: string | null;
+  city: string | null;
+  country: string | null;
+  logoUrl: string | null;
+  receiptHeader: string | null;
+  receiptFooter: string | null;
+}
+
+export type TaxPricingMode = 'EXCLUSIVE' | 'INCLUSIVE';
+
+/** `GET /settings/tax`. Two fields, and deliberately only two: the backend
+ *  remains sole authority for every computed tax amount. */
+export interface TaxSettings {
+  taxPricingMode: TaxPricingMode;
+  defaultTaxId: string | null;
+}
+
+export type AuditAction = 'CREATE' | 'UPDATE' | 'DELETE' | 'LOGIN' | 'LOGIN_FAILED' | 'LOGOUT' | 'PERMISSION_DENIED';
+
+/**
+ * A row of the append-only trail. `before`/`after` are free-form JSON
+ * snapshots written by whichever module recorded the row, so they are
+ * `unknown` here rather than a shape this app would have to invent.
+ */
+export interface AuditLogRow {
+  id: string;
+  businessId: string | null;
+  userId: string | null;
+  action: AuditAction;
+  entityType: string;
+  entityId: string | null;
+  before: unknown;
+  after: unknown;
+  reason: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  requestId: string | null;
+  createdAt: string;
+}
+
+/** `GET /audit-logs` pages with `{ total, page, limit }` — no
+ *  `totalPages`, unlike `Pagination` elsewhere. Typed as it arrives. */
+export interface AuditLogListResult {
+  data: AuditLogRow[];
+  meta: { total: number; page: number; limit: number };
+}
+
+export interface AuditLogFilters {
+  userId?: string;
+  action?: AuditAction;
+  entityType?: string;
+  entityId?: string;
+  requestId?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  limit?: number;
 }

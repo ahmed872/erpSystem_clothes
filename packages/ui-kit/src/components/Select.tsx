@@ -4,10 +4,15 @@ import clsx from 'clsx';
 export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
   label?: string;
   error?: string;
+  /** Phase 20: a line of explanation under the control, for a choice whose
+   *  consequence is not obvious from its label — inclusive vs exclusive tax
+   *  pricing being the case that asked for it. Mirrors `Input`'s `hint`,
+   *  including its precedence: an error replaces it rather than stacking. */
+  hint?: string;
 }
 
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select(
-  { label, error, className, id, children, ...rest },
+  { label, error, hint, className, id, children, ...rest },
   ref,
 ) {
   const selectId = id ?? rest.name;
@@ -26,7 +31,11 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select
       >
         {children}
       </select>
-      {error && <span className="text-xs text-danger-600">{error}</span>}
+      {error ? (
+        <span className="text-xs text-danger-600">{error}</span>
+      ) : hint ? (
+        <span className="text-xs text-neutral-500">{hint}</span>
+      ) : null}
     </label>
   );
 });
