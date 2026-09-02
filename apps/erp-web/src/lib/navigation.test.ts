@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ERP_NAV, landingRoute, visibleNav } from './navigation';
 import type { NavItem } from './navigation';
-import { ROLE_TEMPLATE_PERMISSIONS } from '@retail/shared-types';
+import { PERMISSION_CODES, ROLE_TEMPLATE_PERMISSIONS } from '@retail/shared-types';
 
 /**
  * Phase 13 (ERP foundation).
@@ -33,8 +33,24 @@ const INVENTORY = [...ROLE_TEMPLATE_PERMISSIONS.INVENTORY_MANAGER];
 describe('ERP_NAV', () => {
   it('names no role anywhere — authorization is by grant, never by job title', () => {
     const serialized = JSON.stringify(ERP_NAV);
-    for (const role of ['BUSINESS_OWNER', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_MANAGER', 'CASHIER', 'role', 'Role']) {
+    for (const role of ['BUSINESS_OWNER', 'BRANCH_MANAGER', 'ACCOUNTANT', 'INVENTORY_MANAGER', 'CASHIER', 'SALES_EMPLOYEE']) {
       expect(serialized).not.toContain(role);
+    }
+  });
+
+  it('gates on REAL permission codes only — the strongest form of the rule above', () => {
+    // Phase 20 replaced a blunt "the word `role` appears nowhere" check
+    // with this one. That check was a proxy for the real rule and it
+    // stopped working the moment a screen was legitimately CALLED Roles:
+    // `nav.adminRoles` is a screen name, not a job title. What actually
+    // matters is that every code an entry gates on is a grant the backend
+    // knows about — a typo or an invented name would hide a destination
+    // from everybody, silently and forever.
+    const known = new Set<string>(PERMISSION_CODES);
+    for (const item of ERP_NAV) {
+      for (const code of [...item.requires, ...(item.requiresAny ?? [])]) {
+        expect(known.has(code)).toBe(true);
+      }
     }
   });
 
@@ -74,6 +90,11 @@ describe('visibleNav', () => {
       '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
+      '/admin/users',
+      '/admin/roles',
+      '/admin/organisation',
+      '/admin/business',
+      '/admin/audit',
     ]);
   });
 
@@ -96,6 +117,7 @@ describe('visibleNav', () => {
       '/customers',
       '/warranty-claims',
       '/shifts',
+      '/admin/organisation',
     ]);
     expect(CASHIER).not.toContain('inventory.adjust');
     // A till has no purchasing surface whatever.
@@ -142,6 +164,10 @@ describe('visibleNav', () => {
       '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
+      '/admin/users',
+      '/admin/organisation',
+      '/admin/business',
+      '/admin/audit',
     ]);
     // The reason the dashboard renders different tiles for this role: the
     // server deletes the cost and profit keys from their response.
@@ -182,6 +208,9 @@ describe('visibleNav', () => {
       '/reports/reconciliation',
       '/warranty-claims',
       '/shifts',
+      '/admin/organisation',
+      '/admin/business',
+      '/admin/audit',
     ]);
   });
 
@@ -197,6 +226,7 @@ describe('visibleNav', () => {
       '/purchases',
       '/suppliers',
       '/setup',
+      '/admin/organisation',
     ]);
     expect(INVENTORY).toContain('products.create');
     expect(INVENTORY).toContain('products.change_cost');
@@ -264,6 +294,14 @@ describe('visibleNav', () => {
     expect(visibleNav(['inventory.view']).map((i) => i.to)).toEqual(['/inventory', '/inventory/transfers']);
     expect(visibleNav(['sales.view']).map((i) => i.to)).toEqual(['/sales']);
     expect(visibleNav(['customers.view']).map((i) => i.to)).toEqual(['/customers']);
+    // Phase 20. Each administration grant reaches exactly its own
+    // screen, and the organisation entry appears on either of its two.
+    expect(visibleNav(['users.view']).map((i) => i.to)).toEqual(['/admin/users']);
+    expect(visibleNav(['roles.view']).map((i) => i.to)).toEqual(['/admin/roles']);
+    expect(visibleNav(['business.view']).map((i) => i.to)).toEqual(['/admin/business']);
+    expect(visibleNav(['audit.view']).map((i) => i.to)).toEqual(['/admin/audit']);
+    expect(visibleNav(['branches.view']).map((i) => i.to)).toEqual(['/admin/organisation']);
+    expect(visibleNav(['warehouses.view']).map((i) => i.to)).toEqual(['/admin/organisation']);
     // Phase 19. Each report grant reaches exactly its own screens, and
     // the reconciliation entry appears on either of the two.
     expect(visibleNav(['reports.sales.view']).map((i) => i.to)).toEqual(['/reports/sales', '/reports/purchasing']);

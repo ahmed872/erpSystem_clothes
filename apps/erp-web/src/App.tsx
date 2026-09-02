@@ -33,6 +33,11 @@ import { FinancialReportsPage } from './pages/FinancialReportsPage';
 import { ReconciliationPage } from './pages/ReconciliationPage';
 import { WarrantyClaimsPage } from './pages/WarrantyClaimsPage';
 import { ShiftsPage } from './pages/ShiftsPage';
+import { AdminUsersPage } from './pages/AdminUsersPage';
+import { AdminRolesPage } from './pages/AdminRolesPage';
+import { AdminOrganisationPage } from './pages/AdminOrganisationPage';
+import { AdminBusinessPage } from './pages/AdminBusinessPage';
+import { AdminAuditPage } from './pages/AdminAuditPage';
 import { NoAccessPage } from './pages/NoAccessPage';
 
 /** On a fresh load with a persisted session, re-read the caller's effective
@@ -201,6 +206,27 @@ function GuardedRoutes() {
       </Route>
       <Route element={<RequirePermission codes={['shifts.view']} fallback={fallback} />}>
         <Route path="/shifts" element={<ShiftsPage />} />
+      </Route>
+      {/* Phase 20. Administration, each route on the grant its own
+          endpoints demand and every one re-checked by the backend. There
+          is deliberately NO `/admin/users/:id` (no such endpoint exists),
+          NO `/admin/permissions` (the catalog is a picker inside roles)
+          and NO generic settings editor (the key/value store has no
+          catalog of valid keys). */}
+      <Route element={<RequirePermission codes={['users.view']} fallback={fallback} />}>
+        <Route path="/admin/users" element={<AdminUsersPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['roles.view']} fallback={fallback} />}>
+        <Route path="/admin/roles" element={<AdminRolesPage />} />
+      </Route>
+      <Route element={<RequireAnyPermission codes={['branches.view', 'warehouses.view']} fallback={fallback} />}>
+        <Route path="/admin/organisation" element={<AdminOrganisationPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['business.view']} fallback={fallback} />}>
+        <Route path="/admin/business" element={<AdminBusinessPage />} />
+      </Route>
+      <Route element={<RequirePermission codes={['audit.view']} fallback={fallback} />}>
+        <Route path="/admin/audit" element={<AdminAuditPage />} />
       </Route>
       <Route path="/no-access" element={<NoAccessPage />} />
       <Route path="/" element={<LandingRedirect />} />

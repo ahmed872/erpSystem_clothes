@@ -1308,3 +1308,202 @@ export interface ReconciliationResult {
   data: Record<string, unknown>[];
   pagination: Pagination;
 }
+
+// ====================================================================
+// Phase 20 — ADMINISTRATION.
+//
+// Every shape below is the LIVE one, read off the running backend. Four
+// absences are load-bearing and are recorded here so no screen invents
+// them:
+//
+//   - `GET /users` takes NO search, filter or pagination parameters, and
+//     there is NO `GET /users/:id`. The list IS the detail.
+//   - There is NO DELETE route for a branch or a warehouse. Deactivation
+//     is `PATCH { isActive: false }`.
+//   - `roleIds` and `branchIds` are REPLACEMENT arrays, not deltas.
+//   - A user response NEVER carries a password hash, a token or any other
+//     credential: `USER_SAFE_SELECT` on the server never selects one.
+// ====================================================================
+
+export type UserStatus = 'ACTIVE' | 'SUSPENDED';
+
+/** `GET /users` row — the only user shape the contract offers. */
+export interface AdminUser {
+  id: string;
+  businessId: string;
+  name: string;
+  email: string;
+  status: UserStatus;
+  lastLoginAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  userRoles: { role: { id: string; name: string } }[];
+  userBranches: { branch: { id: string; name: string } }[];
+}
+
+export interface CreateUserInput {
+  name: string;
+  email: string;
+  password: string;
+  /** At least one is required by the schema. */
+  roleIds: string[];
+  branchIds?: string[];
+}
+
+export interface UpdateUserInput {
+  name?: string;
+  /** REPLACES the user's roles entirely. */
+  roleIds?: string[];
+  /** REPLACES the user's branch assignments entirely. */
+  branchIds?: string[];
+  status?: UserStatus;
+}
+
+export interface AdminRole {
+  id: string;
+  businessId: string;
+  name: string;
+  /** A seeded template. Its NAME is fixed; its permission set is not. */
+  isSystem: boolean;
+  createdAt: string;
+  updatedAt: string;
+  rolePermissions: { permission: { id: string; code: string; description: string | null } }[];
+}
+
+export interface RoleInput {
+  name?: string;
+  /** REPLACES the role's permissions entirely; at least one required. */
+  permissionCodes?: string[];
+}
+
+/** `GET /permissions` — the canonical catalog. GLOBAL, not tenant-scoped,
+ *  and read-only: no create/update/delete route exists anywhere. */
+export interface PermissionCatalogEntry {
+  id: string;
+  code: string;
+  description: string | null;
+}
+
+export interface AdminBranch {
+  id: string;
+  businessId: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BranchInput {
+  name?: string;
+  address?: string;
+  phone?: string;
+  isActive?: boolean;
+}
+
+export interface AdminWarehouse {
+  id: string;
+  businessId: string;
+  branchId: string;
+  name: string;
+  /** Unique PER BRANCH: setting one clears the previous default of that
+   *  same branch, server-side. Two branches may each have their own. */
+  isDefault: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateWarehouseInput {
+  branchId: string;
+  name: string;
+  isDefault?: boolean;
+}
+
+export interface UpdateWarehouseInput {
+  name?: string;
+  isDefault?: boolean;
+  isActive?: boolean;
+}
+
+/** `GET /business`. `slug`, `status` and the timestamps are read-only —
+ *  `updateBusinessSchema` does not accept them. */
+export interface BusinessProfile {
+  id: string;
+  name: string;
+  slug: string;
+  status: string;
+  currency: string;
+  timezone: string;
+  legalName: string | null;
+  taxNumber: string | null;
+  registrationNumber: string | null;
+  phone: string | null;
+  email: string | null;
+  addressLine: string | null;
+  city: string | null;
+  country: string | null;
+  logoUrl: string | null;
+  receiptHeader: string | null;
+  receiptFooter: string | null;
+  taxPricingMode: string;
+  defaultTaxId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The 14 fields `PATCH /business` actually accepts. */
+export interface BusinessInput {
+  name?: string;
+  currency?: string;
+  timezone?: string;
+  legalName?: string;
+  taxNumber?: string;
+  registrationNumber?: string;
+  phone?: string;
+  email?: string;
+  addressLine?: string;
+  city?: string;
+  country?: string;
+  logoUrl?: string;
+  receiptHeader?: string;
+  receiptFooter?: string;
+}
+
+export type AuditAction = 'CREATE' | 'UPDATE' | 'DELETE' | 'LOGIN' | 'LOGIN_FAILED' | 'LOGOUT' | 'PERMISSION_DENIED';
+
+export interface AuditLogRow {
+  id: string;
+  businessId: string;
+  userId: string | null;
+  action: AuditAction;
+  entityType: string;
+  entityId: string | null;
+  before: unknown;
+  after: unknown;
+  reason: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  requestId: string | null;
+  createdAt: string;
+}
+
+/** `GET /audit-logs`. Note `meta`, not `pagination` — this endpoint
+ *  predates the pagination envelope the rest of the API settled on. */
+export interface AuditLogResult {
+  data: AuditLogRow[];
+  meta: { total: number; page: number; limit: number };
+}
+
+export interface AuditFilters {
+  userId?: string;
+  action?: AuditAction;
+  entityType?: string;
+  entityId?: string;
+  requestId?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  limit?: number;
+}

@@ -86,6 +86,21 @@ export const ERP_NAV: NavItem[] = [
   },
   { to: '/warranty-claims', labelKey: 'nav.warrantyClaims', requires: ['warranty.view'] },
   { to: '/shifts', labelKey: 'nav.shifts', requires: ['shifts.view'] },
+  /* Phase 20 — administration, last in the order because it is where a
+     back office goes least often and where a mistake costs most. Each
+     entry asks for exactly the grant its own endpoints demand; the
+     organisation screen fronts branches and warehouses behind two
+     grants, so it appears on either and each TAB re-checks its own. */
+  { to: '/admin/users', labelKey: 'nav.adminUsers', requires: ['users.view'] },
+  { to: '/admin/roles', labelKey: 'nav.adminRoles', requires: ['roles.view'] },
+  {
+    to: '/admin/organisation',
+    labelKey: 'nav.adminOrganisation',
+    requires: [],
+    requiresAny: ['branches.view', 'warehouses.view'],
+  },
+  { to: '/admin/business', labelKey: 'nav.adminBusiness', requires: ['business.view'] },
+  { to: '/admin/audit', labelKey: 'nav.adminAudit', requires: ['audit.view'] },
 ];
 
 /** The entries this caller may see. */
